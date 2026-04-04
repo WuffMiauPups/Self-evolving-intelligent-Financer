@@ -1,0 +1,7 @@
+runtime:
+  symbols:
+    - AAPL
+    - MSFT
+    - NVDA
+    - SPY
+

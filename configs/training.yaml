@@ -1,0 +1,27 @@
+training:
+  epochs: 3
+  batch_size: 64
+  use_amp: false
+  class_weight_mode: balanced
+  class_weight_cap: 3.0
+  use_weighted_sampler: true
+  weighted_sampler_mode: inverse_frequency
+  classification_loss: focal
+  focal_gamma: 1.5
+  label_smoothing: 0.02
+  report_logit_stats: true
+  report_prediction_distribution: true
+  report_per_class_metrics: true
+  inspect_target_boundaries: true
+  loss_weights:
+    classification: 1.0
+    regression: 0.25
+    latent: 0.05
+  collapse_warning_thresholds:
+    long_prediction_floor: 0.08
+    minority_recall_floor: 0.15
+
+data:
+  symbols:
+    - AAPL
+    - MSFT

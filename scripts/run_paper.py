@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.core.config import load_config
+from src.execution.trade_engine import run_trade_loop
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run the paper trading loop")
+    parser.add_argument("--checkpoint", default=None, help="Optional checkpoint to load for the neural policy")
+    parser.add_argument(
+        "--use-memory",
+        action="store_true",
+        help="Enable associative market memory decision support during the runtime loop.",
+    )
+    parser.add_argument(
+        "--confirm-live",
+        action="store_true",
+        help="Second explicit confirmation required before live mode can start.",
+    )
+    parser.add_argument(
+        "--config",
+        action="append",
+        default=["configs/default.yaml", "configs/paper_trade.yaml"],
+        help="Config file(s), later files override earlier files.",
+    )
+    args = parser.parse_args()
+    config = load_config(*args.config)
+    if args.checkpoint:
+        config.model.checkpoint_path = args.checkpoint
+    if args.use_memory:
+        config.memory.enabled = True
+    run_trade_loop(config, confirm_live=args.confirm_live)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

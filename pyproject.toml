@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seif-trading-brain"
+version = "0.1.0"
+description = "Research-first, brain-inspired trading framework for Alpaca with PyTorch-first numerics."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "OpenAI Codex" }]
+dependencies = [
+  "alpaca-py>=0.42.0",
+  "pydantic>=2.7.0",
+  "pyyaml>=6.0.1",
+  "python-dotenv>=1.0.1",
+  "structlog>=24.1.0",
+  "torch>=2.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+]
+
+[project.scripts]
+seif-brain = "src.main:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+

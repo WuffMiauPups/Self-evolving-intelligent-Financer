@@ -1,0 +1,15 @@
+broker:
+  paper: true
+  live_enabled: false
+  confirm_live: false
+
+runtime:
+  max_runtime_steps: 25
+  decision_interval_sec: 1.0
+
+risk:
+  kill_switch: false
+  stale_data_sec: 180
+  max_spread_bps: 50.0
+  min_trade_confidence: 0.20
+  min_trade_fraction: 0.005
