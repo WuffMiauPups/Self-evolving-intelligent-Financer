@@ -1,8 +1,16 @@
+"""Training target generation from outcome summaries.
+
+Supports the state + future-path training design:
+- direction classification (short/flat/long) from a primary horizon
+- path label classification (breakout_up/down, mean_reversion_up/down, chop)
+- future-return regression targets (per-horizon returns)
+- risk/path regression targets (MFE, MAE, volatility, drawdown, stability)
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from src.memory.outcomes import OutcomeSummary
+from src.memory.schemas import OutcomeSummary
 
 
 PATH_LABEL_VOCABULARY: tuple[str, ...] = (
@@ -34,9 +42,25 @@ def build_training_targets(
     *,
     label_epsilon: float,
     regression_targets: list[str],
+    primary_horizon: int | None = None,
+    enable_future_return_targets: bool = False,
+    enable_risk_path_targets: bool = False,
 ) -> TrainingTargets:
-    primary_horizon = max(outcome.future_returns)
-    primary_return = float(outcome.future_returns[primary_horizon])
+    """Build training targets from an outcome summary.
+
+    Args:
+        outcome: Realized future outcome for a decision point.
+        label_epsilon: Threshold for short/flat/long direction label.
+        regression_targets: Explicit list of regression target names to include.
+        primary_horizon: Primary direction horizon. If None, uses max horizon.
+        enable_future_return_targets: If True, add per-horizon return regression targets.
+        enable_risk_path_targets: If True, add MFE/MAE/volatility/drawdown regression targets.
+    """
+    if primary_horizon is not None and primary_horizon in outcome.future_returns:
+        effective_horizon = primary_horizon
+    else:
+        effective_horizon = max(outcome.future_returns)
+    primary_return = float(outcome.future_returns[effective_horizon])
     if primary_return > label_epsilon:
         direction_label = 2
         direction_name = "long"
@@ -51,7 +75,22 @@ def build_training_targets(
     if path_name not in PATH_LABEL_VOCABULARY:
         path_name = "chop"
     path_label = PATH_LABEL_VOCABULARY.index(path_name)
+
+    # Build the full regression target payload
     regression_payload = _build_regression_targets(outcome)
+
+    # Add per-horizon return targets
+    if enable_future_return_targets:
+        for horizon, ret in outcome.future_returns.items():
+            regression_payload[f"return_h{horizon}"] = float(ret)
+
+    # Add risk/path targets
+    if enable_risk_path_targets:
+        regression_payload["mfe"] = float(outcome.max_favorable_excursion)
+        regression_payload["mae"] = float(outcome.max_adverse_excursion)
+        regression_payload["volatility"] = float(outcome.realized_volatility)
+        regression_payload["path_drawdown"] = float(outcome.drawdown)
+
     return TrainingTargets(
         direction_label=direction_label,
         direction_name=direction_name,
@@ -60,7 +99,11 @@ def build_training_targets(
         primary_return=primary_return,
         regression_targets={
             name: float(regression_payload[name])
-            for name in regression_targets
+            for name in set(regression_targets) | set(
+                k for k in regression_payload
+                if (enable_future_return_targets and k.startswith("return_h"))
+                or (enable_risk_path_targets and k in ("mfe", "mae", "volatility", "path_drawdown"))
+            )
             if name in regression_payload
         },
         future_returns={int(horizon): float(value) for horizon, value in outcome.future_returns.items()},

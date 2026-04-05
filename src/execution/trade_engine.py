@@ -136,6 +136,7 @@ def _empty_memory_bank(
         latent_dim=latent_dim,
         similarity_metric=config.memory.similarity_metric,
         max_items=config.memory.max_items,
+        require_encoder_match=config.memory.require_encoder_match,
         meta={"source": "empty_runtime_memory"},
     )
 
@@ -343,6 +344,24 @@ async def _run_async_trade_loop(config: AppConfig, *, confirm_live: bool = False
         feature_dim=artifacts.feature_contract.feature_dim,
         regime_dim=artifacts.feature_contract.regime_dim,
     )
+    # --- Frozen-brain enforcement ---
+    if not config.runtime.allow_online_model_updates:
+        artifacts.model.eval()
+        for param in artifacts.model.parameters():
+            param.requires_grad = False
+        logger.info(
+            "frozen_brain_policy",
+            allow_online_model_updates=False,
+            allow_online_memory_updates=config.runtime.allow_online_memory_updates,
+            status="model_weights_frozen",
+        )
+    else:
+        logger.info(
+            "frozen_brain_policy",
+            allow_online_model_updates=True,
+            allow_online_memory_updates=config.runtime.allow_online_memory_updates,
+            status="model_weights_mutable_WARNING",
+        )
     base_policy = BrainPolicy(
         model=artifacts.model,
         device=device_ctx.device,
@@ -369,17 +388,35 @@ async def _run_async_trade_loop(config: AppConfig, *, confirm_live: bool = False
             latent_dim=sample_encoded.latent.shape[0],
             logger=logger,
         )
+        # Enforce frozen-brain policy on memory updates
+        effective_memory_config = config.memory
+        if not config.runtime.allow_online_memory_updates:
+            effective_memory_config = config.memory.model_copy(
+                update={"runtime_update_mode": "disabled"}
+            )
+            logger.info(
+                "memory_updates_disabled",
+                reason="allow_online_memory_updates=false",
+                original_mode=config.memory.runtime_update_mode,
+            )
+        memory_updater = AssociativeMemoryUpdater(memory_bank, effective_memory_config)
+        # Restore pending observations from disk if configured
+        if effective_memory_config.persist_pending_observations:
+            restored = memory_updater.load_pending(effective_memory_config.pending_store_path)
+            if restored > 0:
+                logger.info("pending_observations_loaded", count=restored, path=effective_memory_config.pending_store_path)
         policy = MemoryAwarePolicy(
             base_policy=base_policy,
             encoder=encoder,
             retriever=AssociativeRetriever(memory_bank, config.memory),
-            updater=AssociativeMemoryUpdater(memory_bank, config.memory),
+            updater=memory_updater,
             require_strong_match_for_trade=config.memory.require_strong_match_for_memory_support,
         )
         logger.info(
             "memory_runtime_ready",
             enabled=True,
-            runtime_update_mode=config.memory.runtime_update_mode,
+            runtime_update_mode=effective_memory_config.runtime_update_mode,
+            allow_online_memory_updates=config.runtime.allow_online_memory_updates,
             require_strong_match_for_trade=config.memory.require_strong_match_for_trade,
             **memory_bank.summary(),
         )
@@ -477,6 +514,13 @@ async def _run_async_trade_loop(config: AppConfig, *, confirm_live: bool = False
                         )
                         if memory_bank is not None:
                             save_memory_bank(config.memory.persist_path, memory_bank)
+                    # Persist pending observations for restart safety
+                    if (
+                        hasattr(policy, "updater")
+                        and policy.updater is not None
+                        and config.memory.persist_pending_observations
+                    ):
+                        policy.updater.save_pending(config.memory.pending_store_path)
 
                 bar = latest_bars[symbol]
                 guard_result = session_guard.evaluate(

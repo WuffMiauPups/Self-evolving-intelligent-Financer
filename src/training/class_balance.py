@@ -30,6 +30,11 @@ class TargetDiagnostics:
     near_flat_rate: float = 0.0
     near_boundary_count: int = 0
     near_boundary_rate: float = 0.0
+    # State + future-path diagnostics
+    path_label_counts: dict[str, int] = field(default_factory=dict)
+    path_label_ratios: dict[str, float] = field(default_factory=dict)
+    per_horizon_return_quantiles: dict[str, dict[str, float]] = field(default_factory=dict)
+    risk_path_summaries: dict[str, RegressionSummary] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -42,27 +47,44 @@ def compute_target_diagnostics(
     inspect_target_boundaries: bool = True,
 ) -> TargetDiagnostics:
     class_counter: Counter[str] = Counter()
+    path_label_counter: Counter[str] = Counter()
     symbol_counter: Counter[str] = Counter()
     flat_counter_by_symbol: Counter[str] = Counter()
     regression_values: dict[str, list[float]] = defaultdict(list)
     primary_returns: list[float] = []
+    per_horizon_returns: dict[int, list[float]] = defaultdict(list)
+    risk_values: dict[str, list[float]] = defaultdict(list)
     total_samples = len(samples)
     for sample in samples:
         direction_name = str(getattr(sample, "direction_name"))
         symbol = str(getattr(sample, "symbol"))
+        path_name = str(getattr(sample, "path_name", ""))
         class_counter[direction_name] += 1
         symbol_counter[symbol] += 1
+        if path_name:
+            path_label_counter[path_name] += 1
         if direction_name == "flat":
             flat_counter_by_symbol[symbol] += 1
         future_returns = dict(getattr(sample, "future_returns", {}))
         if future_returns:
             primary_returns.append(float(future_returns[max(future_returns)]))
-        for target_name, value in dict(getattr(sample, "regression_targets")).items():
+            for horizon, ret in future_returns.items():
+                per_horizon_returns[int(horizon)].append(float(ret))
+        reg_targets = dict(getattr(sample, "regression_targets", {}))
+        for target_name, value in reg_targets.items():
             regression_values[target_name].append(float(value))
+        # Collect risk/path stats from regression targets or direct attributes
+        for risk_name in ("mfe", "mae", "volatility", "path_drawdown"):
+            if risk_name in reg_targets:
+                risk_values[risk_name].append(float(reg_targets[risk_name]))
     flat_rate = class_counter["flat"] / total_samples if total_samples else 0.0
     class_ratios = {
         class_name: count / total_samples
         for class_name, count in class_counter.items()
+    }
+    path_label_ratios = {
+        name: count / total_samples
+        for name, count in path_label_counter.items()
     }
     flat_rate_by_symbol = {
         symbol: flat_counter_by_symbol[symbol] / count
@@ -70,6 +92,14 @@ def compute_target_diagnostics(
         if count > 0
     }
     primary_return_quantiles = _summarize_quantiles(primary_returns)
+    per_horizon_return_quantiles = {
+        f"h{horizon}": _summarize_quantiles(returns)
+        for horizon, returns in sorted(per_horizon_returns.items())
+    }
+    risk_path_summaries = {
+        name: _summarize(values)
+        for name, values in risk_values.items()
+    }
     near_flat_count = 0
     near_boundary_count = 0
     if inspect_target_boundaries and primary_returns and label_epsilon > 0.0:
@@ -106,6 +136,10 @@ def compute_target_diagnostics(
         near_flat_rate=near_flat_count / total_samples if total_samples else 0.0,
         near_boundary_count=near_boundary_count,
         near_boundary_rate=near_boundary_count / total_samples if total_samples else 0.0,
+        path_label_counts=dict(path_label_counter),
+        path_label_ratios=path_label_ratios,
+        per_horizon_return_quantiles=per_horizon_return_quantiles,
+        risk_path_summaries=risk_path_summaries,
         warnings=warnings,
     )
 

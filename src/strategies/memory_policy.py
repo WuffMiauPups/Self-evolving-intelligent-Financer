@@ -133,6 +133,9 @@ class MemoryAwarePolicy:
                 sum(1 for unit in self.retriever.bank.memory_units if unit.status == "candidate")
             ),
             "memory_esom_node_count": float(0 if self.retriever.bank.esom_map is None else len(self.retriever.bank.esom_map.nodes)),
+            "memory_quarantined_unit_count": float(
+                sum(1 for unit in self.retriever.bank.memory_units if unit.status == "quarantined")
+            ),
         }
         if self.updater is not None:
             summary = self.updater.summary()

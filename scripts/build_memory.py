@@ -179,6 +179,12 @@ def main() -> int:
             f" avg_calibrated_confidence={report.average_calibrated_confidence:.4f}"
             f" mature_candidate_ratio={float(health.get('mature_candidate_ratio', 0.0)):.4f}"
             f" topology_density={float(health.get('topology_density', 0.0)):.4f}"
+            f" avg_saturation={float(health.get('average_saturation', 0.0)):.4f}"
+            f" avg_plasticity={float(health.get('average_plasticity', 0.0)):.4f}"
+            f" conflict_heavy_units={int(health.get('conflict_heavy_unit_count', 0))}"
+            f" graph_edges={int(health.get('graph_edge_count', 0))}"
+            f" create_vs_update={float(health.get('create_vs_update_ratio', 0.0)):.4f}"
+            f" quarantined={int(health.get('quarantined_units', 0))}"
             f" symbol_profiles={int(summary.get('symbol_calibration_profile_count', 0))}"
             f" regime_profiles={int(summary.get('regime_calibration_profile_count', 0))}"
         )

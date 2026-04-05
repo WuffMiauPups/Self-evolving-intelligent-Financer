@@ -15,6 +15,10 @@ class BatchMetrics:
     classification_loss: float = 0.0
     regression_loss: float = 0.0
     latent_loss: float = 0.0
+    path_label_loss: float = 0.0
+    future_return_loss: float = 0.0
+    risk_path_loss: float = 0.0
+    path_label_accuracy: float = 0.0
     balanced_accuracy: float = 0.0
     macro_f1: float = 0.0
     weighted_f1: float = 0.0

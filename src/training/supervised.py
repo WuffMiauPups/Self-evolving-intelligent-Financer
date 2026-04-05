@@ -23,6 +23,7 @@ from src.models.state_encoder import ModelStateEncoder
 from src.training.checkpoints import save_checkpoint
 from src.training.data_module import TrainingDataBundle, build_real_data_training_bundle
 from src.training.metrics import build_collapse_warnings, compute_classification_report, compute_logit_diagnostics
+from src.training.run_summary import build_run_summary, save_run_summary
 from src.training.trainer import Trainer
 from src.utils.torch_utils import move_batch_to_device
 
@@ -156,6 +157,13 @@ def inspect_training_data(config: AppConfig) -> dict[str, object]:
             primary_return_quantiles=diagnostics.primary_return_quantiles,
             near_flat_rate=diagnostics.near_flat_rate,
             near_boundary_rate=diagnostics.near_boundary_rate,
+            path_label_counts=diagnostics.path_label_counts,
+            path_label_ratios=diagnostics.path_label_ratios,
+            per_horizon_return_quantiles=diagnostics.per_horizon_return_quantiles,
+            risk_path_summaries={
+                name: summary.__dict__
+                for name, summary in diagnostics.risk_path_summaries.items()
+            },
             regression_summaries={
                 name: summary.__dict__
                 for name, summary in diagnostics.regression_summaries.items()
@@ -169,7 +177,12 @@ def inspect_training_data(config: AppConfig) -> dict[str, object]:
     }
 
 
-def run_supervised_training(config: AppConfig, *, use_baseline: bool = False) -> dict[str, object]:
+def run_supervised_training(
+    config: AppConfig,
+    *,
+    use_baseline: bool = False,
+    run_id: str | None = None,
+) -> dict[str, object]:
     configure_logging(
         config.logging.level,
         config.logging.json_logs,
@@ -177,6 +190,9 @@ def run_supervised_training(config: AppConfig, *, use_baseline: bool = False) ->
         file_path=config.logging.file_path,
     )
     logger = get_logger("training")
+    if run_id is None:
+        run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    run_start = datetime.now(UTC)
     device_ctx = build_device_context(config.device.preferred, config.training.use_amp or config.device.use_amp)
     model, bundle, bars_by_symbol, data_meta = build_training_components(config, use_baseline=use_baseline)
     logger.info(
@@ -195,21 +211,31 @@ def run_supervised_training(config: AppConfig, *, use_baseline: bool = False) ->
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
     )
+    effective_multitask = config.training.multitask_enabled and not config.training.disable_regression
+    effective_contrastive = config.training.contrastive_enabled and not config.training.disable_latent
+    effective_loss_weights = dict(config.training.loss_weights)
+    if config.training.disable_regression:
+        effective_loss_weights["regression"] = 0.0
+    if config.training.disable_latent:
+        effective_loss_weights["latent"] = 0.0
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
         device=device_ctx.device,
         use_amp=device_ctx.use_amp,
         class_weights=bundle.class_weights if isinstance(bundle.class_weights, torch.Tensor) else None,
-        multitask_enabled=config.training.multitask_enabled,
-        contrastive_enabled=config.training.contrastive_enabled,
+        multitask_enabled=effective_multitask,
+        contrastive_enabled=effective_contrastive,
         classification_loss_mode=config.training.classification_loss,
         focal_gamma=config.training.focal_gamma,
         label_smoothing=config.training.label_smoothing,
-        loss_weights=config.training.loss_weights,
+        loss_weights=effective_loss_weights,
         collapse_warning_thresholds=config.training.collapse_warning_thresholds,
         report_prediction_distribution=config.training.report_prediction_distribution,
         report_per_class_metrics=config.training.report_per_class_metrics,
+        enable_path_label_head=config.training.enable_path_label_head,
+        enable_future_return_targets=config.training.enable_future_return_targets,
+        enable_risk_path_targets=config.training.enable_risk_path_targets,
     )
     for split_name, symbols in bundle.split_ranges.items():
         for symbol, split in symbols.items():
@@ -235,6 +261,13 @@ def run_supervised_training(config: AppConfig, *, use_baseline: bool = False) ->
                 primary_return_quantiles=diagnostics.primary_return_quantiles,
                 near_flat_rate=diagnostics.near_flat_rate,
                 near_boundary_rate=diagnostics.near_boundary_rate,
+                path_label_counts=diagnostics.path_label_counts,
+                path_label_ratios=diagnostics.path_label_ratios,
+                per_horizon_return_quantiles=diagnostics.per_horizon_return_quantiles,
+                risk_path_summaries={
+                    name: summary.__dict__
+                    for name, summary in diagnostics.risk_path_summaries.items()
+                },
                 regression_summaries={
                     name: summary.__dict__
                     for name, summary in diagnostics.regression_summaries.items()
@@ -336,6 +369,13 @@ def run_supervised_training(config: AppConfig, *, use_baseline: bool = False) ->
                         "near_flat_rate": diagnostics.near_flat_rate,
                         "near_boundary_count": diagnostics.near_boundary_count,
                         "near_boundary_rate": diagnostics.near_boundary_rate,
+                        "path_label_counts": diagnostics.path_label_counts,
+                        "path_label_ratios": diagnostics.path_label_ratios,
+                        "per_horizon_return_quantiles": diagnostics.per_horizon_return_quantiles,
+                        "risk_path_summaries": {
+                            name: summary.__dict__
+                            for name, summary in diagnostics.risk_path_summaries.items()
+                        },
                         "regression_summaries": {
                             name: summary.__dict__
                             for name, summary in diagnostics.regression_summaries.items()
@@ -344,10 +384,38 @@ def run_supervised_training(config: AppConfig, *, use_baseline: bool = False) ->
                     }
                     for split, diagnostics in bundle.diagnostics.items()
                 },
+                "state_path_design": {
+                    "primary_direction_horizon": config.training.effective_primary_horizon,
+                    "auxiliary_horizons": list(config.training.auxiliary_horizons),
+                    "all_horizons": config.training.all_horizons,
+                    "enable_path_label_head": config.training.enable_path_label_head,
+                    "enable_future_return_targets": config.training.enable_future_return_targets,
+                    "enable_risk_path_targets": config.training.enable_risk_path_targets,
+                    "path_label_rules": dict(config.training.path_label_rules),
+                    "loss_weights": dict(config.training.loss_weights),
+                },
                 "data_meta": data_meta,
             },
         ),
     )
+
+    # Save structured run summary
+    elapsed = (datetime.now(UTC) - run_start).total_seconds()
+    run_summary = build_run_summary(
+        run_id=run_id,
+        config=config,
+        data_meta=data_meta,
+        bundle_diagnostics=bundle.diagnostics,
+        train_metrics=history.train[-1] if history.train else None,
+        val_metrics=history.val[-1] if history.val else None,
+        test_metrics=test_metrics,
+        val_report=val_report,
+        test_report=test_report,
+        checkpoint_path=str(checkpoint_path),
+        elapsed_seconds=elapsed,
+    )
+    summary_path = save_run_summary(run_summary, runs_dir=config.training.runs_dir)
+    logger.info("run_summary_saved", path=str(summary_path), run_id=run_id)
 
     memory_path: str | None = None
     if config.training.save_memory_after_training:
@@ -402,6 +470,14 @@ def run_supervised_training(config: AppConfig, *, use_baseline: bool = False) ->
         test_accuracy=test_metrics.accuracy,
         test_macro_f1=test_report["macro_f1"],
         test_balanced_accuracy=test_report["balanced_accuracy"],
+        train_path_label_loss=history.train[-1].path_label_loss if history.train else 0.0,
+        train_path_label_accuracy=history.train[-1].path_label_accuracy if history.train else 0.0,
+        val_path_label_loss=history.val[-1].path_label_loss if history.val else 0.0,
+        val_path_label_accuracy=history.val[-1].path_label_accuracy if history.val else 0.0,
+        primary_direction_horizon=config.training.effective_primary_horizon,
+        enable_path_label_head=config.training.enable_path_label_head,
+        enable_future_return_targets=config.training.enable_future_return_targets,
+        enable_risk_path_targets=config.training.enable_risk_path_targets,
         class_weight_mode=config.training.class_weight_mode,
         weighted_sampler=config.training.use_weighted_sampler,
         classification_loss=config.training.classification_loss,
@@ -416,7 +492,51 @@ def run_supervised_training(config: AppConfig, *, use_baseline: bool = False) ->
         "memory_path": memory_path,
         "diagnostics": bundle.diagnostics,
         "evaluation_reports": {"val": val_report, "test": test_report},
+        "run_id": run_id,
+        "run_summary_path": str(summary_path),
     }
+
+
+def inspect_label_sensitivity(
+    config: AppConfig,
+    *,
+    epsilon_values: list[float] | None = None,
+    horizon_values: list[int] | None = None,
+) -> list[object]:
+    """Sweep epsilon/horizon values and report class balance profiles."""
+    from src.training.label_inspector import inspect_label_profiles, format_label_profiles
+
+    configure_logging(
+        config.logging.level,
+        config.logging.json_logs,
+        file_enabled=config.logging.file_enabled,
+        file_path=config.logging.file_path,
+    )
+    logger = get_logger("training")
+    _, bundle, _, data_meta = build_training_components(config, use_baseline=False)
+
+    # Collect future returns from all training samples
+    samples_with_returns: list[dict[str, object]] = []
+    for sample in bundle.samples_by_split.get("train", []):
+        fr = dict(getattr(sample, "future_returns", {}))
+        if fr:
+            samples_with_returns.append({"future_returns": {int(k): float(v) for k, v in fr.items()}})
+
+    if epsilon_values is None:
+        base = config.training.label_epsilon
+        epsilon_values = [base * 0.25, base * 0.5, base, base * 2.0, base * 4.0]
+    if horizon_values is None:
+        horizon_values = list(config.training.forward_horizons)
+
+    profiles = inspect_label_profiles(
+        samples_with_returns,
+        epsilon_values=epsilon_values,
+        horizons=horizon_values,
+    )
+
+    logger.info("label_sensitivity_report", sample_count=len(samples_with_returns))
+    print(format_label_profiles(profiles))
+    return profiles
 
 
 def evaluate_checkpoint(config: AppConfig, checkpoint_path: str) -> dict[str, object]:

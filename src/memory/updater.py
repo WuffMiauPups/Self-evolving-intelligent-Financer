@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
+
+import torch
 
 from src.core.config import MemoryConfig
 from src.data.schemas import MarketBar
@@ -11,6 +15,8 @@ from src.memory.memory_bank import MemoryBank
 from src.memory.outcomes import build_risk_summary, compute_outcome_summary
 from src.memory.schemas import MemoryItem, PendingMemoryState
 from src.models.state_encoder import EncodedState, ModelStateEncoder
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -108,6 +114,74 @@ class AssociativeMemoryUpdater:
             "last_refresh_report": dict(self.last_refresh_report),
         }
 
+    def save_pending(self, path: str | Path) -> int:
+        """Persist pending observations to disk for restart safety.
+
+        Returns the number of pending items saved.
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        all_pending: list[dict] = []
+        for symbol, items in self.pending_by_symbol.items():
+            for item in items:
+                all_pending.append({
+                    "symbol": item.symbol,
+                    "timestamp": item.timestamp,
+                    "feature_contract_id": item.feature_contract_id,
+                    "latent": item.latent.detach().cpu(),
+                    "regime_weights": None if item.regime_weights is None else item.regime_weights.detach().cpu(),
+                    "branch_confidences": dict(item.branch_confidences),
+                    "branch_norms": dict(item.branch_norms),
+                    "action_annotation": item.action_annotation,
+                    "encoder_fingerprint": item.encoder_fingerprint,
+                    "metadata": dict(item.metadata),
+                })
+        payload = {
+            "pending_items": all_pending,
+            "observed_count": self.observed_count,
+            "finalized_count": self.finalized_count,
+        }
+        torch.save(payload, path)
+        logger.info("pending_observations_saved path=%s count=%d", str(path), len(all_pending))
+        return len(all_pending)
+
+    def load_pending(self, path: str | Path) -> int:
+        """Restore pending observations from disk.
+
+        Returns the number of pending items restored.
+        """
+        path = Path(path)
+        if not path.exists():
+            return 0
+        try:
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+        except Exception as exc:
+            logger.warning("pending_observations_load_failed path=%s error=%s", str(path), str(exc))
+            return 0
+        restored = 0
+        for item_data in payload.get("pending_items", []):
+            pending = PendingMemoryState(
+                symbol=str(item_data["symbol"]),
+                timestamp=item_data["timestamp"],
+                feature_contract_id=str(item_data["feature_contract_id"]),
+                latent=item_data["latent"].detach().cpu(),
+                regime_weights=None if item_data["regime_weights"] is None else item_data["regime_weights"].detach().cpu(),
+                branch_confidences=dict(item_data["branch_confidences"]),
+                branch_norms=dict(item_data["branch_norms"]),
+                action_annotation=item_data.get("action_annotation"),
+                encoder_fingerprint=item_data.get("encoder_fingerprint"),
+                metadata=dict(item_data.get("metadata", {})),
+            )
+            # Avoid duplicates
+            existing = self.pending_by_symbol[pending.symbol]
+            if not any(p.timestamp == pending.timestamp for p in existing):
+                existing.append(pending)
+                restored += 1
+        self.observed_count += payload.get("observed_count", 0)
+        self.finalized_count += payload.get("finalized_count", 0)
+        logger.info("pending_observations_restored path=%s count=%d", str(path), restored)
+        return restored
+
 
 def build_memory_bank_from_bars(
     *,
@@ -130,6 +204,7 @@ def build_memory_bank_from_bars(
         latent_dim=sample_encoded.latent.shape[0],
         similarity_metric=memory_config.similarity_metric,
         max_items=memory_config.max_items,
+        require_encoder_match=memory_config.require_encoder_match,
         meta={"builder": "offline"},
     )
     for symbol, bars in bars_by_symbol.items():

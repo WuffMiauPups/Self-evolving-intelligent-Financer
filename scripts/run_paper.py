@@ -26,6 +26,17 @@ def main() -> int:
         help="Second explicit confirmation required before live mode can start.",
     )
     parser.add_argument(
+        "--memory-update-mode",
+        choices=["disabled", "pending_only", "append_when_ready"],
+        default=None,
+        help="Override memory runtime_update_mode (default: from config).",
+    )
+    parser.add_argument(
+        "--freeze-memory",
+        action="store_true",
+        help="Disable all online memory updates (read-only memory).",
+    )
+    parser.add_argument(
         "--config",
         action="append",
         default=["configs/default.yaml", "configs/paper_trade.yaml"],
@@ -37,6 +48,10 @@ def main() -> int:
         config.model.checkpoint_path = args.checkpoint
     if args.use_memory:
         config.memory.enabled = True
+    if args.freeze_memory:
+        config.runtime.allow_online_memory_updates = False
+    if args.memory_update_mode is not None:
+        config.memory.runtime_update_mode = args.memory_update_mode
     run_trade_loop(config, confirm_live=args.confirm_live)
     return 0
 

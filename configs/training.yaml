@@ -13,10 +13,21 @@ training:
   report_prediction_distribution: true
   report_per_class_metrics: true
   inspect_target_boundaries: true
+  # --- State + future-path training design ---
+  forward_horizons: [1, 5, 15]
+  primary_direction_horizon: 15
+  auxiliary_horizons: [30, 60]
+  enable_path_label_head: true
+  enable_future_return_targets: true
+  enable_risk_path_targets: true
+  # --- Loss weights (state + path structure) ---
   loss_weights:
     classification: 1.0
     regression: 0.25
     latent: 0.05
+    path_label: 0.30
+    future_return: 0.20
+    risk_path: 0.15
   collapse_warning_thresholds:
     long_prediction_floor: 0.08
     minority_recall_floor: 0.15

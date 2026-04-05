@@ -20,6 +20,7 @@ from src.memory.schemas import (
     RetrievedClusterMatch,
     RetrievedStateMatch,
     RetrievalCalibrationProfile,
+    UnitStatus,
 )
 from src.memory.similarity import pairwise_similarity
 
@@ -250,7 +251,9 @@ class MemoryBank:
         temperature: float,
     ) -> list[RetrievedClusterMatch]:
         if self.memory_units:
-            candidates = self.memory_units
+            candidates = [u for u in self.memory_units if u.status != UnitStatus.QUARANTINED.value]
+            if not candidates:
+                return []
             centroids = torch.stack([unit.prototype for unit in candidates], dim=0)
         elif self.prototypes:
             candidates = self.prototypes

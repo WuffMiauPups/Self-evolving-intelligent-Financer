@@ -56,6 +56,34 @@ class BrokerConfig(BaseModel):
         return self
 
 
+class PipelineConfig(BaseModel):
+    chunk_size: str = "monthly"
+    max_fetch_workers: int = 4
+    retry_count: int = 3
+    retry_backoff_sec: float = 1.0
+    validation_strictness: str = "warn"
+    precompute_features: bool = False
+    precompute_targets: bool = False
+    max_prep_workers: int = 4
+    manifest_path: str = "artifacts/historical/manifest.json"
+
+    @model_validator(mode="after")
+    def validate_pipeline_config(self) -> "PipelineConfig":
+        if self.chunk_size not in {"monthly", "quarterly", "yearly"}:
+            raise ConfigurationError("pipeline.chunk_size must be one of: monthly, quarterly, yearly")
+        if self.max_fetch_workers <= 0:
+            raise ConfigurationError("pipeline.max_fetch_workers must be positive")
+        if self.retry_count < 0:
+            raise ConfigurationError("pipeline.retry_count must be non-negative")
+        if self.retry_backoff_sec < 0.0:
+            raise ConfigurationError("pipeline.retry_backoff_sec must be non-negative")
+        if self.validation_strictness not in {"ignore", "warn", "error"}:
+            raise ConfigurationError("pipeline.validation_strictness must be one of: ignore, warn, error")
+        if self.max_prep_workers <= 0:
+            raise ConfigurationError("pipeline.max_prep_workers must be positive")
+        return self
+
+
 class DataConfig(BaseModel):
     symbols: list[str] = Field(default_factory=list)
     timeframe: str = "1Min"
@@ -65,6 +93,7 @@ class DataConfig(BaseModel):
     force_refresh: bool = False
     max_missing_gap_handling: str = "warn"
     timezone_normalization: str = "UTC"
+    pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
 
     @model_validator(mode="after")
     def validate_data_config(self) -> "DataConfig":
@@ -91,6 +120,9 @@ class RuntimeConfig(BaseModel):
     block_on_data_gap: bool = True
     block_on_symbol_ineligible: bool = False
     require_market_open: bool = True
+    # --- Frozen-brain runtime policy ---
+    allow_online_model_updates: bool = False  # model weights NEVER change at runtime
+    allow_online_memory_updates: bool = True  # memory bank can learn online
 
 
 class FeatureConfig(BaseModel):
@@ -166,6 +198,12 @@ class TrainingConfig(BaseModel):
     sequence_length: int = 64
     use_amp: bool = False
     forward_horizons: list[int] = Field(default_factory=lambda: [1, 5, 15])
+    # --- State + future-path target design ---
+    primary_direction_horizon: int | None = None  # defaults to max(forward_horizons) if None
+    auxiliary_horizons: list[int] = Field(default_factory=list)  # additional horizons for future-path targets
+    enable_path_label_head: bool = True  # train path-label classification (breakout/chop/etc.)
+    enable_future_return_targets: bool = True  # per-horizon return regression
+    enable_risk_path_targets: bool = True  # MFE/MAE/volatility/drawdown regression
     path_label_rules: dict[str, float] = Field(
         default_factory=lambda: {
             "breakout_return_threshold": 0.003,
@@ -194,6 +232,9 @@ class TrainingConfig(BaseModel):
             "classification": 1.0,
             "regression": 0.35,
             "latent": 0.10,
+            "path_label": 0.30,
+            "future_return": 0.20,
+            "risk_path": 0.15,
         }
     )
     collapse_warning_thresholds: dict[str, float] = Field(
@@ -205,8 +246,11 @@ class TrainingConfig(BaseModel):
     regression_targets: list[str] = Field(
         default_factory=lambda: ["primary_return", "drawdown", "stability"]
     )
+    disable_regression: bool = False
+    disable_latent: bool = False
     save_memory_after_training: bool = False
     memory_build_split: str = "train"
+    runs_dir: str = "runs"
 
     @model_validator(mode="after")
     def validate_training_config(self) -> "TrainingConfig":
@@ -233,10 +277,21 @@ class TrainingConfig(BaseModel):
             raise ConfigurationError("training.focal_gamma must be non-negative")
         if not 0.0 <= self.label_smoothing < 1.0:
             raise ConfigurationError("training.label_smoothing must be within [0, 1)")
-        required_loss_keys = {"classification", "regression", "latent"}
-        if set(self.loss_weights) != required_loss_keys:
+        # Allow both old-style {classification, regression, latent} and
+        # new-style {classification, regression, latent, path_label, future_return, risk_path}.
+        # Migrate old-style to new-style by adding defaults for missing keys.
+        _required_base = {"classification", "regression", "latent"}
+        _new_keys = {"path_label", "future_return", "risk_path"}
+        all_keys = set(self.loss_weights)
+        if all_keys == _required_base:
+            # Backwards-compat: old 3-key config → add new keys with defaults
+            self.loss_weights.setdefault("path_label", 0.30)
+            self.loss_weights.setdefault("future_return", 0.20)
+            self.loss_weights.setdefault("risk_path", 0.15)
+        elif all_keys != (_required_base | _new_keys):
             raise ConfigurationError(
-                "training.loss_weights must define exactly: classification, regression, latent"
+                "training.loss_weights must define: classification, regression, latent, "
+                "path_label, future_return, risk_path"
             )
         if any(value < 0.0 for value in self.loss_weights.values()):
             raise ConfigurationError("training.loss_weights values must be non-negative")
@@ -252,6 +307,19 @@ class TrainingConfig(BaseModel):
         if self.memory_build_split not in {"train", "val", "test", "all"}:
             raise ConfigurationError("training.memory_build_split must be one of: train, val, test, all")
         return self
+
+    @property
+    def effective_primary_horizon(self) -> int:
+        """Primary direction/path horizon: explicit setting or max(forward_horizons)."""
+        if self.primary_direction_horizon is not None:
+            return self.primary_direction_horizon
+        return max(self.forward_horizons)
+
+    @property
+    def all_horizons(self) -> list[int]:
+        """All unique horizons (forward + auxiliary), sorted."""
+        combined = set(self.forward_horizons) | set(self.auxiliary_horizons)
+        return sorted(combined)
 
 
 class ExecutionConfig(BaseModel):
@@ -326,6 +394,9 @@ class MemoryConfig(BaseModel):
     # --- GNG-inspired topology ---
     graph_growth_enabled: bool = False
     graph_max_edge_age: int = 100
+    # --- Pending observation persistence ---
+    persist_pending_observations: bool = True
+    pending_store_path: str = "artifacts/pending_observations.pt"
 
     @model_validator(mode="after")
     def validate_memory_config(self) -> "MemoryConfig":

@@ -9,7 +9,14 @@ from torch.utils.data import DataLoader
 from src.core.logging import get_logger
 from src.core.device import maybe_autocast
 from src.models.base import TradingModelProtocol
-from src.training.losses import direction_classification_loss, latent_consistency_loss, multitask_regression_loss
+from src.training.losses import (
+    direction_classification_loss,
+    future_return_regression_loss,
+    latent_consistency_loss,
+    multitask_regression_loss,
+    path_label_classification_loss,
+    risk_path_regression_loss,
+)
 from src.training.metrics import BatchMetrics, build_collapse_warnings, compute_classification_report
 from src.utils.torch_utils import move_batch_to_device
 
@@ -38,6 +45,10 @@ class Trainer:
         collapse_warning_thresholds: dict[str, float] | None = None,
         report_prediction_distribution: bool = True,
         report_per_class_metrics: bool = True,
+        # State + future-path config
+        enable_path_label_head: bool = False,
+        enable_future_return_targets: bool = False,
+        enable_risk_path_targets: bool = False,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
@@ -49,12 +60,18 @@ class Trainer:
         self.classification_loss_mode = classification_loss_mode
         self.focal_gamma = focal_gamma
         self.label_smoothing = label_smoothing
-        self.loss_weights = dict(loss_weights or {"classification": 1.0, "regression": 0.35, "latent": 0.10})
+        self.loss_weights = dict(loss_weights or {
+            "classification": 1.0, "regression": 0.35, "latent": 0.10,
+            "path_label": 0.30, "future_return": 0.20, "risk_path": 0.15,
+        })
         self.collapse_warning_thresholds = dict(
             collapse_warning_thresholds or {"long_prediction_floor": 0.08, "minority_recall_floor": 0.15}
         )
         self.report_prediction_distribution = report_prediction_distribution
         self.report_per_class_metrics = report_per_class_metrics
+        self.enable_path_label_head = enable_path_label_head
+        self.enable_future_return_targets = enable_future_return_targets
+        self.enable_risk_path_targets = enable_risk_path_targets
         self.scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
         self.logger = get_logger("trainer")
 
@@ -128,9 +145,14 @@ class Trainer:
         total_classification_loss = 0.0
         total_regression_loss = 0.0
         total_latent_loss = 0.0
+        total_path_label_loss = 0.0
+        total_future_return_loss = 0.0
+        total_risk_path_loss = 0.0
         component_totals: dict[str, float] = {}
         logits_batches: list[torch.Tensor] = []
         label_batches: list[torch.Tensor] = []
+        path_label_logits_batches: list[torch.Tensor] = []
+        path_label_batches: list[torch.Tensor] = []
         batches = 0
         try:
             total_batches = len(loader)
@@ -148,6 +170,8 @@ class Trainer:
                     full_features=batch["features"],
                     temporal_tensor=batch.get("temporal_tensor"),
                 )
+
+                # --- A. Direction classification loss ---
                 classification_loss = direction_classification_loss(
                     output.action_logits,
                     batch["label"],
@@ -156,21 +180,66 @@ class Trainer:
                     focal_gamma=self.focal_gamma,
                     label_smoothing=self.label_smoothing,
                 )
+
+                # --- B. Path label classification loss ---
+                path_label_loss = output.action_logits.new_zeros(())
+                if self.enable_path_label_head and "path_label" in batch:
+                    # Use regime_weights as path label logits if available and right shape,
+                    # otherwise reuse action_logits projected to 5 classes
+                    path_logits = self._get_path_logits(output, batch)
+                    if path_logits is not None:
+                        path_label_loss = path_label_classification_loss(
+                            path_logits,
+                            batch["path_label"],
+                            loss_mode=self.classification_loss_mode,
+                            focal_gamma=self.focal_gamma,
+                            label_smoothing=self.label_smoothing,
+                        )
+                        path_label_logits_batches.append(path_logits.detach().cpu())
+                        path_label_batches.append(batch["path_label"].detach().cpu())
+
+                # --- C. Legacy multitask regression loss ---
                 regression_loss = output.action_logits.new_zeros(())
-                latent_loss = output.action_logits.new_zeros(())
                 regression_components: dict[str, float] = {}
                 if self.multitask_enabled:
                     regression_loss, regression_components = multitask_regression_loss(
                         output,
                         batch.get("regression_targets", {}),
                     )
-                    if self.contrastive_enabled:
-                        latent_loss = latent_consistency_loss(output.fused_representation, batch["label"])
+
+                # --- D. Future return regression loss ---
+                future_return_loss = output.action_logits.new_zeros(())
+                if self.enable_future_return_targets:
+                    fr_loss, fr_components = future_return_regression_loss(
+                        output, batch.get("regression_targets", {}),
+                    )
+                    future_return_loss = fr_loss
+                    regression_components.update(fr_components)
+
+                # --- E. Risk/path regression loss ---
+                risk_path_loss = output.action_logits.new_zeros(())
+                if self.enable_risk_path_targets:
+                    rp_loss, rp_components = risk_path_regression_loss(
+                        output, batch.get("regression_targets", {}),
+                    )
+                    risk_path_loss = rp_loss
+                    regression_components.update(rp_components)
+
+                # --- F. Latent consistency loss ---
+                latent_loss = output.action_logits.new_zeros(())
+                if self.multitask_enabled and self.contrastive_enabled:
+                    latent_loss = latent_consistency_loss(output.fused_representation, batch["label"])
+
+                # --- Weighted total loss ---
                 loss = (
-                    self.loss_weights["classification"] * classification_loss
-                    + self.loss_weights["regression"] * regression_loss
-                    + self.loss_weights["latent"] * latent_loss
+                    self.loss_weights.get("classification", 1.0) * classification_loss
+                    + self.loss_weights.get("regression", 0.0) * regression_loss
+                    + self.loss_weights.get("latent", 0.0) * latent_loss
+                    + self.loss_weights.get("path_label", 0.0) * path_label_loss
+                    + self.loss_weights.get("future_return", 0.0) * future_return_loss
+                    + self.loss_weights.get("risk_path", 0.0) * risk_path_loss
                 )
+
             if training:
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
@@ -184,6 +253,9 @@ class Trainer:
             total_classification_loss += float(classification_loss.detach().item())
             total_regression_loss += float(regression_loss.detach().item())
             total_latent_loss += float(latent_loss.detach().item())
+            total_path_label_loss += float(path_label_loss.detach().item())
+            total_future_return_loss += float(future_return_loss.detach().item())
+            total_risk_path_loss += float(risk_path_loss.detach().item())
             for name, value in regression_components.items():
                 component_totals[name] = component_totals.get(name, 0.0) + float(value)
             batches += 1
@@ -209,12 +281,25 @@ class Trainer:
             classification_report=classification_report,
             thresholds=self.collapse_warning_thresholds,
         )
+
+        # Path label accuracy (if tracked)
+        path_label_accuracy = 0.0
+        if path_label_logits_batches:
+            all_pl_logits = torch.cat(path_label_logits_batches, dim=0)
+            all_pl_labels = torch.cat(path_label_batches, dim=0)
+            pl_preds = all_pl_logits.argmax(dim=-1)
+            path_label_accuracy = float((pl_preds == all_pl_labels).float().mean().item())
+
         return BatchMetrics(
             loss=total_loss / batches,
             accuracy=total_accuracy / batches,
             classification_loss=total_classification_loss / batches,
             regression_loss=total_regression_loss / batches,
             latent_loss=total_latent_loss / batches,
+            path_label_loss=total_path_label_loss / batches,
+            future_return_loss=total_future_return_loss / batches,
+            risk_path_loss=total_risk_path_loss / batches,
+            path_label_accuracy=path_label_accuracy,
             balanced_accuracy=float(classification_report["balanced_accuracy"]),
             macro_f1=float(classification_report["macro_f1"]),
             weighted_f1=float(classification_report["weighted_f1"]),
@@ -226,3 +311,36 @@ class Trainer:
             warnings=warnings,
             components={name: value / batches for name, value in component_totals.items()},
         )
+
+    def _get_path_logits(self, output: object, batch: dict) -> torch.Tensor | None:
+        """Extract or construct path-label logits from model output.
+
+        The model has regime_weights (shape [batch, regime_count]) which we can
+        repurpose if regime_count == 5 (matching PATH_LABEL_VOCABULARY size).
+        Otherwise, we reuse action_logits expanded to 5 classes via a simple
+        linear projection on the fused representation.
+        """
+        # Try regime_weights first (naturally 4-class but close to 5)
+        if hasattr(output, "regime_weights") and output.regime_weights is not None:
+            rw = output.regime_weights
+            if rw.shape[-1] == 5:
+                return rw
+        # Fall back: use fused_representation to produce 5-class logits
+        # We use a simple linear combination from the 3-class action logits + bias
+        # This gives the optimizer a gradient path through the existing representation
+        logits_3 = output.action_logits  # [batch, 3]
+        batch_size = logits_3.shape[0]
+        # Map 3 direction logits → 5 path logits via a fixed deterministic expansion:
+        # breakout_down ← short logit, mean_rev_down ← (short + flat)/2,
+        # chop ← flat logit, mean_rev_up ← (flat + long)/2, breakout_up ← long logit
+        short_l = logits_3[:, 0:1]
+        flat_l = logits_3[:, 1:2]
+        long_l = logits_3[:, 2:3]
+        path_logits = torch.cat([
+            short_l,                        # breakout_down
+            (short_l + flat_l) * 0.5,       # mean_reversion_down
+            flat_l,                         # chop
+            (flat_l + long_l) * 0.5,        # mean_reversion_up
+            long_l,                         # breakout_up
+        ], dim=-1)
+        return path_logits

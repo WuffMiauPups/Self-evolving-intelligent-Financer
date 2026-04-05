@@ -156,6 +156,7 @@ def main() -> int:
                 latent_dim=sample_encoded.latent.shape[0],
                 similarity_metric=config.memory.similarity_metric,
                 max_items=config.memory.max_items,
+                require_encoder_match=config.memory.require_encoder_match,
                 meta={"source": "backtest_runtime"},
             )
         brain_policy = MemoryAwarePolicy(
@@ -181,6 +182,7 @@ def main() -> int:
             f" avg_confidence={brain_report.metrics.get('memory_average_confidence', 0.0):.4f}"
             f" veto_rate={brain_report.metrics.get('memory_veto_rate', 0.0):.4f}"
             f" dampened_rate={brain_report.metrics.get('memory_dampened_rate', 0.0):.4f}"
+            f" quarantined={int(brain_report.metrics.get('memory_quarantined_unit_count', 0))}"
         )
     return 0
 

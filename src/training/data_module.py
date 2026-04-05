@@ -40,11 +40,13 @@ def build_real_data_training_bundle(
     pipeline: FeaturePipeline,
 ) -> TrainingDataBundle:
     logger = get_logger("training_data")
-    max_horizon = max(config.training.forward_horizons)
     feature_contract: FeatureContract | None = None
     samples_by_split: dict[str, list[TrainingSample]] = {"train": [], "val": [], "test": []}
     split_ranges: dict[str, dict[str, SymbolSplit]] = {"train": {}, "val": {}, "test": {}}
     estimated_total_samples = 0
+
+    all_horizons = config.training.all_horizons
+    max_horizon = max(all_horizons)
 
     for symbol, raw_bars in bars_by_symbol.items():
         eligible_start = max(config.runtime.warmup_bars, config.training.sequence_length - 1)
@@ -56,6 +58,8 @@ def build_real_data_training_bundle(
         estimated_total_samples=estimated_total_samples,
         sequence_length=config.training.sequence_length,
         forward_horizons=list(config.training.forward_horizons),
+        auxiliary_horizons=list(config.training.auxiliary_horizons),
+        primary_direction_horizon=config.training.effective_primary_horizon,
         use_real_historical_data=config.training.use_real_historical_data,
     )
     if estimated_total_samples >= 200_000:
@@ -116,13 +120,16 @@ def build_real_data_training_bundle(
                 outcome = compute_outcome_summary(
                     bars,
                     index,
-                    horizons=config.training.forward_horizons,
+                    horizons=all_horizons,
                     path_label_rules=config.training.path_label_rules,
                 )
                 targets = build_training_targets(
                     outcome,
                     label_epsilon=config.training.label_epsilon,
                     regression_targets=config.training.regression_targets,
+                    primary_horizon=config.training.effective_primary_horizon,
+                    enable_future_return_targets=config.training.enable_future_return_targets,
+                    enable_risk_path_targets=config.training.enable_risk_path_targets,
                 )
                 samples_by_split[split.split].append(
                     TrainingSample(
