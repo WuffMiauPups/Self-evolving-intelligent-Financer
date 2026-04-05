@@ -20,6 +20,7 @@ def build_run_summary(
     test_report: dict[str, Any],
     checkpoint_path: str,
     elapsed_seconds: float = 0.0,
+    effective_epochs: int | None = None,
 ) -> dict[str, Any]:
     """Build a machine-readable run summary dict."""
 
@@ -83,6 +84,9 @@ def build_run_summary(
 
     training_config = config.training if hasattr(config, "training") else None
     data_config = config.data if hasattr(config, "data") else None
+    fast_mode_config = getattr(training_config, "fast_mode", None)
+    _configured_epochs = int(getattr(training_config, "epochs", 0)) if training_config else 0
+    _effective_epochs = effective_epochs if effective_epochs is not None else _configured_epochs
 
     return {
         "run_id": run_id,
@@ -105,7 +109,8 @@ def build_run_summary(
             "multitask_enabled": bool(getattr(training_config, "multitask_enabled", True)) if training_config else True,
             "contrastive_enabled": bool(getattr(training_config, "contrastive_enabled", False)) if training_config else False,
             "batch_size": int(getattr(training_config, "batch_size", 0)) if training_config else 0,
-            "epochs": int(getattr(training_config, "epochs", 0)) if training_config else 0,
+            "epochs": _configured_epochs,
+            "effective_epochs": _effective_epochs,
             "learning_rate": float(getattr(training_config, "learning_rate", 0.0)) if training_config else 0.0,
             "sequence_length": int(getattr(training_config, "sequence_length", 0)) if training_config else 0,
             # State + future-path design
@@ -124,6 +129,23 @@ def build_run_summary(
         "test": _metrics_dict(test_metrics),
         "val_report": _report_summary(val_report),
         "test_report": _report_summary(test_report),
+        "fast_mode": {
+            "enabled": bool(getattr(fast_mode_config, "enabled", False)) if fast_mode_config else False,
+            "fast_months": getattr(fast_mode_config, "fast_months", None) if fast_mode_config else None,
+            "fast_start_date": getattr(fast_mode_config, "fast_start_date", None) if fast_mode_config else None,
+            "fast_end_date": getattr(fast_mode_config, "fast_end_date", None) if fast_mode_config else None,
+            "symbols": list(getattr(fast_mode_config, "symbols", [])) if fast_mode_config else [],
+            "max_train_samples": getattr(fast_mode_config, "max_train_samples", None) if fast_mode_config else None,
+            "max_val_samples": getattr(fast_mode_config, "max_val_samples", None) if fast_mode_config else None,
+            "max_test_samples": getattr(fast_mode_config, "max_test_samples", None) if fast_mode_config else None,
+            "max_epochs": getattr(fast_mode_config, "max_epochs", None) if fast_mode_config else None,
+            "effective_epochs": _effective_epochs,
+            "disable_path_label": bool(getattr(fast_mode_config, "disable_path_label", False)) if fast_mode_config else False,
+            "disable_future_return": bool(getattr(fast_mode_config, "disable_future_return", False)) if fast_mode_config else False,
+            "disable_risk_path": bool(getattr(fast_mode_config, "disable_risk_path", False)) if fast_mode_config else False,
+            "model_profile": str(getattr(fast_mode_config, "model_profile", "default")) if fast_mode_config else "default",
+            "sample_seed": int(getattr(fast_mode_config, "sample_seed", 42)) if fast_mode_config else 42,
+        },
     }
 
 

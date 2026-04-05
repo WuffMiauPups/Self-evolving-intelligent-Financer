@@ -49,11 +49,13 @@ def main() -> int:
             val_ba = summary.get("val_report", {}).get("balanced_accuracy", "n/a")
             eps = summary.get("config", {}).get("label_epsilon", "n/a")
             loss_type = summary.get("config", {}).get("classification_loss", "n/a")
+            is_fast = summary.get("fast_mode", {}).get("enabled", False)
+            fast_tag = "[FAST] " if is_fast else "       "
             val_f1_str = f"{val_f1:.4f}" if isinstance(val_f1, float) else str(val_f1)
             test_f1_str = f"{test_f1:.4f}" if isinstance(test_f1, float) else str(test_f1)
             val_ba_str = f"{val_ba:.4f}" if isinstance(val_ba, float) else str(val_ba)
             print(
-                f"  {rid:30s} {ts[:19]:>20s}  "
+                f"  {fast_tag}{rid:30s} {ts[:19]:>20s}  "
                 f"val_f1={val_f1_str}  test_f1={test_f1_str}  val_ba={val_ba_str}  "
                 f"eps={eps}  loss={loss_type}"
             )

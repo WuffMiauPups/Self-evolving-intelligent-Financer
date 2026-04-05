@@ -151,6 +151,25 @@ training:
     - stability
   save_memory_after_training: false
   memory_build_split: train
+  # --- Fast experiment mode (disabled by default) ---
+  # Enable with --fast CLI flag or by setting enabled: true here.
+  # Fast runs are explicitly marked in logs and run summaries.
+  # Do NOT promote a fast-mode checkpoint to production.
+  fast_mode:
+    enabled: false
+    sample_seed: 42
+    # fast_months: 6           # restrict to last N months of cached data
+    # fast_start_date: null    # explicit ISO date override, e.g. "2025-01-01"
+    # fast_end_date: null      # explicit ISO date override
+    # symbols: []              # symbol subset, e.g. [AAPL] — empty = all configured
+    # max_train_samples: null  # cap training samples (deterministic)
+    # max_val_samples: null    # cap val samples
+    # max_test_samples: null   # cap test samples
+    # max_epochs: null         # cap epochs (min of this and training.epochs)
+    # disable_path_label: false
+    # disable_future_return: false
+    # disable_risk_path: false
+    # model_profile: default   # "default" or "small" (reduced capacity)
 
 execution:
   max_submit_retries: 2

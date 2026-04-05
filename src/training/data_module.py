@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 
 import torch
@@ -155,6 +156,26 @@ def build_real_data_training_bundle(
             )
     if feature_contract is None:
         raise ValueError("No real-data training samples were generated")
+
+    # Fast-mode: deterministic sample caps per split
+    fast = config.training.fast_mode
+    if fast.enabled:
+        rng = random.Random(fast.sample_seed)
+        for split_name, cap in [
+            ("train", fast.max_train_samples),
+            ("val", fast.max_val_samples),
+            ("test", fast.max_test_samples),
+        ]:
+            original_count = len(samples_by_split[split_name])
+            if cap is not None and original_count > cap:
+                samples_by_split[split_name] = rng.sample(samples_by_split[split_name], cap)
+                logger.info(
+                    "fast_mode_sample_cap_applied",
+                    split=split_name,
+                    original_count=original_count,
+                    capped_count=cap,
+                    sample_seed=fast.sample_seed,
+                )
 
     diagnostics = {
         split_name: compute_target_diagnostics(

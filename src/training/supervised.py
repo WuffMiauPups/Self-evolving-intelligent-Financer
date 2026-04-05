@@ -44,6 +44,26 @@ def _build_training_client(config: AppConfig) -> tuple[object | None, bool]:
 
 def _resolve_bars_by_symbol(config: AppConfig) -> tuple[dict[str, list[MarketBar]], dict[str, object]]:
     logger = get_logger("training")
+    fast = config.training.fast_mode
+
+    # Fast-mode: determine effective symbol list
+    effective_symbols = list(config.data.symbols)
+    if fast.enabled and fast.symbols:
+        effective_symbols = [s for s in fast.symbols if s in set(config.data.symbols)]
+        skipped = [s for s in fast.symbols if s not in set(config.data.symbols)]
+        if skipped:
+            logger.warning(
+                "fast_mode_symbol_not_in_config",
+                skipped=skipped,
+                configured=list(config.data.symbols),
+                note="These fast_mode.symbols are not in data.symbols and will be ignored.",
+            )
+        if not effective_symbols:
+            raise RuntimeError(
+                f"fast_mode.symbols {list(fast.symbols)!r} has no overlap with "
+                f"configured data.symbols {list(config.data.symbols)!r}"
+            )
+
     if config.training.use_real_historical_data:
         client, using_mock = _build_training_client(config)
         start = parse_date_or_datetime(
@@ -51,6 +71,22 @@ def _resolve_bars_by_symbol(config: AppConfig) -> tuple[dict[str, list[MarketBar
             default=datetime.now(UTC) - timedelta(days=365 * 2),
         )
         end = parse_date_or_datetime(config.data.end_date, default=datetime.now(UTC))
+
+        # Fast-mode: override date range
+        if fast.enabled:
+            if fast.fast_months is not None:
+                start = datetime.now(UTC) - timedelta(days=30 * fast.fast_months)
+                logger.info(
+                    "fast_mode_date_range_override",
+                    fast_months=fast.fast_months,
+                    effective_start=start.isoformat(),
+                )
+            elif fast.fast_start_date is not None:
+                start = parse_date_or_datetime(fast.fast_start_date, default=start)
+                logger.info("fast_mode_date_range_override", fast_start_date=fast.fast_start_date)
+            if fast.fast_end_date is not None:
+                end = parse_date_or_datetime(fast.fast_end_date, default=end)
+
         service = HistoricalDataService(
             client=client,
             cache=HistoricalBarCache(config.data.cache_dir),
@@ -58,7 +94,7 @@ def _resolve_bars_by_symbol(config: AppConfig) -> tuple[dict[str, list[MarketBar
             max_missing_gap_handling=config.data.max_missing_gap_handling,
         )
         bars_by_symbol, reports = service.load_bars_for_symbols(
-            config.data.symbols,
+            effective_symbols,
             timeframe=config.data.timeframe,
             start=start,
             end=end,
@@ -88,7 +124,7 @@ def _resolve_bars_by_symbol(config: AppConfig) -> tuple[dict[str, list[MarketBar
             "timeframe": config.data.timeframe,
             "start_date": start.isoformat(),
             "end_date": end.isoformat(),
-            "symbols": list(config.data.symbols),
+            "symbols": effective_symbols,
         }
 
     synthetic_count = max(
@@ -97,19 +133,28 @@ def _resolve_bars_by_symbol(config: AppConfig) -> tuple[dict[str, list[MarketBar
     )
     bars_by_symbol = {
         symbol: generate_synthetic_bars(symbol, synthetic_count)
-        for symbol in config.data.symbols
+        for symbol in effective_symbols
     }
     logger.info(
         "synthetic_training_data",
-        symbols=list(config.data.symbols),
+        symbols=effective_symbols,
         bar_count=synthetic_count,
     )
     return bars_by_symbol, {
         "using_mock": True,
         "source": "synthetic",
         "timeframe": config.data.timeframe,
-        "symbols": list(config.data.symbols),
+        "symbols": effective_symbols,
     }
+
+
+_FAST_SMALL_MODEL_OVERRIDES = {
+    "cnn_channels": [8, 16],
+    "temporal_blocks": 2,
+    "branch_hidden_dim": 16,
+    "branch_output_dim": 12,
+    "soma_hidden_dim": 16,
+}
 
 
 def build_training_components(
@@ -117,6 +162,7 @@ def build_training_components(
     *,
     use_baseline: bool = False,
 ) -> tuple[torch.nn.Module, TrainingDataBundle, dict[str, list[MarketBar]], dict[str, object]]:
+    logger = get_logger("training")
     seed_everything(7)
     device_ctx = build_device_context(config.device.preferred, config.training.use_amp or config.device.use_amp)
     pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
@@ -126,9 +172,19 @@ def build_training_components(
         bars_by_symbol=bars_by_symbol,
         pipeline=pipeline,
     )
+    # Fast-mode: small model profile reduces capacity for rapid experiments
+    effective_model_config = config.model
+    fast = config.training.fast_mode
+    if fast.enabled and fast.model_profile == "small" and not use_baseline:
+        effective_model_config = config.model.model_copy(update=_FAST_SMALL_MODEL_OVERRIDES)
+        logger.info(
+            "fast_mode_small_model_profile",
+            overrides=_FAST_SMALL_MODEL_OVERRIDES,
+            note="Reduced model capacity for fast experiment. NOT for production.",
+        )
     model = build_model_from_contract(
         model_kind="baseline" if use_baseline else "brain",
-        model_config=config.model,
+        model_config=effective_model_config,
         feature_contract=bundle.feature_contract,
     )
     model = model.to(device_ctx.device)
@@ -195,6 +251,41 @@ def run_supervised_training(
     run_start = datetime.now(UTC)
     device_ctx = build_device_context(config.device.preferred, config.training.use_amp or config.device.use_amp)
     model, bundle, bars_by_symbol, data_meta = build_training_components(config, use_baseline=use_baseline)
+    # Fast-mode: log clear banner and compute effective settings
+    fast = config.training.fast_mode
+    if fast.enabled:
+        logger.warning(
+            "FAST_EXPERIMENT_MODE_ACTIVE",
+            note=(
+                "This is a FAST EXPERIMENT RUN. Results are approximate and intended for "
+                "research/comparison only. Do NOT promote this checkpoint to production."
+            ),
+            fast_months=fast.fast_months,
+            fast_start_date=fast.fast_start_date,
+            fast_end_date=fast.fast_end_date,
+            fast_symbols=list(fast.symbols) if fast.symbols else "(all configured symbols)",
+            max_train_samples=fast.max_train_samples,
+            max_val_samples=fast.max_val_samples,
+            max_test_samples=fast.max_test_samples,
+            max_epochs=fast.max_epochs,
+            disable_path_label=fast.disable_path_label,
+            disable_future_return=fast.disable_future_return,
+            disable_risk_path=fast.disable_risk_path,
+            model_profile=fast.model_profile,
+            sample_seed=fast.sample_seed,
+        )
+
+    # Effective epochs: respect fast_mode.max_epochs cap
+    effective_epochs = config.training.epochs
+    if fast.enabled and fast.max_epochs is not None:
+        effective_epochs = min(effective_epochs, fast.max_epochs)
+        if effective_epochs < config.training.epochs:
+            logger.info(
+                "fast_mode_epoch_cap_applied",
+                configured_epochs=config.training.epochs,
+                effective_epochs=effective_epochs,
+            )
+
     logger.info(
         "training_strategy",
         classification_loss=config.training.classification_loss,
@@ -205,6 +296,8 @@ def run_supervised_training(
         label_smoothing=config.training.label_smoothing,
         focal_gamma=config.training.focal_gamma,
         loss_weights=config.training.loss_weights,
+        fast_mode=fast.enabled,
+        effective_epochs=effective_epochs,
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -218,6 +311,20 @@ def run_supervised_training(
         effective_loss_weights["regression"] = 0.0
     if config.training.disable_latent:
         effective_loss_weights["latent"] = 0.0
+    # Fast-mode: optional target/loss simplification
+    effective_enable_path_label = config.training.enable_path_label_head
+    effective_enable_future_return = config.training.enable_future_return_targets
+    effective_enable_risk_path = config.training.enable_risk_path_targets
+    if fast.enabled:
+        if fast.disable_path_label:
+            effective_enable_path_label = False
+            effective_loss_weights["path_label"] = 0.0
+        if fast.disable_future_return:
+            effective_enable_future_return = False
+            effective_loss_weights["future_return"] = 0.0
+        if fast.disable_risk_path:
+            effective_enable_risk_path = False
+            effective_loss_weights["risk_path"] = 0.0
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
@@ -233,9 +340,9 @@ def run_supervised_training(
         collapse_warning_thresholds=config.training.collapse_warning_thresholds,
         report_prediction_distribution=config.training.report_prediction_distribution,
         report_per_class_metrics=config.training.report_per_class_metrics,
-        enable_path_label_head=config.training.enable_path_label_head,
-        enable_future_return_targets=config.training.enable_future_return_targets,
-        enable_risk_path_targets=config.training.enable_risk_path_targets,
+        enable_path_label_head=effective_enable_path_label,
+        enable_future_return_targets=effective_enable_future_return,
+        enable_risk_path_targets=effective_enable_risk_path,
     )
     for split_name, symbols in bundle.split_ranges.items():
         for symbol, split in symbols.items():
@@ -274,7 +381,7 @@ def run_supervised_training(
                 },
                 warnings=diagnostics.warnings,
             )
-    history = trainer.fit(bundle.train_loader, bundle.val_loader, epochs=config.training.epochs)
+    history = trainer.fit(bundle.train_loader, bundle.val_loader, epochs=effective_epochs)
     test_metrics = trainer._run_epoch(bundle.test_loader, training=False, stage="test")
     val_report = _evaluate_detailed_split(
         loader=bundle.val_loader,
@@ -413,6 +520,7 @@ def run_supervised_training(
         test_report=test_report,
         checkpoint_path=str(checkpoint_path),
         elapsed_seconds=elapsed,
+        effective_epochs=effective_epochs,
     )
     summary_path = save_run_summary(run_summary, runs_dir=config.training.runs_dir)
     logger.info("run_summary_saved", path=str(summary_path), run_id=run_id)

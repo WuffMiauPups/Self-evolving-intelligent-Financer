@@ -183,6 +183,70 @@ class BacktestConfig(BaseModel):
     slippage_bps: float = 2.0
 
 
+class FastModeConfig(BaseModel):
+    """Explicit fast experiment mode: reduced data/epochs for rapid research iteration.
+
+    Fast mode is:
+    - explicitly opt-in (enabled=False by default)
+    - clearly logged and recorded in run summaries
+    - deterministic when sample_seed is fixed
+    - NOT suitable for final production checkpoints
+
+    Controls:
+        enabled: must be True for any fast-mode behaviour to activate
+        fast_months: restrict data to last N months (overrides data.start_date)
+        fast_start_date: explicit start date override (ISO string, e.g. "2025-01-01")
+        fast_end_date: explicit end date override (ISO string)
+        symbols: train on this symbol subset only (empty = use data.symbols)
+        max_train_samples: cap training samples (deterministic with sample_seed)
+        max_val_samples: cap validation samples
+        max_test_samples: cap test samples
+        sample_seed: RNG seed for deterministic subsampling
+        max_epochs: cap training epochs (min of this and training.epochs)
+        disable_path_label: zero path-label loss weight
+        disable_future_return: zero future-return loss weight
+        disable_risk_path: zero risk-path loss weight
+        model_profile: "default" (unchanged arch) or "small" (reduced dims)
+    """
+
+    enabled: bool = False
+    # Date range
+    fast_months: int | None = None
+    fast_start_date: str | None = None
+    fast_end_date: str | None = None
+    # Symbol subset
+    symbols: list[str] = Field(default_factory=list)
+    # Sample caps
+    max_train_samples: int | None = None
+    max_val_samples: int | None = None
+    max_test_samples: int | None = None
+    sample_seed: int = 42
+    # Epoch cap
+    max_epochs: int | None = None
+    # Target/loss simplification
+    disable_path_label: bool = False
+    disable_future_return: bool = False
+    disable_risk_path: bool = False
+    # Model profile
+    model_profile: str = "default"
+
+    @model_validator(mode="after")
+    def validate_fast_mode_config(self) -> "FastModeConfig":
+        if self.fast_months is not None and self.fast_months <= 0:
+            raise ConfigurationError("training.fast_mode.fast_months must be positive")
+        if self.max_train_samples is not None and self.max_train_samples <= 0:
+            raise ConfigurationError("training.fast_mode.max_train_samples must be positive")
+        if self.max_val_samples is not None and self.max_val_samples <= 0:
+            raise ConfigurationError("training.fast_mode.max_val_samples must be positive")
+        if self.max_test_samples is not None and self.max_test_samples <= 0:
+            raise ConfigurationError("training.fast_mode.max_test_samples must be positive")
+        if self.max_epochs is not None and self.max_epochs <= 0:
+            raise ConfigurationError("training.fast_mode.max_epochs must be positive")
+        if self.model_profile not in {"default", "small"}:
+            raise ConfigurationError("training.fast_mode.model_profile must be one of: default, small")
+        return self
+
+
 class TrainingConfig(BaseModel):
     use_real_historical_data: bool = False
     batch_size: int = 16
@@ -251,6 +315,8 @@ class TrainingConfig(BaseModel):
     save_memory_after_training: bool = False
     memory_build_split: str = "train"
     runs_dir: str = "runs"
+    # --- Fast experiment mode ---
+    fast_mode: FastModeConfig = Field(default_factory=FastModeConfig)
 
     @model_validator(mode="after")
     def validate_training_config(self) -> "TrainingConfig":

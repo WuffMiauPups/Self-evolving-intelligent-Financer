@@ -109,6 +109,77 @@ def main() -> int:
         default=None,
         help="Override training.epochs.",
     )
+    # --- Fast experiment mode ---
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "Enable fast experiment mode. Results are approximate and clearly marked. "
+            "Do NOT promote a fast-mode checkpoint to production."
+        ),
+    )
+    parser.add_argument(
+        "--fast-months",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Restrict training data to last N months (fast mode, overrides data.start_date).",
+    )
+    parser.add_argument(
+        "--fast-symbols",
+        nargs="+",
+        default=None,
+        metavar="SYMBOL",
+        help="Train on this symbol subset only (fast mode), e.g. --fast-symbols AAPL MSFT.",
+    )
+    parser.add_argument(
+        "--max-train-samples",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap training samples at N (fast mode, deterministic with fixed seed).",
+    )
+    parser.add_argument(
+        "--max-val-samples",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap validation samples at N (fast mode).",
+    )
+    parser.add_argument(
+        "--max-test-samples",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap test samples at N (fast mode).",
+    )
+    parser.add_argument(
+        "--fast-epochs",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap epochs at N (fast mode, takes min of this and training.epochs).",
+    )
+    parser.add_argument(
+        "--disable-path-label",
+        action="store_true",
+        help="Disable path-label auxiliary loss for this run (fast mode).",
+    )
+    parser.add_argument(
+        "--disable-future-return",
+        action="store_true",
+        help="Disable future-return auxiliary loss for this run (fast mode).",
+    )
+    parser.add_argument(
+        "--disable-risk-path",
+        action="store_true",
+        help="Disable risk-path auxiliary loss for this run (fast mode).",
+    )
+    parser.add_argument(
+        "--fast-model",
+        action="store_true",
+        help="Use smaller experimental model profile (fast mode): reduced CNN, temporal, and branch dims.",
+    )
     parser.add_argument(
         "--run-id",
         default=None,
@@ -214,6 +285,36 @@ def main() -> int:
         config.training.loss_weights["latent"] = args.loss_weight_latent
     if args.epochs is not None:
         config.training.epochs = args.epochs
+    # --- Fast experiment mode ---
+    if args.fast:
+        config.training.fast_mode.enabled = True
+    if args.fast_months is not None:
+        config.training.fast_mode.fast_months = args.fast_months
+        config.training.fast_mode.enabled = True
+    if args.fast_symbols is not None:
+        config.training.fast_mode.symbols = list(args.fast_symbols)
+        config.training.fast_mode.enabled = True
+    if args.max_train_samples is not None:
+        config.training.fast_mode.max_train_samples = args.max_train_samples
+        config.training.fast_mode.enabled = True
+    if args.max_val_samples is not None:
+        config.training.fast_mode.max_val_samples = args.max_val_samples
+        config.training.fast_mode.enabled = True
+    if args.max_test_samples is not None:
+        config.training.fast_mode.max_test_samples = args.max_test_samples
+        config.training.fast_mode.enabled = True
+    if args.fast_epochs is not None:
+        config.training.fast_mode.max_epochs = args.fast_epochs
+        config.training.fast_mode.enabled = True
+    if args.disable_path_label:
+        config.training.fast_mode.disable_path_label = True
+    if args.disable_future_return:
+        config.training.fast_mode.disable_future_return = True
+    if args.disable_risk_path:
+        config.training.fast_mode.disable_risk_path = True
+    if args.fast_model:
+        config.training.fast_mode.model_profile = "small"
+        config.training.fast_mode.enabled = True
 
     if args.evaluate_checkpoint:
         evaluate_checkpoint(config, args.evaluate_checkpoint)
