@@ -410,7 +410,8 @@ async def _run_async_trade_loop(config: AppConfig, *, confirm_live: bool = False
             encoder=encoder,
             retriever=AssociativeRetriever(memory_bank, config.memory),
             updater=memory_updater,
-            require_strong_match_for_trade=config.memory.require_strong_match_for_memory_support,
+            require_strong_match_for_trade=config.memory.require_strong_match_for_trade,
+            fusion_config=config.memory.decision_fusion,
         )
         logger.info(
             "memory_runtime_ready",
@@ -418,6 +419,8 @@ async def _run_async_trade_loop(config: AppConfig, *, confirm_live: bool = False
             runtime_update_mode=effective_memory_config.runtime_update_mode,
             allow_online_memory_updates=config.runtime.allow_online_memory_updates,
             require_strong_match_for_trade=config.memory.require_strong_match_for_trade,
+            decision_fusion_enabled=config.memory.decision_fusion.enabled,
+            topology_growth_enabled=config.memory.topology_growth.enabled,
             **memory_bank.summary(),
         )
     if hasattr(policy, "reset_all_state"):

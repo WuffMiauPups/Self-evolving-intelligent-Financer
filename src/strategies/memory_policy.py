@@ -1,13 +1,25 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field, replace
 
+from src.core.config import DecisionFusionConfig
+
+logger = logging.getLogger(__name__)
 from src.data.schemas import MarketBar
 from src.memory.retrieval import AssociativeRetriever
 from src.memory.schemas import MemoryDecisionSupport
 from src.memory.updater import AssociativeMemoryUpdater
 from src.models.state_encoder import EncodedState, ModelStateEncoder
 from src.risk.constraints import TradeProposal
+from src.strategies.decision_fusion import (
+    DAMPEN,
+    NEUTRAL,
+    SUPPORT,
+    VETO,
+    FusionResult,
+    compute_fusion,
+)
 
 
 @dataclass
@@ -17,21 +29,29 @@ class MemoryAwarePolicy:
     retriever: AssociativeRetriever
     updater: AssociativeMemoryUpdater | None = None
     require_strong_match_for_trade: bool = True
+    fusion_config: DecisionFusionConfig = field(default_factory=DecisionFusionConfig)
     retrieval_count: int = 0
     weak_match_count: int = 0
     no_trade_count: int = 0
     vetoed_count: int = 0
     dampened_count: int = 0
+    supported_count: int = 0
+    neutral_count: int = 0
+    fusion_unknown_state_count: int = 0
+    fusion_topology_warning_count: int = 0
     similarity_total: float = 0.0
     confidence_total: float = 0.0
     last_encoded_by_symbol: dict[str, EncodedState] = field(default_factory=dict)
     last_support_by_symbol: dict[str, MemoryDecisionSupport] = field(default_factory=dict)
+    last_fusion_by_symbol: dict[str, FusionResult] = field(default_factory=dict)
+    _logged_path_mode: bool = field(default=False, repr=False)
 
     def reset_symbol_state(self, symbol: str, *, reason: str = "manual_reset") -> str:
         if hasattr(self.base_policy, "reset_symbol_state"):
             self.base_policy.reset_symbol_state(symbol, reason=reason)
         self.last_encoded_by_symbol.pop(symbol, None)
         self.last_support_by_symbol.pop(symbol, None)
+        self.last_fusion_by_symbol.pop(symbol, None)
         return reason
 
     def reset_all_state(self, *, reason: str = "manual_reset") -> str:
@@ -39,6 +59,7 @@ class MemoryAwarePolicy:
             self.base_policy.reset_all_state(reason=reason)
         self.last_encoded_by_symbol.clear()
         self.last_support_by_symbol.clear()
+        self.last_fusion_by_symbol.clear()
         if self.updater is not None:
             self.updater.reset()
         self.retrieval_count = 0
@@ -46,6 +67,10 @@ class MemoryAwarePolicy:
         self.no_trade_count = 0
         self.vetoed_count = 0
         self.dampened_count = 0
+        self.supported_count = 0
+        self.neutral_count = 0
+        self.fusion_unknown_state_count = 0
+        self.fusion_topology_warning_count = 0
         self.similarity_total = 0.0
         self.confidence_total = 0.0
         return reason
@@ -79,7 +104,40 @@ class MemoryAwarePolicy:
         if support.no_trade_suggested:
             self.no_trade_count += 1
 
-        adjusted, advisory = self._apply_support(proposal, support)
+        # --- Decision fusion (if enabled) ---
+        fusion: FusionResult | None = None
+        if not self._logged_path_mode:
+            if self.fusion_config.enabled:
+                logger.info("memory_policy_mode mode=fusion")
+            else:
+                logger.info("memory_policy_mode mode=legacy fusion_disabled=true")
+            self._logged_path_mode = True
+        if self.fusion_config.enabled:
+            fusion = compute_fusion(
+                proposal=proposal,
+                support=support,
+                config=self.fusion_config,
+                memory_units=self.retriever.bank.memory_units or None,
+                esom_map=self.retriever.bank.esom_map,
+            )
+            self.last_fusion_by_symbol[snapshot.symbol] = fusion
+            # Track fusion-level counters
+            if fusion.unknown_state_flag:
+                self.fusion_unknown_state_count += 1
+            if fusion.topology_warning_flag:
+                self.fusion_topology_warning_count += 1
+            if fusion.support_level == SUPPORT:
+                self.supported_count += 1
+            elif fusion.support_level == NEUTRAL:
+                self.neutral_count += 1
+
+        adjusted, advisory = self._apply_support(proposal, support, fusion)
+        # SAFETY CHECK: flat base action must never become a trade
+        if proposal.action == 0 and adjusted.action != 0:
+            raise RuntimeError(
+                f"SAFETY VIOLATION: memory/fusion promoted flat base action to trade "
+                f"(adjusted_action={adjusted.action}) — this must never happen"
+            )
         if advisory["memory_vetoed"]:
             self.vetoed_count += 1
         if advisory["memory_dampened"]:
@@ -110,19 +168,34 @@ class MemoryAwarePolicy:
             "memory_alignment": advisory["memory_alignment"],
             "metadata": support.metadata,
         }
+        if fusion is not None:
+            diagnostics["decision_fusion"] = {
+                "support_level": fusion.support_level,
+                "reason_codes": fusion.reason_codes,
+                "size_multiplier": fusion.size_multiplier,
+                "confidence_adjustment": fusion.confidence_adjustment,
+                "unknown_state_flag": fusion.unknown_state_flag,
+                "topology_warning_flag": fusion.topology_warning_flag,
+                "metadata": fusion.metadata,
+            }
         return adjusted, diagnostics
 
     def metrics_snapshot(self) -> dict[str, float]:
         average_similarity = self.similarity_total / max(self.retrieval_count, 1)
         average_confidence = self.confidence_total / max(self.retrieval_count, 1)
+        n = max(self.retrieval_count, 1)
         metrics: dict[str, float] = {
             "memory_retrieval_count": float(self.retrieval_count),
             "memory_average_similarity": float(average_similarity),
             "memory_average_confidence": float(average_confidence),
-            "memory_weak_match_rate": float(self.weak_match_count / max(self.retrieval_count, 1)),
-            "memory_no_trade_rate": float(self.no_trade_count / max(self.retrieval_count, 1)),
-            "memory_veto_rate": float(self.vetoed_count / max(self.retrieval_count, 1)),
-            "memory_dampened_rate": float(self.dampened_count / max(self.retrieval_count, 1)),
+            "memory_weak_match_rate": float(self.weak_match_count / n),
+            "memory_no_trade_rate": float(self.no_trade_count / n),
+            "memory_veto_rate": float(self.vetoed_count / n),
+            "memory_dampened_rate": float(self.dampened_count / n),
+            "memory_supported_rate": float(self.supported_count / n),
+            "memory_neutral_rate": float(self.neutral_count / n),
+            "fusion_unknown_state_count": float(self.fusion_unknown_state_count),
+            "fusion_topology_warning_count": float(self.fusion_topology_warning_count),
             "memory_cluster_count": float(len(self.retriever.bank.prototypes)),
             "memory_item_count": float(len(self.retriever.bank)),
             "memory_unit_count": float(len(self.retriever.bank.memory_units)),
@@ -151,7 +224,10 @@ class MemoryAwarePolicy:
         self,
         proposal: TradeProposal,
         support: MemoryDecisionSupport,
+        fusion: FusionResult | None = None,
     ) -> tuple[TradeProposal, dict[str, object]]:
+        # SAFETY INVARIANT: memory/fusion must never promote a flat base action to a trade.
+        # This is checked both at entry and exit of this method.
         base_action = proposal.action
         base_target_fraction = proposal.target_fraction
         alignment = "flat"
@@ -176,6 +252,10 @@ class MemoryAwarePolicy:
                 "memory_alignment": alignment,
             }
         )
+        if fusion is not None:
+            metadata["fusion_support_level"] = fusion.support_level
+            metadata["fusion_reason_codes"] = fusion.reason_codes
+
         if proposal.action == 0:
             metadata.update(
                 {
@@ -192,6 +272,78 @@ class MemoryAwarePolicy:
                 "advisory_effect": "flat_base_policy",
                 "memory_alignment": alignment,
             }
+
+        # -----------------------------------------------------------
+        # Fusion-aware path (when fusion is enabled and available)
+        # -----------------------------------------------------------
+        if fusion is not None:
+            if fusion.support_level == VETO:
+                metadata.update(
+                    {
+                        "memory_adjusted_action": 0.0,
+                        "memory_adjusted_target_fraction": 0.0,
+                        "memory_vetoed": 1.0,
+                        "memory_dampened": 0.0,
+                        "memory_advisory_effect": "veto",
+                    }
+                )
+                return replace(
+                    proposal,
+                    action=0,
+                    target_fraction=0.0,
+                    confidence=min(proposal.confidence, max(support.retrieval_confidence, 0.0) * fusion.confidence_adjustment),
+                    metadata=metadata,
+                ), {
+                    "memory_vetoed": True,
+                    "memory_dampened": False,
+                    "advisory_effect": "veto",
+                    "memory_alignment": alignment,
+                }
+
+            # Apply fusion multipliers
+            adjusted_fraction = proposal.target_fraction * fusion.size_multiplier
+            adjusted_confidence = min(
+                proposal.confidence,
+                max(support.retrieval_confidence, 0.0) * fusion.confidence_adjustment,
+            )
+            adjusted_action = proposal.action if abs(adjusted_fraction) > 1.0e-6 else 0
+            adjusted_fraction = adjusted_fraction if adjusted_action != 0 else 0.0
+            dampened = abs(adjusted_fraction) + 1.0e-9 < abs(base_target_fraction)
+
+            if fusion.support_level == DAMPEN:
+                advisory_effect = "dampened"
+            elif fusion.support_level == SUPPORT and not dampened:
+                advisory_effect = "supportive"
+            elif dampened:
+                advisory_effect = "dampened"
+            else:
+                advisory_effect = "neutral"
+
+            metadata.update(
+                {
+                    "memory_adjusted_action": float(adjusted_action),
+                    "memory_adjusted_target_fraction": float(adjusted_fraction),
+                    "memory_vetoed": 0.0,
+                    "memory_dampened": float(dampened),
+                    "memory_advisory_effect": advisory_effect,
+                }
+            )
+            return replace(
+                proposal,
+                action=adjusted_action,
+                target_fraction=adjusted_fraction,
+                confidence=adjusted_confidence,
+                metadata=metadata,
+            ), {
+                "memory_vetoed": False,
+                "memory_dampened": dampened,
+                "advisory_effect": advisory_effect,
+                "memory_alignment": alignment,
+            }
+
+        # -----------------------------------------------------------
+        # Legacy path (fusion disabled — original behaviour preserved)
+        # -----------------------------------------------------------
         if support.no_trade_suggested and self.require_strong_match_for_trade:
             metadata.update(
                 {

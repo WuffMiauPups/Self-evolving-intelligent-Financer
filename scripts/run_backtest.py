@@ -164,7 +164,8 @@ def main() -> int:
             encoder=encoder,
             retriever=AssociativeRetriever(memory_bank, config.memory),
             updater=AssociativeMemoryUpdater(memory_bank, config.memory),
-            require_strong_match_for_trade=config.memory.require_strong_match_for_memory_support,
+            require_strong_match_for_trade=config.memory.require_strong_match_for_trade,
+            fusion_config=config.memory.decision_fusion,
         )
     brain_engine = BacktestEngine(config, pipeline, RiskManager(config.risk.model_copy()))
     brain_report = brain_engine.run(bars_by_symbol, brain_policy)
