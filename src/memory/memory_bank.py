@@ -85,8 +85,26 @@ class MemoryBank:
         self._rebuild_latent_matrix()
 
     def extend(self, items: list[MemoryItem]) -> None:
+        """Append many items and rebuild the latent matrix *once* at the end.
+
+        The naive ``for item in items: self.append(item)`` is O(N²) because
+        ``append`` triggers ``_rebuild_latent_matrix`` per call, and each
+        rebuild stacks every item from scratch. This version validates each
+        incoming item, appends them in place, enforces ``max_items``, and
+        then rebuilds the latent matrix exactly once. On an offline build
+        that produces thousands of items in a few big chunks, this collapses
+        the per-append cost from O(N) to O(1) amortized. Post-condition is
+        identical to the per-item ``append`` loop.
+        """
+        if not items:
+            return
         for item in items:
-            self.append(item)
+            self._validate_item(item)
+            self.items.append(item)
+        overflow = len(self.items) - self.max_items
+        if overflow > 0:
+            del self.items[:overflow]
+        self._rebuild_latent_matrix()
 
     def rebuild_prototypes(
         self,
@@ -158,6 +176,18 @@ class MemoryBank:
                     "archived_units": len(maintenance_report.archived_units),
                 }
             )
+        # --- Topology growth (conservative, optional) ---
+        if config.topology_growth.enabled and not dry_run:
+            from src.memory.topology_growth import evaluate_topology_growth
+
+            resolved_units, growth_report = evaluate_topology_growth(
+                resolved_units,
+                self.items,
+                config,
+                esom_map=self.esom_map,
+                current_step=max(len(self.items) - 1, 0),
+            )
+            report["topology_growth"] = growth_report.to_dict()
         calibration_profile = self.calibration_profile
         calibration_profiles_by_symbol = dict(self.calibration_profiles_by_symbol)
         calibration_profiles_by_regime = dict(self.calibration_profiles_by_regime)

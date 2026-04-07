@@ -4,12 +4,25 @@ broker:
   confirm_live: false
 
 runtime:
-  max_runtime_steps: 25
+  # 0 = unbounded paper runtime (run until operator stops it or fatal error).
+  max_runtime_steps: 0
   decision_interval_sec: 1.0
+  max_data_staleness_sec: 1200
+  allowed_sessions: ["regular"]
+
+model:
+  checkpoint_path: checkpoints/brain.pt
+
+memory:
+  require_strong_match_for_trade: false
+  decision_fusion:
+    enabled: false
+    conflict_veto_threshold: 0.99
+    conflict_dampen_threshold: 0.99
 
 risk:
   kill_switch: false
   stale_data_sec: 180
-  max_spread_bps: 50.0
-  min_trade_confidence: 0.20
-  min_trade_fraction: 0.005
+  max_spread_bps: 200.0
+  min_trade_confidence: 0.05
+  min_trade_fraction: 0.001

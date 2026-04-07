@@ -28,8 +28,10 @@ from src.memory.storage import load_memory_bank, save_memory_bank
 from src.memory.updater import AssociativeMemoryUpdater, build_memory_bank_from_bars
 from src.models.factory import resolve_inference_model
 from src.models.state_encoder import ModelStateEncoder
+from src.monitoring.equity_log import EquityLogWriter, EquitySnapshot
 from src.monitoring.health import HealthState
 from src.monitoring.metrics_logger import MetricsLogger
+from src.monitoring.runtime_status import RuntimeStatusSnapshot, RuntimeStatusWriter
 from src.risk.ledger import Ledger
 from src.risk.portfolio_state import PortfolioState
 from src.risk.risk_manager import RiskManager
@@ -434,6 +436,11 @@ async def _run_async_trade_loop(config: AppConfig, *, confirm_live: bool = False
     )
     metrics = MetricsLogger()
     runtime_session_id = started_at.strftime("%Y%m%d")
+    equity_writer = EquityLogWriter()
+    status_writer = RuntimeStatusWriter()
+    last_decision_payload: dict | None = None
+    last_risk_payload: dict | None = None
+    last_symbol: str = ""
     warmup_logged: set[str] = set()
     step = 0
     async for latest_bars in stream.stream():
@@ -470,6 +477,17 @@ async def _run_async_trade_loop(config: AppConfig, *, confirm_live: bool = False
                 continue
             tick_time = max(bar.timestamp for bar in latest_bars.values())
             portfolio.mark_to_market(latest_prices, tick_time)
+            equity_writer.write(
+                EquitySnapshot(
+                    ts=tick_time,
+                    equity=float(portfolio.equity),
+                    realized_pnl=float(getattr(portfolio, "realized_pnl", 0.0)),
+                    unrealized_pnl=float(portfolio.equity - portfolio.cash
+                                          - getattr(portfolio, "realized_pnl", 0.0)),
+                    fills=len(ledger.fills),
+                    session_id=runtime_session_id,
+                )
+            )
             broker_clock = None
             try:
                 broker_clock = client.get_clock()
@@ -529,7 +547,7 @@ async def _run_async_trade_loop(config: AppConfig, *, confirm_live: bool = False
                 guard_result = session_guard.evaluate(
                     symbol=symbol,
                     bar=bar,
-                    now=tick_time,
+                    now=utc_now(),
                     broker_clock=broker_clock,
                 )
                 logger.info(
@@ -566,6 +584,15 @@ async def _run_async_trade_loop(config: AppConfig, *, confirm_live: bool = False
                     soma_weights=diagnostics["soma_weights"],
                     soma_activation=diagnostics["soma_activation"],
                 )
+                # Capture for structured runtime status snapshot.
+                _fusion_diag = diagnostics.get("decision_fusion") or {}
+                last_decision_payload = {
+                    "action": int(proposal.action),
+                    "confidence": float(proposal.confidence),
+                    "target_fraction": float(proposal.target_fraction),
+                    "fusion_level": _fusion_diag.get("support_level") if isinstance(_fusion_diag, dict) else None,
+                }
+                last_symbol = symbol
                 if hasattr(policy, "record_snapshot"):
                     policy.record_snapshot(symbol)
 
@@ -576,6 +603,12 @@ async def _run_async_trade_loop(config: AppConfig, *, confirm_live: bool = False
                     approved=decision.approved,
                     reasons=decision.reasons,
                 )
+                last_risk_payload = {
+                    "approved": bool(decision.approved),
+                    "reasons": [str(r) for r in decision.reasons],
+                    "side": decision.side,
+                    "quantity": float(decision.quantity),
+                }
                 if not decision.approved:
                     metrics.increment("risk_rejections")
                     for reason in decision.reasons:
@@ -656,7 +689,26 @@ async def _run_async_trade_loop(config: AppConfig, *, confirm_live: bool = False
 
             health.mark_tick(tick_time)
             step += 1
-            if step >= config.runtime.max_runtime_steps:
+            # Structured runtime status snapshot — one line per tick. The GUI
+            # reads the latest line via RuntimeStatusWriter.read_latest() to
+            # display real operator state without parsing the log file.
+            status_writer.write(
+                RuntimeStatusSnapshot(
+                    ts=tick_time,
+                    step=step,
+                    session_id=runtime_session_id,
+                    symbol=last_symbol,
+                    equity=float(portfolio.equity),
+                    fills=len(ledger.fills),
+                    safe_to_trade=bool(health.safe_to_trade),
+                    last_decision=last_decision_payload,
+                    last_risk=last_risk_payload,
+                    fusion_enabled=bool(config.memory.decision_fusion.enabled),
+                    memory_enabled=bool(config.memory.enabled),
+                    frozen_brain=not bool(config.runtime.allow_online_model_updates),
+                )
+            )
+            if config.runtime.max_runtime_steps > 0 and step >= config.runtime.max_runtime_steps:
                 runtime_metrics = metrics.snapshot()
                 if hasattr(policy, "metrics_snapshot"):
                     runtime_metrics.update(policy.metrics_snapshot())

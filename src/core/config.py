@@ -62,8 +62,6 @@ class PipelineConfig(BaseModel):
     retry_count: int = 3
     retry_backoff_sec: float = 1.0
     validation_strictness: str = "warn"
-    precompute_features: bool = False
-    precompute_targets: bool = False
     max_prep_workers: int = 4
     manifest_path: str = "artifacts/historical/manifest.json"
 
@@ -109,7 +107,10 @@ class RuntimeConfig(BaseModel):
     timeframe: str = "1Min"
     warmup_bars: int = 64
     decision_interval_sec: float = 2.0
-    max_runtime_steps: int = 50
+    # 0 (or any non-positive value) means UNBOUNDED — the paper/live trade loop
+    # runs until manually stopped, fatal error, kill switch, or stream exhaustion.
+    # Set a positive value only for explicit bounded debug/test runs.
+    max_runtime_steps: int = 0
     state_reset_gap_sec: int | None = 300
     require_startup_reconciliation: bool = True
     block_on_reconciliation_mismatch: bool = True
@@ -258,7 +259,6 @@ class TrainingConfig(BaseModel):
     test_split: float = 0.1
     label_epsilon: float = 5.0e-4
     checkpoint_dir: str = "checkpoints"
-    supervised_horizon: int = 1
     sequence_length: int = 64
     use_amp: bool = False
     forward_horizons: list[int] = Field(default_factory=lambda: [1, 5, 15])
@@ -393,6 +393,110 @@ class ExecutionConfig(BaseModel):
     retry_backoff_sec: float = 0.5
 
 
+class DecisionFusionConfig(BaseModel):
+    """Decision fusion layer: integrates memory, topology, and model signals.
+
+    The fusion layer sits between memory retrieval and the final trade proposal
+    adjustment.  It produces a structured support decision (support / neutral /
+    dampen / veto) that the memory-aware policy uses to adjust proposals.
+
+    Conservative by default — all thresholds favour neutral/dampen over support.
+    """
+
+    enabled: bool = False
+    # --- offline evaluation ---
+    evaluation_enabled: bool = False
+    # --- conflict policy ---
+    conflict_veto_threshold: float = 0.70
+    conflict_dampen_threshold: float = 0.40
+    # --- unknown / weak-state policy ---
+    unknown_state_policy: str = "neutral"   # "neutral" or "veto"
+    weak_match_policy: str = "neutral"      # "neutral" or "veto"
+    # --- maturity weighting ---
+    candidate_evidence_discount: float = 0.50
+    min_mature_matches_for_support: int = 1
+    # --- saturation / plasticity ---
+    saturation_dampen_threshold: float = 0.90
+    low_plasticity_discount: float = 0.80
+    # --- topology ---
+    topology_agreement_weight: float = 0.30
+    topology_disagreement_dampen: bool = True
+    min_neighbor_agreement_for_support: float = 0.50
+    sparse_topology_policy: str = "neutral"  # "neutral" or "dampen"
+
+    @model_validator(mode="after")
+    def validate_fusion_config(self) -> "DecisionFusionConfig":
+        if self.unknown_state_policy not in {"neutral", "veto"}:
+            raise ConfigurationError("decision_fusion.unknown_state_policy must be neutral or veto")
+        if self.weak_match_policy not in {"neutral", "veto"}:
+            raise ConfigurationError("decision_fusion.weak_match_policy must be neutral or veto")
+        if self.sparse_topology_policy not in {"neutral", "dampen"}:
+            raise ConfigurationError("decision_fusion.sparse_topology_policy must be neutral or dampen")
+        if not 0.0 <= self.conflict_dampen_threshold <= self.conflict_veto_threshold <= 1.0:
+            raise ConfigurationError(
+                "decision_fusion: need 0 <= conflict_dampen_threshold <= conflict_veto_threshold <= 1"
+            )
+        if not 0.0 <= self.candidate_evidence_discount <= 1.0:
+            raise ConfigurationError("decision_fusion.candidate_evidence_discount must be within [0, 1]")
+        if self.min_mature_matches_for_support < 0:
+            raise ConfigurationError("decision_fusion.min_mature_matches_for_support must be non-negative")
+        if not 0.0 <= self.saturation_dampen_threshold <= 1.0:
+            raise ConfigurationError("decision_fusion.saturation_dampen_threshold must be within [0, 1]")
+        if not 0.0 <= self.low_plasticity_discount <= 1.0:
+            raise ConfigurationError("decision_fusion.low_plasticity_discount must be within [0, 1]")
+        if not 0.0 <= self.topology_agreement_weight <= 1.0:
+            raise ConfigurationError("decision_fusion.topology_agreement_weight must be within [0, 1]")
+        if not 0.0 <= self.min_neighbor_agreement_for_support <= 1.0:
+            raise ConfigurationError(
+                "decision_fusion.min_neighbor_agreement_for_support must be within [0, 1]"
+            )
+        return self
+
+
+class TopologyGrowthConfig(BaseModel):
+    """Conservative adaptive topology growth.
+
+    Controls bounded insertion of new memory units when the system encounters
+    genuinely novel states or when existing units become too broad/conflicted.
+    All features are OFF by default to preserve backward compatibility.
+    """
+
+    enabled: bool = False
+    # --- insertion triggers ---
+    min_novelty_score: float = 0.60          # minimum weak-match distance to trigger insertion
+    min_topology_sparsity: float = 0.30      # local density below this = sparse region
+    max_insertions_per_refresh: int = 3       # hard cap per refresh_organization call
+    min_support_for_insertion: int = 2        # minimum samples in sparse region before insertion
+    # --- split triggers ---
+    split_conflict_threshold: float = 0.50   # recent_conflict_rate above this → split candidate
+    split_variance_threshold: float = 0.60   # outcome_dispersion above this → split candidate
+    split_min_support: int = 6               # minimum support count before split allowed
+    # --- bounded controls ---
+    max_growth_rate: float = 0.10            # max fraction of max_units that can be added per refresh
+    require_mature_neighbors_for_support: bool = True  # only support if mature neighbors exist
+    respect_quarantine: bool = True          # never grow from quarantined paths
+
+    @model_validator(mode="after")
+    def validate_growth_config(self) -> "TopologyGrowthConfig":
+        if not 0.0 <= self.min_novelty_score <= 1.0:
+            raise ConfigurationError("topology_growth.min_novelty_score must be within [0, 1]")
+        if not 0.0 <= self.min_topology_sparsity <= 1.0:
+            raise ConfigurationError("topology_growth.min_topology_sparsity must be within [0, 1]")
+        if self.max_insertions_per_refresh < 0:
+            raise ConfigurationError("topology_growth.max_insertions_per_refresh must be non-negative")
+        if self.min_support_for_insertion < 1:
+            raise ConfigurationError("topology_growth.min_support_for_insertion must be positive")
+        if not 0.0 <= self.split_conflict_threshold <= 1.0:
+            raise ConfigurationError("topology_growth.split_conflict_threshold must be within [0, 1]")
+        if self.split_variance_threshold <= 0.0:
+            raise ConfigurationError("topology_growth.split_variance_threshold must be positive")
+        if self.split_min_support < 2:
+            raise ConfigurationError("topology_growth.split_min_support must be >= 2")
+        if not 0.0 < self.max_growth_rate <= 1.0:
+            raise ConfigurationError("topology_growth.max_growth_rate must be within (0, 1]")
+        return self
+
+
 class MemoryConfig(BaseModel):
     enabled: bool = False
     build_from_real_checkpoint: bool = False
@@ -463,6 +567,10 @@ class MemoryConfig(BaseModel):
     # --- Pending observation persistence ---
     persist_pending_observations: bool = True
     pending_store_path: str = "artifacts/pending_observations.pt"
+    # --- Decision fusion layer ---
+    decision_fusion: DecisionFusionConfig = Field(default_factory=DecisionFusionConfig)
+    # --- Topology growth ---
+    topology_growth: TopologyGrowthConfig = Field(default_factory=TopologyGrowthConfig)
 
     @model_validator(mode="after")
     def validate_memory_config(self) -> "MemoryConfig":
@@ -546,6 +654,15 @@ class AppConfig(BaseModel):
             self.data.symbols = list(self.runtime.symbols)
         if not self.data.timeframe:
             self.data.timeframe = self.runtime.timeframe
+        # Forward horizons and path_label_rules are defined on TrainingConfig and
+        # must match on MemoryConfig so the offline memory build labels match
+        # what the brain was trained against. Sync from training -> memory unless
+        # the user has *explicitly* overridden them on the memory side.
+        mem_set = self.memory.model_fields_set
+        if "forward_horizons" not in mem_set:
+            self.memory.forward_horizons = list(self.training.forward_horizons)
+        if "path_label_rules" not in mem_set:
+            self.memory.path_label_rules = dict(self.training.path_label_rules)
         return self
 
 

@@ -28,7 +28,7 @@ def test_feature_contract_is_consistent_across_training_backtest_and_runtime() -
         {"AAPL": bars},
         training_pipeline,
         warmup_bars=config.runtime.warmup_bars,
-        horizon=config.training.supervised_horizon,
+        horizon=config.training.forward_horizons[0],
         label_epsilon=config.training.label_epsilon,
     )
     assert dataset.feature_contract is not None

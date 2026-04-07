@@ -125,6 +125,20 @@ class FeaturePipeline:
         self.config = config
         self.device = device
         self.dtype = dtype
+        # --- Per-pipeline name-resolution cache -----------------------------
+        # Feature names are deterministic given the FeatureConfig: the set of
+        # feature names produced by ``build()`` is identical across every
+        # call on the same pipeline instance. The old code recomputed the
+        # full branch-prefix match + regime-prefix filter per sample, which
+        # profiled as 0.76s out of 6.7s total feature-pipeline time on a
+        # 3k-sample build. We now memoize by the tuple of sorted feature
+        # names (first call pays the cost, all subsequent calls reuse it).
+        # The cache is keyed on the tuple itself so any future feature-set
+        # change would miss and rebuild automatically.
+        self._name_cache: dict[
+            tuple[str, ...],
+            tuple[dict[str, list[str]], list[str]],
+        ] = {}
 
     def build(self, bars: Sequence[MarketBar], *, symbol: str) -> FeatureSnapshot:
         if not bars:
@@ -147,8 +161,14 @@ class FeaturePipeline:
         )
 
         feature_names = sorted(values.keys())
-        branch_feature_names = self._resolve_branch_feature_names(feature_names)
-        regime_names = [name for name in feature_names if name.startswith("regime_")]
+        cache_key = tuple(feature_names)
+        cached = self._name_cache.get(cache_key)
+        if cached is None:
+            branch_feature_names = self._resolve_branch_feature_names(feature_names)
+            regime_names = [name for name in feature_names if name.startswith("regime_")]
+            self._name_cache[cache_key] = (branch_feature_names, regime_names)
+        else:
+            branch_feature_names, regime_names = cached
         stacked = torch.stack([values[name] for name in feature_names], dim=0)
         branch_inputs = self._assign_branch_inputs(feature_names, stacked, branch_feature_names)
         regime_input = torch.stack([values[name] for name in regime_names], dim=0)

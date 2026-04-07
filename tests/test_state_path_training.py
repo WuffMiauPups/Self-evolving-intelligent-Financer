@@ -18,6 +18,8 @@ from datetime import UTC, datetime, timedelta
 import torch
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from src.core.config import load_config
 from src.data.dataset import TrainingSample, collate_training_samples
 from src.data.schemas import MarketBar

@@ -18,6 +18,12 @@ from src.training.class_balance import (
     build_weighted_sampler,
     compute_target_diagnostics,
 )
+from src.training.sample_cache import (
+    CachedTrainingData,
+    compute_fingerprint,
+    load_cached_samples,
+    save_cached_samples,
+)
 from src.training.splits import SymbolSplit, build_symbol_splits
 from src.training.targets import build_training_targets
 
@@ -45,6 +51,38 @@ def build_real_data_training_bundle(
     samples_by_split: dict[str, list[TrainingSample]] = {"train": [], "val": [], "test": []}
     split_ranges: dict[str, dict[str, SymbolSplit]] = {"train": {}, "val": {}, "test": {}}
     estimated_total_samples = 0
+
+    # --- Sample cache fast-path ------------------------------------------------
+    # Per-sample FeaturePipeline.build() is the single largest cold-start cost.
+    # The samples are deterministic given a handful of config fields + the raw
+    # bars, so cache the whole materialized list on disk. Miss / disable /
+    # corruption falls through to the rebuild below.
+    try:
+        fingerprint = compute_fingerprint(config=config, bars_by_symbol=bars_by_symbol)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sample_cache_fingerprint_failed", error=str(exc))
+        fingerprint = None
+    cached: CachedTrainingData | None = None
+    if fingerprint is not None:
+        cached = load_cached_samples(fingerprint=fingerprint)
+    if cached is not None:
+        feature_contract = cached.feature_contract
+        samples_by_split = cached.samples_by_split
+        split_ranges = cached.split_ranges
+        logger.info(
+            "training_samples_loaded_from_cache",
+            fingerprint=fingerprint,
+            train=len(samples_by_split.get("train", [])),
+            val=len(samples_by_split.get("val", [])),
+            test=len(samples_by_split.get("test", [])),
+        )
+        return _finalize_training_bundle(
+            config=config,
+            feature_contract=feature_contract,
+            samples_by_split=samples_by_split,
+            split_ranges=split_ranges,
+            logger=logger,
+        )
 
     all_horizons = config.training.all_horizons
     max_horizon = max(all_horizons)
@@ -157,18 +195,51 @@ def build_real_data_training_bundle(
     if feature_contract is None:
         raise ValueError("No real-data training samples were generated")
 
-    # Fast-mode: deterministic sample caps per split
+    # Write to cache BEFORE fast-mode capping / diagnostics so the cache holds
+    # the canonical (full) sample set; fast-mode only affects the subset that
+    # gets trained on, it should not force a different cache key.
+    if fingerprint is not None:
+        save_cached_samples(
+            fingerprint=fingerprint,
+            data=CachedTrainingData(
+                feature_contract=feature_contract,
+                samples_by_split=samples_by_split,
+                split_ranges=split_ranges,
+            ),
+        )
+
+    return _finalize_training_bundle(
+        config=config,
+        feature_contract=feature_contract,
+        samples_by_split=samples_by_split,
+        split_ranges=split_ranges,
+        logger=logger,
+    )
+
+
+def _finalize_training_bundle(
+    *,
+    config: AppConfig,
+    feature_contract: FeatureContract,
+    samples_by_split: dict[str, list[TrainingSample]],
+    split_ranges: dict[str, dict[str, SymbolSplit]],
+    logger,
+) -> TrainingDataBundle:
+    # Fast-mode: deterministic sample caps per split (applied post-cache so the
+    # cached artifact stays full-size and reusable across fast/non-fast runs).
     fast = config.training.fast_mode
     if fast.enabled:
         rng = random.Random(fast.sample_seed)
+        # Do not mutate the input dict (it may be the cached payload).
+        subset: dict[str, list[TrainingSample]] = dict(samples_by_split)
         for split_name, cap in [
             ("train", fast.max_train_samples),
             ("val", fast.max_val_samples),
             ("test", fast.max_test_samples),
         ]:
-            original_count = len(samples_by_split[split_name])
+            original_count = len(subset[split_name])
             if cap is not None and original_count > cap:
-                samples_by_split[split_name] = rng.sample(samples_by_split[split_name], cap)
+                subset[split_name] = rng.sample(subset[split_name], cap)
                 logger.info(
                     "fast_mode_sample_cap_applied",
                     split=split_name,
@@ -176,6 +247,7 @@ def build_real_data_training_bundle(
                     capped_count=cap,
                     sample_seed=fast.sample_seed,
                 )
+        samples_by_split = subset
 
     diagnostics = {
         split_name: compute_target_diagnostics(
@@ -197,24 +269,34 @@ def build_real_data_training_bundle(
         if config.training.use_weighted_sampler
         else None
     )
+    # DataLoader tuning (Phase 3a):
+    #   - num_workers=0 because samples are already materialized tensors in RAM;
+    #     forking would pickle-copy the entire list per worker (memory blow-up).
+    #   - pin_memory=True when a CUDA device is available so the main-thread
+    #     host->device copy in the trainer can use async non_blocking=True.
+    #     Harmless on CPU-only runs.
+    pin_memory = torch.cuda.is_available()
     train_loader = DataLoader(
         HistoricalSequenceDataset(samples_by_split["train"], feature_contract=feature_contract, split="train"),
         batch_size=config.training.batch_size,
         shuffle=sampler is None,
         sampler=sampler,
         collate_fn=collate_training_samples,
+        pin_memory=pin_memory,
     )
     val_loader = DataLoader(
         HistoricalSequenceDataset(samples_by_split["val"], feature_contract=feature_contract, split="val"),
         batch_size=config.training.batch_size,
         shuffle=False,
         collate_fn=collate_training_samples,
+        pin_memory=pin_memory,
     )
     test_loader = DataLoader(
         HistoricalSequenceDataset(samples_by_split["test"], feature_contract=feature_contract, split="test"),
         batch_size=config.training.batch_size,
         shuffle=False,
         collate_fn=collate_training_samples,
+        pin_memory=pin_memory,
     )
     return TrainingDataBundle(
         feature_contract=feature_contract,

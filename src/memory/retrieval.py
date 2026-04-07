@@ -83,8 +83,27 @@ class AssociativeRetriever:
             for unit_index in hopfield_result.top_indices:
                 self.bank.memory_units[unit_index].retrieval_hits += 1
             if self.config.use_esom_map and self.bank.esom_map is not None and hopfield_result.top_indices:
-                top_unit_id = self.bank.memory_units[hopfield_result.top_indices[0]].unit_id
-                esom_neighbor_ids = self.bank.esom_map.neighbor_ids_for(top_unit_id)
+                # Aggregate ESOM neighbors over the WHOLE top-k, not just the
+                # single best unit. Previously this used top_indices[0] which
+                # caused identical neighbor sets across very different queries
+                # (and across different symbols) whenever one dominant unit
+                # kept winning the top slot. We now union neighbors from each
+                # top-k unit, dedupe while preserving order, and cap at top_k
+                # so the downstream consumers see a bounded list.
+                seen: set[str] = set()
+                aggregated: list[str] = []
+                for unit_index in hopfield_result.top_indices:
+                    unit_id = self.bank.memory_units[unit_index].unit_id
+                    for neighbor_id in self.bank.esom_map.neighbor_ids_for(unit_id):
+                        if neighbor_id in seen:
+                            continue
+                        seen.add(neighbor_id)
+                        aggregated.append(neighbor_id)
+                        if len(aggregated) >= self.config.top_k:
+                            break
+                    if len(aggregated) >= self.config.top_k:
+                        break
+                esom_neighbor_ids = aggregated
         strong_matches = [match for match in top_matches if match.similarity >= self.config.min_similarity]
         valid_clusters = [
             match for match in top_clusters

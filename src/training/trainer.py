@@ -16,9 +16,27 @@ from src.training.losses import (
     multitask_regression_loss,
     path_label_classification_loss,
     risk_path_regression_loss,
+    soma_gating_confidence_loss,
 )
 from src.training.metrics import BatchMetrics, build_collapse_warnings, compute_classification_report
 from src.utils.torch_utils import move_batch_to_device
+
+
+def _move_batch_non_blocking(batch, device: torch.device):
+    """Like move_batch_to_device but uses non_blocking=True on CUDA so that
+    pinned-memory host->device copies overlap with the previous step's kernel.
+    Falls back to synchronous copies on CPU-only runs (where non_blocking is a
+    no-op anyway)."""
+    from collections.abc import Mapping
+    if isinstance(batch, torch.Tensor):
+        return batch.to(device, non_blocking=True)
+    if isinstance(batch, Mapping):
+        return {k: _move_batch_non_blocking(v, device) for k, v in batch.items()}
+    if isinstance(batch, tuple):
+        return tuple(_move_batch_non_blocking(v, device) for v in batch)
+    if isinstance(batch, list):
+        return [_move_batch_non_blocking(v, device) for v in batch]
+    return batch
 
 
 @dataclass
@@ -63,6 +81,9 @@ class Trainer:
         self.loss_weights = dict(loss_weights or {
             "classification": 1.0, "regression": 0.35, "latent": 0.10,
             "path_label": 0.30, "future_return": 0.20, "risk_path": 0.15,
+            # Penalises soma gating that puts weight on low-confidence branches.
+            # Small weight: it's a regularizer, not the primary objective.
+            "gating_confidence": 0.05,
         })
         self.collapse_warning_thresholds = dict(
             collapse_warning_thresholds or {"long_prediction_floor": 0.08, "minority_recall_floor": 0.15}
@@ -140,15 +161,23 @@ class Trainer:
         epoch_count: int | None = None,
     ) -> BatchMetrics:
         self.model.train(training)
-        total_loss = 0.0
-        total_accuracy = 0.0
-        total_classification_loss = 0.0
-        total_regression_loss = 0.0
-        total_latent_loss = 0.0
-        total_path_label_loss = 0.0
-        total_future_return_loss = 0.0
-        total_risk_path_loss = 0.0
-        component_totals: dict[str, float] = {}
+        # --- Accumulate loss components on-device ---------------------------
+        # Previously each batch called ``.item()`` 8 times to extract scalar
+        # losses for logging. Each ``.item()`` is a GPU->CPU sync that drains
+        # the CUDA stream and blocks the next batch. We now accumulate every
+        # scalar loss on-device in a single tensor and sync once at the end
+        # of the epoch, eliminating 8*N_batches sync points.
+        device = self.device
+        loss_accum = torch.zeros(8, device=device)  # idx 0..7 map to the counters below
+        LOSS_IDX_TOTAL = 0
+        LOSS_IDX_ACC = 1
+        LOSS_IDX_CLS = 2
+        LOSS_IDX_REG = 3
+        LOSS_IDX_LAT = 4
+        LOSS_IDX_PL = 5
+        LOSS_IDX_FR = 6
+        LOSS_IDX_RP = 7
+        component_totals: dict[str, torch.Tensor] = {}
         logits_batches: list[torch.Tensor] = []
         label_batches: list[torch.Tensor] = []
         path_label_logits_batches: list[torch.Tensor] = []
@@ -161,7 +190,7 @@ class Trainer:
         progress_interval = 200 if training else 100
         started_at = perf_counter()
         for batch_index, batch in enumerate(loader, start=1):
-            batch = move_batch_to_device(batch, self.device)
+            batch = _move_batch_non_blocking(batch, self.device)
             self.optimizer.zero_grad(set_to_none=True)
             with maybe_autocast(self.device, self.use_amp and training):
                 output = self.model(
@@ -195,8 +224,8 @@ class Trainer:
                             focal_gamma=self.focal_gamma,
                             label_smoothing=self.label_smoothing,
                         )
-                        path_label_logits_batches.append(path_logits.detach().cpu())
-                        path_label_batches.append(batch["path_label"].detach().cpu())
+                        path_label_logits_batches.append(path_logits.detach())
+                        path_label_batches.append(batch["path_label"].detach())
 
                 # --- C. Legacy multitask regression loss ---
                 regression_loss = output.action_logits.new_zeros(())
@@ -230,6 +259,21 @@ class Trainer:
                 if self.multitask_enabled and self.contrastive_enabled:
                     latent_loss = latent_consistency_loss(output.fused_representation, batch["label"])
 
+                # --- G. Soma gating-confidence regularization ---
+                # Pulls the soma weights toward high-confidence branches so the
+                # gate can no longer learn to over-weight the regime branch
+                # while ignoring its own confidence (the observed runtime bug).
+                # Skipped for the baseline model which has no real branch
+                # confidences (it ships an empty dict).
+                gating_loss = output.action_logits.new_zeros(())
+                if output.branch_confidences:
+                    bc_stack = torch.stack(
+                        [output.branch_confidences[name].squeeze(-1) for name in output.branch_confidences],
+                        dim=-1,
+                    )
+                    if output.soma_weights.shape == bc_stack.shape:
+                        gating_loss = soma_gating_confidence_loss(output.soma_weights, bc_stack)
+
                 # --- Weighted total loss ---
                 loss = (
                     self.loss_weights.get("classification", 1.0) * classification_loss
@@ -238,29 +282,41 @@ class Trainer:
                     + self.loss_weights.get("path_label", 0.0) * path_label_loss
                     + self.loss_weights.get("future_return", 0.0) * future_return_loss
                     + self.loss_weights.get("risk_path", 0.0) * risk_path_loss
+                    + self.loss_weights.get("gating_confidence", 0.0) * gating_loss
                 )
 
             if training:
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-            predictions = output.action_logits.detach().argmax(dim=-1)
-            accuracy = (predictions == batch["label"]).float().mean().item()
-            logits_batches.append(output.action_logits.detach().cpu())
-            label_batches.append(batch["label"].detach().cpu())
-            total_loss += float(loss.detach().item())
-            total_accuracy += float(accuracy)
-            total_classification_loss += float(classification_loss.detach().item())
-            total_regression_loss += float(regression_loss.detach().item())
-            total_latent_loss += float(latent_loss.detach().item())
-            total_path_label_loss += float(path_label_loss.detach().item())
-            total_future_return_loss += float(future_return_loss.detach().item())
-            total_risk_path_loss += float(risk_path_loss.detach().item())
-            for name, value in regression_components.items():
-                component_totals[name] = component_totals.get(name, 0.0) + float(value)
+            # Accumulate on-device; no sync here.
+            with torch.no_grad():
+                predictions = output.action_logits.detach().argmax(dim=-1)
+                accuracy = (predictions == batch["label"]).float().mean()
+                loss_accum[LOSS_IDX_TOTAL] += loss.detach()
+                loss_accum[LOSS_IDX_ACC] += accuracy
+                loss_accum[LOSS_IDX_CLS] += classification_loss.detach()
+                loss_accum[LOSS_IDX_REG] += regression_loss.detach()
+                loss_accum[LOSS_IDX_LAT] += latent_loss.detach()
+                loss_accum[LOSS_IDX_PL] += path_label_loss.detach()
+                loss_accum[LOSS_IDX_FR] += future_return_loss.detach()
+                loss_accum[LOSS_IDX_RP] += risk_path_loss.detach()
+                # Keep full logits/labels for end-of-epoch metrics, but stay
+                # on-device — the .cpu() call is deferred to after the loop.
+                logits_batches.append(output.action_logits.detach())
+                label_batches.append(batch["label"].detach())
+                for name, value in regression_components.items():
+                    v = value if isinstance(value, torch.Tensor) else torch.tensor(float(value), device=device)
+                    if name not in component_totals:
+                        component_totals[name] = v.detach().clone()
+                    else:
+                        component_totals[name] += v.detach()
             batches += 1
             if batch_index == 1 or batch_index % progress_interval == 0 or (total_batches is not None and batch_index == total_batches):
                 elapsed = perf_counter() - started_at
+                # Progress logging is the *only* place we sync mid-epoch.
+                # Only fire at sparse intervals (every 200 train batches).
+                avg = (loss_accum[[LOSS_IDX_TOTAL, LOSS_IDX_ACC]] / batches).tolist()
                 self.logger.info(
                     "epoch_progress",
                     stage=stage,
@@ -268,14 +324,24 @@ class Trainer:
                     epochs=epoch_count,
                     batch=batch_index,
                     total_batches=total_batches,
-                    avg_loss=total_loss / batches,
-                    avg_accuracy=total_accuracy / batches,
+                    avg_loss=avg[0],
+                    avg_accuracy=avg[1],
                     elapsed_sec=elapsed,
                 )
         if batches == 0:
             return BatchMetrics(loss=0.0, accuracy=0.0)
-        epoch_logits = torch.cat(logits_batches, dim=0)
-        epoch_labels = torch.cat(label_batches, dim=0)
+        # Single host-sync of the whole accumulator at the end of the epoch.
+        loss_totals = loss_accum.detach().cpu().tolist()
+        total_loss = loss_totals[LOSS_IDX_TOTAL]
+        total_accuracy = loss_totals[LOSS_IDX_ACC]
+        total_classification_loss = loss_totals[LOSS_IDX_CLS]
+        total_regression_loss = loss_totals[LOSS_IDX_REG]
+        total_latent_loss = loss_totals[LOSS_IDX_LAT]
+        total_path_label_loss = loss_totals[LOSS_IDX_PL]
+        total_future_return_loss = loss_totals[LOSS_IDX_FR]
+        total_risk_path_loss = loss_totals[LOSS_IDX_RP]
+        epoch_logits = torch.cat(logits_batches, dim=0).cpu()
+        epoch_labels = torch.cat(label_batches, dim=0).cpu()
         classification_report = compute_classification_report(logits=epoch_logits, labels=epoch_labels)
         warnings = build_collapse_warnings(
             classification_report=classification_report,
@@ -285,10 +351,10 @@ class Trainer:
         # Path label accuracy (if tracked)
         path_label_accuracy = 0.0
         if path_label_logits_batches:
-            all_pl_logits = torch.cat(path_label_logits_batches, dim=0)
-            all_pl_labels = torch.cat(path_label_batches, dim=0)
+            all_pl_logits = torch.cat(path_label_logits_batches, dim=0).cpu()
+            all_pl_labels = torch.cat(path_label_batches, dim=0).cpu()
             pl_preds = all_pl_logits.argmax(dim=-1)
-            path_label_accuracy = float((pl_preds == all_pl_labels).float().mean().item())
+            path_label_accuracy = float((pl_preds == all_pl_labels).float().mean())
 
         return BatchMetrics(
             loss=total_loss / batches,
@@ -309,7 +375,7 @@ class Trainer:
             target_distribution=dict(classification_report["target_ratios"]),
             per_class_metrics=dict(classification_report["per_class"]),
             warnings=warnings,
-            components={name: value / batches for name, value in component_totals.items()},
+            components={name: float(value.detach().cpu()) / batches for name, value in component_totals.items()},
         )
 
     def _get_path_logits(self, output: object, batch: dict) -> torch.Tensor | None:

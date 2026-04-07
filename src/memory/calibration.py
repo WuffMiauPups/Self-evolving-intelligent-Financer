@@ -36,10 +36,22 @@ def build_retrieval_calibration(
         neighbor = items[neighbor_index]
         agreement = 1.0 if item.outcome.direction_class == neighbor.outcome.direction_class else 0.0
         dispersion = abs(item.outcome.primary_return - neighbor.outcome.primary_return)
-        conflict = 1.0 if (
-            item.outcome.direction_class not in {"flat"} and neighbor.outcome.direction_class not in {"flat"}
-            and item.outcome.direction_class != neighbor.outcome.direction_class
-        ) else 0.0
+        # --- Graded conflict score -------------------------------------------
+        # Previously this was binary: 1.0 iff item and neighbor had opposite
+        # *non-flat* direction labels, else 0.0. On small per-symbol calibration
+        # buckets, a single mismatched pair could push the bucket's mean
+        # conflict to 1.0 and zero out calibrated_confidence entirely
+        # (calibrated_confidence is a 4-way product). The graded version below
+        # gives a 0.5 weight to flat-vs-directional disagreements (real but
+        # weaker), keeps directional flips at 1.0, and grants 0.0 only to
+        # exact agreement, so a sparse bucket with one mismatch no longer
+        # collapses the whole calibration multiplier.
+        if item.outcome.direction_class == neighbor.outcome.direction_class:
+            conflict = 0.0
+        elif "flat" in {item.outcome.direction_class, neighbor.outcome.direction_class}:
+            conflict = 0.5
+        else:
+            conflict = 1.0
         similarities.append(similarity)
         agreements.append(agreement)
         dispersions.append(dispersion)

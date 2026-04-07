@@ -102,6 +102,16 @@ class ModelStateEncoder:
             raise ValueError(f"Expected latent dim {self.expected_latent_dim}, got {latent_dim}")
 
         contract_id = feature_contract_fingerprint(reference_contract)
+        # --- L2-normalize fused representations before they enter memory -----
+        # Memory similarity is cosine-based but the brain's fused_representation
+        # has no norm constraint, so latents can drift onto an arbitrarily small
+        # manifold and saturate cosine similarity to ~1.0 against everything
+        # (the observed retrieval pathology). Normalizing at the encoder
+        # boundary makes every latent live on the unit sphere, which is what
+        # cosine similarity actually expects. This is a bank-side change only
+        # — model training is unaffected because fused_representation is still
+        # used unnormalized inside the model heads.
+        normalized_fused = F.normalize(output.fused_representation, p=2.0, dim=-1, eps=1.0e-8)
         encoded_states: list[EncodedState] = []
         for index, snapshot in enumerate(snapshots):
             branch_confidences = {
@@ -119,7 +129,7 @@ class ModelStateEncoder:
                 EncodedState(
                     symbol=snapshot.symbol,
                     timestamp=snapshot.timestamp,
-                    latent=output.fused_representation[index].detach().cpu().to(dtype=torch.float32),
+                    latent=normalized_fused[index].detach().cpu().to(dtype=torch.float32),
                     feature_contract_id=contract_id,
                     regime_weights=regime_weights,
                     branch_confidences=branch_confidences,

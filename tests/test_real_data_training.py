@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.slow
+
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 

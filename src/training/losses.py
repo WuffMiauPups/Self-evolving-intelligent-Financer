@@ -182,3 +182,28 @@ def latent_consistency_loss(
         else similarity.new_zeros(())
     )
     return positive_loss + negative_loss
+
+
+def soma_gating_confidence_loss(
+    soma_weights: torch.Tensor,
+    branch_confidences: torch.Tensor,
+) -> torch.Tensor:
+    """Penalize the soma for assigning weight to low-confidence branches.
+
+    soma_weights:       [batch, branch_count] (sums to 1 along branch_count)
+    branch_confidences: [batch, branch_count] in (0, 1)
+
+    Returns ``1 - E[confidence weighted by soma]``. Minimum 0 when the soma
+    puts all weight on a perfectly-confident branch; maximum 1 when soma
+    weights and confidences are uncorrelated. Adding this term to the loss
+    forces the gate to actually use the per-branch confidence signal instead
+    of treating it as just-another-feature in the gate input.
+    """
+    if soma_weights.dim() != 2 or branch_confidences.dim() != 2:
+        raise ValueError(
+            "soma_gating_confidence_loss expects 2D tensors "
+            f"got soma_weights={tuple(soma_weights.shape)} "
+            f"branch_confidences={tuple(branch_confidences.shape)}"
+        )
+    weighted = (soma_weights * branch_confidences).sum(dim=-1)
+    return (1.0 - weighted).mean()

@@ -17,6 +17,11 @@ from src.data.cache import HistoricalBarCache
 from src.data.historical_data import HistoricalDataService, generate_synthetic_bars, parse_date_or_datetime
 from src.data.schemas import MarketBar
 from src.features.feature_pipeline import FeaturePipeline
+from src.memory.bank_cache import (
+    compute_bank_fingerprint,
+    load_cached_bank,
+    save_cached_bank,
+)
 from src.memory.encoder_eval import evaluate_encoder_quality
 from src.memory.storage import save_memory_bank
 from src.memory.updater import build_memory_bank_from_bars
@@ -102,6 +107,23 @@ def main() -> int:
         action="store_true",
         help="Allow mock historical generation when --real-data is requested without Alpaca credentials.",
     )
+    parser.add_argument(
+        "--evaluate-fusion",
+        action="store_true",
+        help="Run offline decision fusion evaluation after building the bank.",
+    )
+    parser.add_argument(
+        "--fusion-max-samples",
+        type=int,
+        default=None,
+        help="Cap the number of samples for offline fusion evaluation (default: all).",
+    )
+    parser.add_argument(
+        "--no-bank-cache",
+        action="store_true",
+        help="Skip the on-disk bank cache and force a fresh build even when a "
+             "matching cached bank exists. Implies no cache write either.",
+    )
     args = parser.parse_args()
     config = load_config(*args.config)
     config.memory.enabled = True
@@ -135,20 +157,41 @@ def main() -> int:
         feature_contract=artifacts.feature_contract,
         expected_latent_dim=config.memory.latent_dim,
     )
+    # forward_horizons / path_label_rules are auto-synced training -> memory
+    # by AppConfig.normalize_data_defaults; only the real-data flag merges here.
     memory_config = config.memory.model_copy(
         update={
             "build_from_real_checkpoint": use_real_data or config.memory.build_from_real_checkpoint,
-            "forward_horizons": list(config.training.forward_horizons),
-            "path_label_rules": dict(config.training.path_label_rules),
         }
     )
-    bank = build_memory_bank_from_bars(
-        bars_by_symbol=bars_by_symbol,
-        pipeline=pipeline,
-        encoder=encoder,
-        memory_config=memory_config,
-        warmup_bars=config.runtime.warmup_bars,
-    )
+
+    # Bank cache fast-path: identical (bars + memory/feature config + checkpoint
+    # + warmup) inputs deterministically produce the same bank, so reload from
+    # disk when possible. --no-bank-cache forces a fresh build.
+    bank = None
+    bank_fingerprint: str | None = None
+    if not args.no_bank_cache:
+        try:
+            bank_fingerprint = compute_bank_fingerprint(
+                config=config,
+                bars_by_symbol=bars_by_symbol,
+                warmup_bars=config.runtime.warmup_bars,
+                checkpoint_path=config.model.checkpoint_path,
+            )
+            bank = load_cached_bank(fingerprint=bank_fingerprint)
+        except Exception as exc:  # noqa: BLE001
+            print(f"bank_cache_fingerprint_failed error={exc}")
+            bank_fingerprint = None
+    if bank is None:
+        bank = build_memory_bank_from_bars(
+            bars_by_symbol=bars_by_symbol,
+            pipeline=pipeline,
+            encoder=encoder,
+            memory_config=memory_config,
+            warmup_bars=config.runtime.warmup_bars,
+        )
+        if bank_fingerprint is not None and not args.no_bank_cache:
+            save_cached_bank(fingerprint=bank_fingerprint, bank=bank)
     save_memory_bank(config.memory.persist_path, bank)
     print(
         "memory_build_complete"
@@ -188,6 +231,41 @@ def main() -> int:
             f" symbol_profiles={int(summary.get('symbol_calibration_profile_count', 0))}"
             f" regime_profiles={int(summary.get('regime_calibration_profile_count', 0))}"
         )
+    if args.evaluate_fusion:
+        from src.strategies.fusion_evaluation import evaluate_fusion_offline
+
+        # Enable fusion for evaluation (even if not enabled in config)
+        eval_config = memory_config.model_copy(
+            update={"decision_fusion": memory_config.decision_fusion.model_copy(update={"enabled": True})}
+        )
+        fusion_summary = evaluate_fusion_offline(
+            bank, eval_config, max_samples=args.fusion_max_samples,
+        )
+        bank.meta["fusion_evaluation"] = fusion_summary.to_dict()
+        save_memory_bank(config.memory.persist_path, bank)
+        print(
+            "fusion_evaluation_complete"
+            f" evaluated={fusion_summary.evaluated_samples}"
+            f" support={fusion_summary.support_count}"
+            f" neutral={fusion_summary.neutral_count}"
+            f" dampen={fusion_summary.dampen_count}"
+            f" veto={fusion_summary.veto_count}"
+            f" avg_return={fusion_summary.avg_future_return_all:.6f}"
+            f" hit_rate={fusion_summary.directional_hit_rate_all:.4f}"
+            f" support_vs_outcome={fusion_summary.support_vs_outcome_correlation:.6f}"
+            f" topo_disagreement_bad_rate={fusion_summary.topology_disagreement_bad_outcome_rate:.4f}"
+        )
+        for level, level_summary in fusion_summary.level_summaries.items():
+            if level_summary.sample_count > 0:
+                print(
+                    f"  {level}:"
+                    f" n={level_summary.sample_count}"
+                    f" avg_ret={level_summary.avg_future_return:.6f}"
+                    f" hit_rate={level_summary.directional_hit_rate:.4f}"
+                    f" avg_mfe={level_summary.avg_mfe:.6f}"
+                    f" avg_mae={level_summary.avg_mae:.6f}"
+                    f" avg_dd={level_summary.avg_drawdown:.6f}"
+                )
     return 0
 
 

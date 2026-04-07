@@ -43,7 +43,8 @@ class RiskManager:
         age = now - proposal.timestamp
         if age > timedelta(seconds=self.config.stale_data_sec):
             reasons.append(ReasonCode.STALE_DATA)
-        if proposal.spread_bps > self.config.max_spread_bps:
+        # At-the-limit spreads reject (defensive default): "wider-or-equal than max".
+        if proposal.spread_bps >= self.config.max_spread_bps:
             reasons.append("spread_too_wide")
         if portfolio.daily_pnl <= -abs(self.config.max_daily_loss):
             reasons.append("daily_loss_limit")

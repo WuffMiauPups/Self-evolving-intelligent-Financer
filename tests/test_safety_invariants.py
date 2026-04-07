@@ -641,9 +641,14 @@ class TestConfigWiring:
         config = load_config("configs/default.yaml")
         assert config.runtime.allow_online_model_updates is False
 
-    def test_topology_growth_off_by_default_in_yaml(self):
-        config = load_config("configs/default.yaml")
-        assert config.memory.topology_growth.enabled is False
+    def test_topology_growth_off_in_code_default(self):
+        # Code-level safety invariant: TopologyGrowthConfig() must default OFF.
+        # default.yaml may explicitly enable it for research builds, but anyone
+        # constructing MemoryConfig()/TopologyGrowthConfig() programmatically
+        # must get growth disabled until they opt in.
+        from src.core.config import MemoryConfig, TopologyGrowthConfig
+        assert TopologyGrowthConfig().enabled is False
+        assert MemoryConfig().topology_growth.enabled is False
 
     def test_memory_enabled_in_default_yaml(self):
         config = load_config("configs/default.yaml")

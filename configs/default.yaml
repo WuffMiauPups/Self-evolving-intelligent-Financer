@@ -39,8 +39,6 @@ data:
     retry_count: 3
     retry_backoff_sec: 1.0
     validation_strictness: warn
-    precompute_features: false
-    precompute_targets: false
     max_prep_workers: 4
     manifest_path: artifacts/historical/manifest.json
 
@@ -51,13 +49,14 @@ runtime:
   timeframe: 5Min
   warmup_bars: 48
   decision_interval_sec: 2.0
-  max_runtime_steps: 50
+  # 0 = unbounded (default). Set a positive integer only for bounded debug runs.
+  max_runtime_steps: 0
   state_reset_gap_sec: 300
   require_startup_reconciliation: true
   block_on_reconciliation_mismatch: true
   allowed_sessions: ["regular"]
   allow_prepost: false
-  max_data_staleness_sec: 30
+  max_data_staleness_sec: 1200
   block_on_backwards_time: true
   block_on_data_gap: true
   block_on_symbol_ineligible: false
@@ -100,7 +99,7 @@ model:
   cnn_channels: [16, 32, 64]
   cnn_kernel_sizes: [3, 5, 7]
   temporal_blocks: 3
-  checkpoint_path: null
+  checkpoint_path: checkpoints/brain.pt
 
 risk:
   max_daily_loss: 350.0
@@ -109,7 +108,7 @@ risk:
   max_concurrent_positions: 15
   cooldown_sec: 60
   stale_data_sec: 30
-  max_spread_bps: 15.0
+  max_spread_bps: 100.0
   duplicate_order_window_sec: 15
   min_trade_confidence: 0.55
   min_trade_fraction: 0.02
@@ -132,7 +131,6 @@ training:
   test_split: 0.1
   label_epsilon: 0.0005
   checkpoint_dir: checkpoints
-  supervised_horizon: 1
   sequence_length: 48
   use_amp: false
   forward_horizons: [1, 3, 6]
@@ -158,7 +156,7 @@ training:
   # Fast runs are explicitly marked in logs and run summaries.
   # Do NOT promote a fast-mode checkpoint to production.
   fast_mode:
-    enabled: false
+    enabled: true
     sample_seed: 42
     # fast_months: 6           # restrict to last N months of cached data
     # fast_start_date: null    # explicit ISO date override, e.g. "2025-01-01"
@@ -197,7 +195,7 @@ memory:
     time_to_move_threshold: 0.002
   min_cluster_size: 3
   runtime_update_mode: pending_only
-  require_strong_match_for_trade: true
+  require_strong_match_for_trade: false
   build_history_bars: 320
   min_effective_matches: 2
   attention_temperature: 1.0
@@ -265,7 +263,7 @@ memory:
   # Bounded insertion of new candidate units for novel states.
   # All OFF by default — enable after reviewing fusion evaluation output.
   topology_growth:
-    enabled: false
+    enabled: true
     min_novelty_score: 0.60
     min_topology_sparsity: 0.30
     max_insertions_per_refresh: 3

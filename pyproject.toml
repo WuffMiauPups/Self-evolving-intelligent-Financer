@@ -36,4 +36,10 @@ include = ["src*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# Default run skips slow tests. Use `pytest -m slow` to run only slow ones,
+# or `pytest -m ""` to run everything.
+addopts = "-m 'not slow'"
+markers = [
+  "slow: long-running tests (real-data training, full sweeps, end-to-end). Skipped by default.",
+]
 
