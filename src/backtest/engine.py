@@ -47,9 +47,11 @@ class BacktestEngine:
             timestamp = next(iter(bars_by_symbol.values()))[index].timestamp
             portfolio.mark_to_market(latest_prices, timestamp)
             for symbol, bars in bars_by_symbol.items():
+                _win = self.config.runtime.warmup_bars
+                _bar_slice = bars[max(0, index + 1 - _win): index + 1]
                 if hasattr(policy, "prepare_symbol_history"):
-                    policy.prepare_symbol_history(symbol, bars[: index + 1])
-                snapshot = self.feature_pipeline.build(bars[: index + 1], symbol=symbol)
+                    policy.prepare_symbol_history(symbol, _bar_slice)
+                snapshot = self.feature_pipeline.build(_bar_slice, symbol=symbol)
                 proposal, _ = policy.propose(snapshot)
                 if hasattr(policy, "record_snapshot"):
                     policy.record_snapshot(symbol)

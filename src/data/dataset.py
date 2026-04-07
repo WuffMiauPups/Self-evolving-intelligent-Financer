@@ -42,7 +42,7 @@ class BarWindowDataset(Dataset[TrainingSample]):
         self.feature_contract: FeatureContract | None = None
         for symbol, bars in bars_by_symbol.items():
             for index in range(warmup_bars, len(bars) - horizon):
-                snapshot: FeatureSnapshot = pipeline.build(bars[: index + 1], symbol=symbol)
+                snapshot: FeatureSnapshot = pipeline.build(bars[max(0, index + 1 - warmup_bars): index + 1], symbol=symbol)
                 if self.feature_contract is None:
                     self.feature_contract = snapshot.contract
                 else:

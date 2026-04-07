@@ -16,10 +16,88 @@ from src.training.supervised import (
     run_supervised_training,
 )
 
+# ---------------------------------------------------------------------------
+# Experiment presets: named configurations for reproducible baselines
+# ---------------------------------------------------------------------------
+PRESETS: dict[str, dict[str, object]] = {
+    "state-only": {
+        "description": (
+            "State-only baseline: classification + regression + latent only. "
+            "Disables path-label, future-return, and risk-path auxiliary losses."
+        ),
+        "fast": True,
+        "fast_months": 6,
+        "fast_epochs": 2,
+        "disable_path_label": True,
+        "disable_future_return": True,
+        "disable_risk_path": True,
+    },
+    "classification-latent": {
+        "description": (
+            "Classification + latent only: disables regression and all auxiliary losses."
+        ),
+        "fast": True,
+        "fast_months": 6,
+        "fast_epochs": 2,
+        "disable_path_label": True,
+        "disable_future_return": True,
+        "disable_risk_path": True,
+        "disable_regression": True,
+    },
+    "classification-only": {
+        "description": (
+            "Pure classification: only direction loss, all auxiliaries disabled."
+        ),
+        "fast": True,
+        "fast_months": 6,
+        "fast_epochs": 2,
+        "disable_path_label": True,
+        "disable_future_return": True,
+        "disable_risk_path": True,
+        "disable_regression": True,
+        "disable_latent": True,
+    },
+}
+
+
+def _apply_preset(args: argparse.Namespace, preset_name: str) -> None:
+    """Apply a named preset to the parsed args (CLI flags override preset values)."""
+    preset = PRESETS[preset_name]
+    # Map preset keys to argparse attribute names (hyphens → underscores)
+    for key, value in preset.items():
+        if key == "description":
+            continue
+        attr = key.replace("-", "_")
+        # Only apply if the CLI did not explicitly set the value
+        current = getattr(args, attr, None)
+        if isinstance(value, bool):
+            # For bool flags: only apply if the user didn't set the flag
+            if not current:
+                setattr(args, attr, value)
+        else:
+            # For optional values: only apply if user left it at default (None)
+            if current is None:
+                setattr(args, attr, value)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run supervised training")
     parser.add_argument("--baseline", action="store_true", help="Train the baseline MLP instead of the brain model")
+    parser.add_argument(
+        "--preset",
+        choices=sorted(PRESETS.keys()),
+        default=None,
+        help=(
+            "Apply a named experiment preset. Presets set sensible defaults; "
+            "explicit CLI flags still override preset values. "
+            "Available: " + ", ".join(sorted(PRESETS.keys()))
+        ),
+    )
+    parser.add_argument(
+        "--list-presets",
+        action="store_true",
+        help="List available experiment presets and exit.",
+    )
     parser.add_argument(
         "--real-data",
         action="store_true",
@@ -176,6 +254,11 @@ def main() -> int:
         help="Disable risk-path auxiliary loss for this run (fast mode).",
     )
     parser.add_argument(
+        "--classification-only",
+        action="store_true",
+        help="Convenience: disable regression, latent, path-label, future-return, and risk-path (pure direction classification).",
+    )
+    parser.add_argument(
         "--fast-model",
         action="store_true",
         help="Use smaller experimental model profile (fast mode): reduced CNN, temporal, and branch dims.",
@@ -213,6 +296,22 @@ def main() -> int:
         help="Config file(s), later files override earlier files.",
     )
     args = parser.parse_args()
+
+    # Handle --list-presets
+    if args.list_presets:
+        print("\nAvailable experiment presets:\n")
+        for name in sorted(PRESETS):
+            preset = PRESETS[name]
+            desc = preset.get("description", "")
+            flags = {k: v for k, v in preset.items() if k != "description"}
+            print(f"  {name}")
+            print(f"    {desc}")
+            print(f"    Flags: {flags}\n")
+        return 0
+
+    # Apply preset defaults (CLI flags still override)
+    if args.preset is not None:
+        _apply_preset(args, args.preset)
 
     # Handle comparison/listing modes that don't need full config
     if args.list_runs:
@@ -277,6 +376,12 @@ def main() -> int:
         config.training.disable_regression = True
     if args.disable_latent:
         config.training.disable_latent = True
+    if args.classification_only:
+        config.training.disable_regression = True
+        config.training.disable_latent = True
+        config.training.fast_mode.disable_path_label = True
+        config.training.fast_mode.disable_future_return = True
+        config.training.fast_mode.disable_risk_path = True
     if args.loss_weight_classification is not None:
         config.training.loss_weights["classification"] = args.loss_weight_classification
     if args.loss_weight_regression is not None:

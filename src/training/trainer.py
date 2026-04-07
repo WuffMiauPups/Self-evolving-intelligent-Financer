@@ -78,13 +78,21 @@ class Trainer:
         self.classification_loss_mode = classification_loss_mode
         self.focal_gamma = focal_gamma
         self.label_smoothing = label_smoothing
-        self.loss_weights = dict(loss_weights or {
-            "classification": 1.0, "regression": 0.35, "latent": 0.10,
-            "path_label": 0.30, "future_return": 0.20, "risk_path": 0.15,
+        # Defaults are merged with the caller-supplied dict so new loss terms
+        # (like gating_confidence, added 2026-04-07) automatically apply to
+        # configs that predate them. Caller overrides win where keys overlap.
+        default_loss_weights = {
+            "classification": 1.0,
+            "regression": 0.35,
+            "latent": 0.10,
+            "path_label": 0.30,
+            "future_return": 0.20,
+            "risk_path": 0.15,
             # Penalises soma gating that puts weight on low-confidence branches.
             # Small weight: it's a regularizer, not the primary objective.
             "gating_confidence": 0.05,
-        })
+        }
+        self.loss_weights = {**default_loss_weights, **dict(loss_weights or {})}
         self.collapse_warning_thresholds = dict(
             collapse_warning_thresholds or {"long_prediction_floor": 0.08, "minority_recall_floor": 0.15}
         )

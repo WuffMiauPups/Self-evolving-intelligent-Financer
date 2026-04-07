@@ -154,6 +154,68 @@ class ESOMMap:
         self.edges = kept
         return expired
 
+    def node_for(self, unit_id: str) -> ESOMNode | None:
+        """Return the ESOMNode for *unit_id*, or ``None`` if not found."""
+        for node in self.nodes:
+            if node.unit_id == unit_id:
+                return node
+        return None
+
+    def neighbor_agreement(
+        self,
+        unit_id: str,
+        units_by_id: dict[str, "MemoryUnit"],
+    ) -> tuple[float, int, list[str]]:
+        """Compute directional agreement between *unit_id* and its ESOM neighbours.
+
+        Returns ``(agreement_score, neighbor_count, reason_codes)``.
+
+        *agreement_score* is in [0, 1] where 1 means all neighbours share the
+        dominant direction of the query unit and 0 means total disagreement.
+        When there are no neighbours or the query unit is missing, returns
+        ``(0.0, 0, ["no_topology_data"])``.
+        """
+        node = self.node_for(unit_id)
+        if node is None or not node.neighbor_ids:
+            return 0.0, 0, ["no_topology_data"]
+
+        query_unit = units_by_id.get(unit_id)
+        if query_unit is None:
+            return 0.0, 0, ["unit_not_found"]
+
+        # Determine dominant direction of query unit
+        dir_probs = query_unit.path_stats.direction_probabilities
+        if not dir_probs:
+            return 0.0, 0, ["no_direction_data"]
+        query_direction = max(dir_probs, key=dir_probs.get)
+
+        agreements = 0
+        valid_neighbors = 0
+        reasons: list[str] = []
+        for nid in node.neighbor_ids:
+            neighbor_unit = units_by_id.get(nid)
+            if neighbor_unit is None:
+                continue
+            if neighbor_unit.status == "quarantined":
+                reasons.append(f"neighbor_quarantined:{nid}")
+                continue
+            n_probs = neighbor_unit.path_stats.direction_probabilities
+            if not n_probs:
+                continue
+            neighbor_direction = max(n_probs, key=n_probs.get)
+            valid_neighbors += 1
+            if neighbor_direction == query_direction:
+                agreements += 1
+
+        if valid_neighbors == 0:
+            reasons.append("no_valid_neighbors")
+            return 0.0, 0, reasons
+
+        score = agreements / valid_neighbors
+        if score < 0.5:
+            reasons.append("topology_disagreement")
+        return score, valid_neighbors, reasons
+
     def activate_edge(self, unit_a: str, unit_b: str, *, similarity: float, step: int) -> GraphEdge:
         """Create or refresh an edge between two units (GNG-style competitive Hebbian)."""
         existing = self.edge_between(unit_a, unit_b)

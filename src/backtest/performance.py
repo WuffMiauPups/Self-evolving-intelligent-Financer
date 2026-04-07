@@ -37,6 +37,11 @@ def compute_backtest_metrics(
     win_rate = wins / len(realized) if realized else 0.0
     turnover = sum(abs(fill.quantity * fill.price) for fill in fills) / initial_equity if initial_equity else 0.0
     avg_exposure = sum(exposures) / len(exposures) if exposures else 0.0
+    avg_return_per_trade = sum(realized) / len(realized) if realized else 0.0
+    gross_profit = sum(pnl for pnl in realized if pnl > 0)
+    gross_loss = abs(sum(pnl for pnl in realized if pnl < 0))
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
+    expectancy = (win_rate * (gross_profit / wins) - (1.0 - win_rate) * (gross_loss / max(len(realized) - wins, 1))) if realized else 0.0
     return {
         "total_return": (equity_curve[-1] / initial_equity) - 1.0,
         "max_drawdown": max_drawdown,
@@ -44,5 +49,8 @@ def compute_backtest_metrics(
         "turnover": turnover,
         "avg_exposure": avg_exposure,
         "fill_count": float(len(fills)),
+        "avg_return_per_trade": avg_return_per_trade,
+        "profit_factor": profit_factor,
+        "expectancy": expectancy,
     }
 
