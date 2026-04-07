@@ -72,12 +72,21 @@ class BrainPolicy:
         else:
             self.memory_state_by_symbol[snapshot.symbol] = output.memory_state.detach()
         self.last_timestamp_by_symbol[snapshot.symbol] = snapshot.timestamp
-        action_index = int(output.action_logits.argmax(dim=-1).item())
+        logits = output.action_logits.squeeze(0)
+        action_index = int(logits.argmax(dim=-1).item())
+        # Force directional trade: if model picks FLAT, fall back to the
+        # strongest directional logit (SHORT vs LONG).
+        if Action(action_index) == Action.FLAT:
+            short_logit = float(logits[int(Action.SHORT)].item())
+            long_logit = float(logits[int(Action.LONG)].item())
+            action_index = int(Action.LONG) if long_logit >= short_logit else int(Action.SHORT)
         action = ACTION_TO_SIGN[Action(action_index)]
         confidence = float(output.confidence.squeeze(0).item())
         target_fraction = float(output.target_fraction.squeeze(0).item())
-        if action == 0:
-            target_fraction = 0.0
+        if abs(target_fraction) < 1e-6:
+            target_fraction = 0.05 * action
+        elif action != 0 and (target_fraction == 0.0 or (target_fraction > 0) != (action > 0)):
+            target_fraction = abs(target_fraction) * action
         sequence_id = self.request_seq_by_symbol.get(snapshot.symbol, 0) + 1
         self.request_seq_by_symbol[snapshot.symbol] = sequence_id
         proposal = TradeProposal(

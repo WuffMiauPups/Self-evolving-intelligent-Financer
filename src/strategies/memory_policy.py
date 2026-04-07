@@ -277,7 +277,7 @@ class MemoryAwarePolicy:
         # Fusion-aware path (when fusion is enabled and available)
         # -----------------------------------------------------------
         if fusion is not None:
-            if fusion.support_level == VETO:
+            if fusion.support_level == VETO and self.require_strong_match_for_trade:
                 metadata.update(
                     {
                         "memory_adjusted_action": 0.0,
