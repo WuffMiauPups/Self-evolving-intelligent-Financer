@@ -233,11 +233,40 @@ def inspect_training_data(config: AppConfig) -> dict[str, object]:
     }
 
 
+def resolve_checkpoint_save_dir(
+    *,
+    base_dir: Path,
+    run_id: str,
+    explicit_run_id: bool,
+    fast_mode_enabled: bool,
+    isolate_checkpoint: bool | None,
+) -> tuple[Path, bool]:
+    """Resolve where this training run should save its checkpoint.
+
+    Returns (target_dir, isolated) where ``isolated`` is True iff the
+    target_dir was nested under ``base_dir / run_id`` to protect the
+    canonical checkpoint at ``base_dir / brain.pt`` from being overwritten.
+
+    Auto-isolation kicks in when the caller passed an explicit run_id
+    (signalling "this is a labeled experiment, do not touch the canonical
+    checkpoint") or when fast mode is enabled (fast-mode checkpoints must
+    never be promoted to production per --fast help text). Callers that
+    manage their own per-run paths (e.g. sweep_train.py) can pass
+    ``isolate_checkpoint=False`` to opt out.
+    """
+    if isolate_checkpoint is None:
+        isolate_checkpoint = explicit_run_id or fast_mode_enabled
+    if isolate_checkpoint:
+        return base_dir / run_id, True
+    return base_dir, False
+
+
 def run_supervised_training(
     config: AppConfig,
     *,
     use_baseline: bool = False,
     run_id: str | None = None,
+    isolate_checkpoint: bool | None = None,
 ) -> dict[str, object]:
     configure_logging(
         config.logging.level,
@@ -246,6 +275,7 @@ def run_supervised_training(
         file_path=config.logging.file_path,
     )
     logger = get_logger("training")
+    explicit_run_id = run_id is not None
     if run_id is None:
         run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     run_start = datetime.now(UTC)
@@ -413,8 +443,26 @@ def run_supervised_training(
         report_prediction_distribution=config.training.report_prediction_distribution,
         report_per_class_metrics=config.training.report_per_class_metrics,
     )
-    checkpoint_dir = Path(config.training.checkpoint_dir)
-    checkpoint_path = checkpoint_dir / ("baseline.pt" if use_baseline else "brain.pt")
+    base_checkpoint_dir = Path(config.training.checkpoint_dir)
+    checkpoint_dir, checkpoint_isolated = resolve_checkpoint_save_dir(
+        base_dir=base_checkpoint_dir,
+        run_id=run_id,
+        explicit_run_id=explicit_run_id,
+        fast_mode_enabled=fast.enabled,
+        isolate_checkpoint=isolate_checkpoint,
+    )
+    checkpoint_filename = "baseline.pt" if use_baseline else "brain.pt"
+    checkpoint_path = checkpoint_dir / checkpoint_filename
+    if checkpoint_isolated:
+        canonical_path = base_checkpoint_dir / checkpoint_filename
+        logger.warning(
+            "checkpoint_path_isolated",
+            run_id=run_id,
+            reason="explicit_run_id" if explicit_run_id else "fast_mode",
+            isolated_path=str(checkpoint_path),
+            canonical_path_protected=str(canonical_path),
+            note="Set isolate_checkpoint=False to write to canonical_path instead.",
+        )
     save_checkpoint(
         checkpoint_path,
         model=model,

@@ -41,17 +41,21 @@ DEFAULT_SWEEP_GRID: dict[str, list[object]] = {
 }
 
 
-def load_sweep_grid(path: str | None) -> dict[str, list[object]]:
-    """Load sweep grid from YAML or return default."""
+def load_sweep_config(path: str | None) -> tuple[dict[str, list[object]], str | None]:
+    """Load sweep grid and optional preset from YAML, or return defaults.
+
+    Returns (grid_dict, preset_name_or_None).
+    """
     if path is None:
-        return dict(DEFAULT_SWEEP_GRID)
+        return dict(DEFAULT_SWEEP_GRID), None
     import yaml
     with open(path) as f:
         data = yaml.safe_load(f)
+    preset = data.get("preset", None)
     grid = data.get("sweep", data.get("grid", data))
     if not isinstance(grid, dict):
         raise ValueError(f"Sweep config must be a dict, got {type(grid)}")
-    return grid
+    return grid, preset
 
 
 def expand_grid(grid: dict[str, list[object]]) -> list[dict[str, object]]:
@@ -120,7 +124,12 @@ def prune_redundant_combos(combos: list[dict[str, object]]) -> list[dict[str, ob
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a controlled training sweep")
     parser.add_argument("--real-data", action="store_true", help="Use cached real data")
-    parser.add_argument("--sweep-config", default=None, help="Path to sweep grid YAML")
+    parser.add_argument("--sweep-config", default=None, help="Path to sweep grid YAML (may include a 'preset' key)")
+    parser.add_argument(
+        "--preset",
+        default=None,
+        help="Apply an experiment preset to all sweep runs (overridden by sweep-config preset if both given).",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print the sweep plan without running")
     parser.add_argument(
         "--rank-by",
@@ -135,11 +144,41 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # Import presets from run_train so we have a single source of truth
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from run_train import PRESETS
+
     base_config = load_config(*args.config)
     if args.real_data:
         base_config.training.use_real_historical_data = True
 
-    grid = load_sweep_grid(args.sweep_config)
+    grid, config_preset = load_sweep_config(args.sweep_config)
+    # Determine effective preset: sweep-config preset wins over CLI --preset
+    effective_preset = config_preset or args.preset
+
+    # Apply preset overrides to base config
+    if effective_preset is not None:
+        if effective_preset not in PRESETS:
+            print(f"Unknown preset: {effective_preset!r}. Available: {sorted(PRESETS.keys())}")
+            return 1
+        preset = PRESETS[effective_preset]
+        fast = base_config.training.fast_mode
+        fast.enabled = True
+        if preset.get("fast_months") is not None:
+            fast.fast_months = preset["fast_months"]
+        if preset.get("fast_epochs") is not None:
+            fast.max_epochs = preset["fast_epochs"]
+        if preset.get("disable_path_label"):
+            fast.disable_path_label = True
+        if preset.get("disable_future_return"):
+            fast.disable_future_return = True
+        if preset.get("disable_risk_path"):
+            fast.disable_risk_path = True
+        if preset.get("disable_regression"):
+            base_config.training.disable_regression = True
+        if preset.get("disable_latent"):
+            base_config.training.disable_latent = True
+
     combos = expand_grid(grid)
     combos = prune_redundant_combos(combos)
 
@@ -174,7 +213,13 @@ def main() -> int:
             # Use a unique checkpoint path per run
             run_config.training.checkpoint_dir = f"checkpoints/{sweep_id}"
             checkpoint_name = f"brain_run{i + 1:03d}.pt"
-            result = run_supervised_training(run_config, run_id=run_id)
+            # sweep manages its own per-run paths via checkpoint_dir override
+            # + post-rename below, so opt out of run_supervised_training's
+            # auto-isolation (which would otherwise nest the checkpoint at
+            # checkpoints/{sweep_id}/{run_id}/brain.pt and break the rename).
+            result = run_supervised_training(
+                run_config, run_id=run_id, isolate_checkpoint=False,
+            )
             summary_paths.append(result.get("run_summary_path", ""))
 
             # Rename checkpoint to unique name
