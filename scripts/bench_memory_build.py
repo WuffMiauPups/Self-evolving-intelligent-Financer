@@ -10,9 +10,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 import time
+from pathlib import Path
 
 import torch
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.core.config import load_config
 from src.data.historical_data import generate_synthetic_bars

@@ -18,11 +18,6 @@ from src.data.cache import HistoricalBarCache
 from src.data.historical_data import HistoricalDataService, generate_synthetic_bars, parse_date_or_datetime
 from src.data.schemas import MarketBar
 from src.features.feature_pipeline import FeaturePipeline
-from src.memory.bank_cache import (
-    compute_bank_fingerprint,
-    load_cached_bank,
-    save_cached_bank,
-)
 from src.memory.storage import save_memory_bank
 from src.memory.updater import build_memory_bank_from_bars
 from src.models.factory import resolve_inference_model
@@ -102,12 +97,6 @@ def main() -> int:
         action="store_true",
         help="Allow mock historical generation when --real-data is requested without Alpaca credentials.",
     )
-    parser.add_argument(
-        "--no-bank-cache",
-        action="store_true",
-        help="Skip the on-disk bank cache and force a fresh build even when a "
-             "matching cached bank exists. Implies no cache write either.",
-    )
     args = parser.parse_args()
     config = load_config(*args.config)
     # Configure logging so ``logger.info(...)`` calls from memory modules
@@ -118,7 +107,7 @@ def main() -> int:
     from src.core.logging import configure_logging
     configure_logging(
         level=config.logging.level,
-        json_logs=config.logging.json,
+        json_logs=config.logging.json_logs,
         file_enabled=False,  # subprocess stdout is the primary channel
         file_path=None,
     )
@@ -175,49 +164,25 @@ def main() -> int:
         }
     )
 
-    # Bank cache fast-path: identical (bars + memory/feature config + checkpoint
-    # + warmup) inputs deterministically produce the same bank, so reload from
-    # disk when possible. --no-bank-cache forces a fresh build.
-    bank = None
-    bank_fingerprint: str | None = None
-    if not args.no_bank_cache:
-        try:
-            bank_fingerprint = compute_bank_fingerprint(
-                config=config,
-                bars_by_symbol=bars_by_symbol,
-                warmup_bars=config.runtime.warmup_bars,
-                checkpoint_path=config.model.checkpoint_path,
-            )
-            bank = load_cached_bank(fingerprint=bank_fingerprint)
-        except Exception as exc:  # noqa: BLE001
-            print(f"bank_cache_fingerprint_failed error={exc}")
-            bank_fingerprint = None
-    if bank is None:
-        bank = build_memory_bank_from_bars(
-            bars_by_symbol=bars_by_symbol,
-            pipeline=pipeline,
-            encoder=encoder,
-            memory_config=memory_config,
-            warmup_bars=config.runtime.warmup_bars,
-        )
-        if bank_fingerprint is not None and not args.no_bank_cache:
-            _t0 = time.perf_counter()
-            print(f"phase_timing phase=save_cached_bank_start items={len(bank)}", flush=True)
-            save_cached_bank(fingerprint=bank_fingerprint, bank=bank)
-            print(f"phase_timing phase=save_cached_bank_done elapsed_sec={time.perf_counter() - _t0:.2f}", flush=True)
+    bank = build_memory_bank_from_bars(
+        bars_by_symbol=bars_by_symbol,
+        pipeline=pipeline,
+        encoder=encoder,
+        memory_config=memory_config,
+        warmup_bars=config.runtime.warmup_bars,
+    )
     _t_save = time.perf_counter()
     print(f"phase_timing phase=save_memory_bank_start items={len(bank)} path={config.memory.persist_path}", flush=True)
     save_memory_bank(config.memory.persist_path, bank)
     print(f"phase_timing phase=save_memory_bank_done elapsed_sec={time.perf_counter() - _t_save:.2f}", flush=True)
+    summary = bank.summary()
     print(
         "memory_build_complete"
         f" path={config.memory.persist_path}"
-        f" items={len(bank)}"
-        f" clusters={len(bank.prototypes)}"
-        f" units={len(bank.memory_units)}"
-        f" mature_units={sum(1 for unit in bank.memory_units if unit.status == 'mature')}"
-        f" esom_nodes={0 if bank.esom_map is None else len(bank.esom_map.nodes)}"
-        f" latent_dim={bank.latent_dim}"
+        f" items={summary['item_count']}"
+        f" latent_dim={summary['latent_dim']}"
+        f" max_items={summary['max_items']}"
+        f" encoder_fingerprint={summary['encoder_fingerprint']}"
         f" source={'real' if use_real_data else 'synthetic'}"
     )
     return 0
