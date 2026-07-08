@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import gc
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from torch.utils.data import DataLoader
@@ -320,6 +320,24 @@ def build_real_data_training_bundle(
         for split in symbol_splits:
             split_indices = eligible_indices[cursor: cursor + split.sample_count]
             cursor += split.sample_count
+            # Embargo: a sample at bar i carries labels computed from bars
+            # i+1..i+max_horizon, so the trailing max_horizon samples of
+            # train (and val) have labels that read into the next split's
+            # window — outcomes the model "sees" in training and is then
+            # graded on. Purge them. (Splits smaller than the horizon are
+            # left intact — only degenerate test fixtures hit that.)
+            if (
+                split.split in ("train", "val")
+                and max_horizon > 0
+                and len(split_indices) > max_horizon
+            ):
+                split_indices = split_indices[:-max_horizon]
+                split = replace(
+                    split,
+                    sample_count=len(split_indices),
+                    end_index=split_indices[-1],
+                    end_timestamp=bars[split_indices[-1]].timestamp,
+                )
             split_ranges[split.split][symbol] = split
             shard_split_by_name[split.split] = split
             progress_interval = 25_000 if len(split_indices) >= 100_000 else 10_000

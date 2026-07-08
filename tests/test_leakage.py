@@ -257,3 +257,41 @@ def test_force_directional_flip_flag() -> None:
 # ── Test 8: Ablation flags wiring ───────────────────────────────────────
 
 
+
+
+# ── Split-boundary embargo (C2-adjacent label leakage) ─────────────────
+
+
+def test_split_boundary_embargo_purges_horizon_overlap() -> None:
+    """Train/val samples whose forward-label window crosses the next
+    split's boundary must be purged: a sample at bar i carries labels
+    from bars i+1..i+max_horizon, so without the embargo the last
+    max_horizon train samples are graded on val-period outcomes."""
+    from src.features.feature_pipeline import FeaturePipeline as _FP
+    from src.training.data_module import build_real_data_training_bundle
+
+    config = _make_config()
+    config.data.symbols = ["AAPL"]
+    config.training.fast_mode.enabled = False
+    bars = generate_synthetic_bars("AAPL", 600)
+    bundle = build_real_data_training_bundle(
+        config=config,
+        bars_by_symbol={"AAPL": bars},
+        pipeline=_FP(config.features, device=torch.device("cpu")),
+    )
+    max_horizon = max(
+        list(config.training.forward_horizons) + list(config.training.auxiliary_horizons)
+    )
+    bar_index_by_ts = {bar.timestamp: i for i, bar in enumerate(bars)}
+    for earlier, later in (("train", "val"), ("val", "test")):
+        earlier_split = bundle.split_ranges[earlier]["AAPL"]
+        later_split = bundle.split_ranges[later]["AAPL"]
+        if earlier_split.sample_count == 0 or later_split.sample_count == 0:
+            continue
+        earlier_end = bar_index_by_ts[earlier_split.end_timestamp]
+        later_start = bar_index_by_ts[later_split.start_timestamp]
+        gap = later_start - earlier_end
+        assert gap > max_horizon, (
+            f"{earlier}->{later} boundary gap {gap} bars <= max_horizon "
+            f"{max_horizon}: forward labels cross the split boundary"
+        )

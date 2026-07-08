@@ -43,7 +43,7 @@ from src.training.splits import SymbolSplit
 
 # Bump this when the *structure* of cached payloads changes in a way that
 # existing pickles can no longer be used safely.
-CACHE_VERSION = 2
+CACHE_VERSION = 3  # v3: label-affecting knobs added to the fingerprint
 
 # Bump this when the on-disk *shard* payload structure changes.  Shards
 # are a sibling cache format to the monolithic ``samples_<hash>.pt``
@@ -51,7 +51,7 @@ CACHE_VERSION = 2
 # fingerprint that combines (config, symbol, bar-content-summary).  A
 # change to only one symbol's bars invalidates that one shard instead of
 # forcing a full rebuild across the whole universe.
-SHARD_CACHE_VERSION = 1
+SHARD_CACHE_VERSION = 2  # v2: split-boundary embargo purge changes shard contents
 
 DEFAULT_CACHE_DIR = Path("artifacts/training_cache")
 DEFAULT_SHARD_DIR = DEFAULT_CACHE_DIR / "shards"
@@ -109,6 +109,15 @@ def _training_config_fingerprint(cfg: AppConfig) -> dict[str, Any]:
         ),
         "effective_primary_horizon": int(t.effective_primary_horizon),
         "label_epsilon": float(t.label_epsilon),
+        # Label-affecting knobs that were missing from the fingerprint:
+        # changing any of these alters cached labels, so omitting them
+        # served stale samples across config changes.
+        "transaction_cost_bps": float(t.transaction_cost_bps),
+        "adaptive_label_epsilon": bool(t.adaptive_label_epsilon),
+        "adaptive_epsilon_multiplier": float(t.adaptive_epsilon_multiplier),
+        "adaptive_epsilon_min": float(t.adaptive_epsilon_min),
+        "adaptive_epsilon_max": float(t.adaptive_epsilon_max),
+        "label_epsilon_min_bars": int(t.label_epsilon_min_bars),
         "path_label_rules": {k: float(v) for k, v in t.path_label_rules.items()},
         "regression_targets": list(t.regression_targets),
         "enable_future_return_targets": bool(t.enable_future_return_targets),
