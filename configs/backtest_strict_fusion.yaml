@@ -1,12 +1,13 @@
-# Backtest preset: stricter decision fusion thresholds.
+# Backtest preset: stricter decision fusion thresholds — MOSTLY A NO-OP.
 #
-# Tightens the fusion gate so conflict dampens/vetoes fire more readily.
-# Expect fewer trades with higher average conviction.
+# The decision-fusion layer was removed in the Great Simplification.
+# The decision_fusion sub-keys below are intentionally swallowed by the
+# inert DecisionFusionConfig stub and change nothing.  The only override
+# that still has effect is memory.min_calibrated_match (0.15 -> 0.25),
+# which tightens the memory match-calibration gate.
 #
-# Delta vs default:
-#   conflict_veto_threshold:    0.70 -> 0.55
-#   conflict_dampen_threshold:  0.40 -> 0.30
-#   min_calibrated_match:       0.15 -> 0.25
+# The file is kept (scripts/GUI reference presets by name); rewrite it
+# when the strategy-layer rework lands.
 memory:
   min_calibrated_match: 0.25
   decision_fusion:

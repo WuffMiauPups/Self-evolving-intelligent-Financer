@@ -74,8 +74,12 @@ def main() -> int:
     parser.add_argument(
         "--config",
         action="append",
-        default=["configs/default.yaml", "configs/training.yaml"],
-        help="Config file(s), later files override earlier files.",
+        default=None,
+        help=(
+            "Config file(s), later files override earlier files. "
+            "Default: configs/default.yaml + configs/training.yaml. "
+            "Passing --config REPLACES the default stack (it does not append to it)."
+        ),
     )
     parser.add_argument("--force-refresh", action="store_true", help="Ignore cache and refetch all chunks.")
     parser.add_argument("--allow-mock", action="store_true", help="Generate synthetic data when credentials are missing.")
@@ -86,6 +90,10 @@ def main() -> int:
                         help="Override chunk size.")
     parser.add_argument("--cache-only", action="store_true", help="Use only cached data, do not fetch.")
     args = parser.parse_args()
+    # argparse action='append' appends to a non-None default instead of
+    # replacing it, so the default stack is applied post-parse.
+    if args.config is None:
+        args.config = ["configs/default.yaml", "configs/training.yaml"]
 
     config = load_config(*args.config)
     configure_logging(

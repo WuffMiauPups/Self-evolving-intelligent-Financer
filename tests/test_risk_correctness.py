@@ -196,7 +196,8 @@ def test_rolling_drawdown_blocks_entry_but_not_reduce() -> None:
 
 
 def test_aggregate_cap_breach_still_allows_reduce() -> None:
-    config = RiskConfig(max_aggregate_notional=1_000.0)
+    # per-position cap lowered too: aggregate >= position is now validated.
+    config = RiskConfig(max_aggregate_notional=1_000.0, max_position_notional=1_000.0)
     manager = RiskManager(config)
     portfolio = _with_position(_portfolio(), "AAPL", qty=50.0)  # 5000 notional > cap
     entry = manager.evaluate(
@@ -260,7 +261,9 @@ def test_aggregate_notional_boundary_exactly_at_cap_approves() -> None:
 
 
 def test_prospective_notional_replaces_current_position_contribution() -> None:
-    config = RiskConfig(max_aggregate_notional=4_500.0)
+    # per-position cap lowered too (>= the 4000 target so no resize occurs):
+    # aggregate >= position is now validated at config load.
+    config = RiskConfig(max_aggregate_notional=4_500.0, max_position_notional=4_500.0)
     manager = RiskManager(config)
     portfolio = _with_position(_portfolio(), "AAPL", qty=30.0)  # 3000 notional
     # Target 4000 REPLACES the 3000 (prospective 4000, not 3000+4000=7000).
@@ -560,7 +563,7 @@ def test_flat_proposal_with_no_position_rejected_as_no_change() -> None:
 
 
 def test_risk_manager_never_mutates_shared_config() -> None:
-    config = RiskConfig(max_daily_loss=-350.0)  # negative on purpose
+    config = RiskConfig(max_daily_loss=-350.0)  # negative on purpose (normalized to +350 at validation)
     snapshot = config.model_dump()
     manager = RiskManager(config)
     portfolio = _with_position(_portfolio(), "AAPL", qty=50.0)
@@ -574,7 +577,10 @@ def test_risk_manager_never_mutates_shared_config() -> None:
 
 
 def test_negative_max_daily_loss_config_still_enforced() -> None:
+    # Backward-compat contract: negative input is accepted and normalized to
+    # its magnitude at validation, so the limit still enforces at -350 PnL.
     config = RiskConfig(max_daily_loss=-350.0)
+    assert config.max_daily_loss == 350.0
     manager = RiskManager(config)
     portfolio = _portfolio()
     portfolio.daily_pnl = -400.0

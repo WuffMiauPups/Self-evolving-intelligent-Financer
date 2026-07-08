@@ -1,0 +1,10 @@
+# Market priors pre-filter disabled: tests whether filtering trade
+# proposals through trend, volume, and volatility sanity checks before
+# execution improves risk-adjusted returns.
+# All other new features remain enabled.
+memory:
+  enabled: true
+  decision_fusion:
+    enabled: true
+runtime:
+  market_priors_enabled: false

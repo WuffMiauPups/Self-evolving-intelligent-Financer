@@ -1,0 +1,14 @@
+# Shared experiment base — CURRENTLY A NO-OP.
+#
+# This base used to lower risk.min_trade_confidence / min_trade_fraction so
+# an undertrained brain's low-confidence signals could generate fills for
+# ablation comparisons.  Both keys were removed in the Great Simplification:
+# trade gating is EV-based now (confidence * expected_gain_bps -
+# (1-confidence) * expected_loss_bps - cost_bps > 0), so there is no
+# confidence/fraction threshold left to loosen.
+#
+# The file is kept because scripts/run_experiments.py layers it before every
+# experiment overlay.  It is a no-op pending the strategy-layer rework
+# (master plan 1F.4: rewrite for the EV-gate era so ablations generate
+# fills, e.g. via EV padding or an explicit gate bypass for diagnostics).
+{}

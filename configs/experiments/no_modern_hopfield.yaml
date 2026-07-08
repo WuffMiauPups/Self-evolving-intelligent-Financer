@@ -1,0 +1,8 @@
+# Modern Hopfield retrieval disabled: tests whether the Ramsauer et al.
+# (2020) exponential attention retrieval improves over classic dot-product
+# similarity.  All other new features remain enabled.
+memory:
+  enabled: true
+  modern_hopfield_enabled: false
+  decision_fusion:
+    enabled: true

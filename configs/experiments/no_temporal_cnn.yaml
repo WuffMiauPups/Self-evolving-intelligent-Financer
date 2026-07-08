@@ -1,0 +1,9 @@
+# Temporal CNN disabled: tests whether the convolutional time-series
+# encoder adds value over the branch+soma architecture alone.
+# Memory disabled to isolate the model component being tested.
+model:
+  use_cnn_encoder: false
+memory:
+  enabled: false
+  decision_fusion:
+    enabled: false

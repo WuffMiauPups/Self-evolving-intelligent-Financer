@@ -1,0 +1,9 @@
+# Latent GRU memory disabled: tests whether the recurrent hidden state
+# (cross-tick memory) adds value. The GRU output is replaced with zeros.
+# Memory disabled to isolate the model component being tested.
+model:
+  latent_gru_memory_enabled: false
+memory:
+  enabled: false
+  decision_fusion:
+    enabled: false

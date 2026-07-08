@@ -17,8 +17,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         action="append",
-        default=["configs/default.yaml"],
-        help="Config path(s), later files override earlier files.",
+        default=None,
+        help=(
+            "Config path(s), later files override earlier files. "
+            "REPLACES the default stack (configs/default.yaml) when given."
+        ),
     )
     parser.add_argument(
         "--confirm-live",
@@ -36,7 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    config: AppConfig = load_config(*args.config)
+    config_paths = args.config if args.config else ["configs/default.yaml"]
+    config: AppConfig = load_config(*config_paths)
     if args.use_memory:
         config.memory.enabled = True
     if args.command == "paper":

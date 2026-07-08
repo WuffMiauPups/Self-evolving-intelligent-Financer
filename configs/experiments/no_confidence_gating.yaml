@@ -1,0 +1,11 @@
+# Confidence gating disabled: tests whether the branch/soma confidence
+# weighting mechanism helps. Branch confidences are set to 1.0 (uniform)
+# and soma uses only learned gate weights without confidence scaling.
+# Memory disabled to isolate the model component being tested.
+model:
+  branch_confidence_gating_enabled: false
+  soma_confidence_weighting_enabled: false
+memory:
+  enabled: false
+  decision_fusion:
+    enabled: false

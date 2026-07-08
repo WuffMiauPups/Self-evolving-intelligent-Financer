@@ -26,10 +26,8 @@ from src.core.config import AppConfig, load_config
 from src.core.logging import configure_logging, get_logger
 from src.training.run_summary import (
     compare_runs,
-    find_best_run,
     format_comparison_table,
     load_run_summary,
-    list_run_summaries,
 )
 
 
@@ -56,6 +54,36 @@ def load_sweep_config(path: str | None) -> tuple[dict[str, list[object]], str | 
     if not isinstance(grid, dict):
         raise ValueError(f"Sweep config must be a dict, got {type(grid)}")
     return grid, preset
+
+
+def find_best_sweep_run(
+    summaries: list[dict[str, object]],
+    metric: str,
+    *,
+    higher_is_better: bool = True,
+) -> dict[str, object] | None:
+    """Pick the best run among THIS sweep's own summaries.
+
+    Deliberately scoped to the summaries produced by the current sweep —
+    unlike ``run_summary.find_best_run``, which scans all of runs/ and can
+    crown an unrelated session's checkpoint.
+    """
+    best_summary: dict[str, object] | None = None
+    best_value: float | None = None
+    for summary in summaries:
+        value: object = summary
+        for key in metric.split("."):
+            value = value.get(key) if isinstance(value, dict) else None
+        if not isinstance(value, (int, float)):
+            continue
+        if (
+            best_value is None
+            or (higher_is_better and value > best_value)
+            or (not higher_is_better and value < best_value)
+        ):
+            best_value = float(value)
+            best_summary = summary
+    return best_summary
 
 
 def expand_grid(grid: dict[str, list[object]]) -> list[dict[str, object]]:
@@ -139,10 +167,17 @@ def main() -> int:
     parser.add_argument(
         "--config",
         action="append",
-        default=["configs/default.yaml", "configs/training.yaml"],
-        help="Base config file(s)",
+        default=None,
+        help=(
+            "Base config file(s). Default: configs/default.yaml + configs/training.yaml. "
+            "Passing --config REPLACES the default stack (it does not append to it)."
+        ),
     )
     args = parser.parse_args()
+    # argparse action='append' appends to a non-None default instead of
+    # replacing it, so the default stack is applied post-parse.
+    if args.config is None:
+        args.config = ["configs/default.yaml", "configs/training.yaml"]
 
     # Import presets from run_train so we have a single source of truth
     sys.path.insert(0, str(ROOT / "scripts"))
@@ -249,10 +284,7 @@ def main() -> int:
             print("=" * 80)
             print(format_comparison_table(comparison))
 
-            best = find_best_run(
-                base_config.training.runs_dir,
-                metric=args.rank_by,
-            )
+            best = find_best_sweep_run(summaries, metric=args.rank_by)
             if best:
                 print(f"\nBest run by {args.rank_by}: {best['run_id']}")
                 print(f"  Checkpoint: {best.get('checkpoint_path', 'n/a')}")

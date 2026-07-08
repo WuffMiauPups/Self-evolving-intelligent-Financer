@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.core.exceptions import ConfigurationError
 
@@ -29,6 +29,8 @@ class FastModeConfig(BaseModel):
         disable_risk_path: zero risk-path loss weight
         model_profile: "default" (unchanged arch) or "small" (reduced dims)
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     # Date range
@@ -68,6 +70,8 @@ class FastModeConfig(BaseModel):
 
 
 class TrainingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     use_real_historical_data: bool = False
     batch_size: int = 384
     epochs: int = 3

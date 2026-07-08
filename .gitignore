@@ -10,5 +10,5 @@ logs/
 .mypy_cache/
 runs/
 oldsrc/
-experiments/
+/experiments/
 *.log

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.core.exceptions import ConfigurationError
 from src.core.time_utils import SESSION_NAMES
 
 
 class RiskConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     max_daily_loss: float = 500.0
     max_position_notional: float = 5000.0
     max_position_per_symbol: int = 1
@@ -39,3 +41,57 @@ class RiskConfig(BaseModel):
                 f"known sessions: {sorted(SESSION_NAMES)}"
             )
         return value
+
+    @field_validator("max_daily_loss")
+    @classmethod
+    def validate_max_daily_loss(cls, value: float) -> float:
+        # Backward compat: some configs state the loss limit as a negative
+        # number ("-350 means down 350"). Normalize to the positive magnitude
+        # at load time; the risk manager's abs()-at-read stays harmless.
+        if value == 0.0:
+            raise ConfigurationError("risk.max_daily_loss must be non-zero (a zero budget blocks all trading)")
+        return abs(value)
+
+    @field_validator("fee_bps", "slippage_bps", "max_spread_bps")
+    @classmethod
+    def validate_non_negative_bps(cls, value: float, info) -> float:
+        if value < 0.0:
+            raise ConfigurationError(f"risk.{info.field_name} must be >= 0")
+        return value
+
+    @field_validator("cooldown_sec", "stale_data_sec", "duplicate_order_window_sec")
+    @classmethod
+    def validate_non_negative_seconds(cls, value: int, info) -> int:
+        if value < 0:
+            raise ConfigurationError(f"risk.{info.field_name} must be >= 0")
+        return value
+
+    @field_validator("max_concurrent_positions")
+    @classmethod
+    def validate_max_concurrent_positions(cls, value: int) -> int:
+        if value < 1:
+            raise ConfigurationError("risk.max_concurrent_positions must be >= 1")
+        return value
+
+    @field_validator("quantity_precision")
+    @classmethod
+    def validate_quantity_precision(cls, value: float) -> float:
+        if value <= 0.0:
+            raise ConfigurationError("risk.quantity_precision must be > 0")
+        return value
+
+    @field_validator("max_daily_loss_pct")
+    @classmethod
+    def validate_max_daily_loss_pct(cls, value: float | None) -> float | None:
+        if value is not None and not 0.0 < value <= 1.0:
+            raise ConfigurationError("risk.max_daily_loss_pct must be within (0, 1] when set")
+        return value
+
+    @model_validator(mode="after")
+    def validate_notional_caps(self) -> "RiskConfig":
+        if self.max_aggregate_notional < self.max_position_notional:
+            raise ConfigurationError(
+                "risk.max_aggregate_notional must be >= risk.max_position_notional "
+                f"(got {self.max_aggregate_notional} < {self.max_position_notional})"
+            )
+        return self

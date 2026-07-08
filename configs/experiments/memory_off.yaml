@@ -1,0 +1,4 @@
+# Memory OFF: disable the associative memory system.
+# Fusion still runs but operates without memory signals.
+memory:
+  enabled: false

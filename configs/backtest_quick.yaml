@@ -46,20 +46,14 @@ data:
   start_date: 2026-02-25
   # end_date left at default (null → datetime.now(UTC))
 
-risk:
-  # Lower the confidence gate for evaluation.  The brain currently
-  # outputs confidence ~0.33-0.37 (barely above the random baseline
-  # for 3-class softmax).  The paper-trading config keeps 0.55 as a
-  # safety gate, but the backtest needs to LET the brain trade so we
-  # can measure its directional accuracy, win rate, and profit factor.
-  # Without this override, min_trade_confidence=0.55 from default.yaml
-  # would reject every single proposal → 0 fills → useless backtest.
-  # Set deliberately low (0.15) so the current undertrained brain's
-  # confidence (~0.20 average) can pass through.  This is a DIAGNOSTIC
-  # setting — it lets us measure the brain's actual behavior (even if
-  # degenerate) rather than showing 0 fills.  Raise this back to
-  # 0.55+ once the brain is properly trained with higher confidence.
-  min_trade_confidence: 0.15
+# NOTE: This preset used to lower risk.min_trade_confidence to 0.15 so an
+# undertrained brain could generate fills.  min_trade_confidence was removed
+# in the Great Simplification — trade gating is EV-based now (the risk
+# manager computes confidence * expected_gain_bps - (1-confidence) *
+# expected_loss_bps - cost_bps and approves only when positive), so there is
+# no confidence knob left to loosen.  If a quick backtest shows zero fills
+# on an undertrained brain, that is the EV gate being honest about noisy
+# MFE/MAE risk-head predictions, not a preset problem.
 
 memory:
   # Full-stack backtest: memory retrieval + decision fusion both ON

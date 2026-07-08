@@ -265,7 +265,8 @@ def main() -> int:
 
     git_hash = _get_git_hash()
     output_dir = Path(args.output_dir or base_config.evaluation.output_dir)
-    seed = args.seed or base_config.evaluation.seed
+    # `is not None` (not truthiness): --seed 0 is a valid, explicit seed.
+    seed = args.seed if args.seed is not None else base_config.evaluation.seed
 
     # Load data once (shared across experiments)
     seed_everything(seed)

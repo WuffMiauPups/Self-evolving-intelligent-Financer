@@ -1,0 +1,6 @@
+# Brain-only: disable memory system and decision fusion.
+# Tests the raw neural model without memory/fusion overhead.
+memory:
+  enabled: false
+  decision_fusion:
+    enabled: false

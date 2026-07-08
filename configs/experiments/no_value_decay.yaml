@@ -1,0 +1,8 @@
+# Value-aware decay disabled: tests whether protecting high-value memory
+# units from utility decay and filtering outlier observations improves
+# memory bank quality.  All other new features remain enabled.
+memory:
+  enabled: true
+  value_aware_decay: false
+  decision_fusion:
+    enabled: true

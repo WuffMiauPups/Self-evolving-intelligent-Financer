@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from src.core.exceptions import ConfigurationError
 
 
 class BrokerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     provider: str = "alpaca"
     paper: bool = True
     live_enabled: bool = False

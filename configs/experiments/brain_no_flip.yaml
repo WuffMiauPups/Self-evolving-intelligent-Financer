@@ -1,0 +1,9 @@
+# Brain-only with FLAT allowed: tests whether abstention improves results.
+# The default system forces every FLAT prediction into a directional trade.
+# This experiment lets the model abstain when it predicts FLAT.
+memory:
+  enabled: false
+  decision_fusion:
+    enabled: false
+backtest:
+  force_directional_flip_enabled: false

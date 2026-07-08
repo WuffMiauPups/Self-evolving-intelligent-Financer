@@ -1,0 +1,9 @@
+# Regime encoder disabled: tests whether market regime awareness helps.
+# The regime encoder output is replaced with zeros/uniform weights.
+# Memory disabled to isolate the model component being tested.
+model:
+  regime_encoder_enabled: false
+memory:
+  enabled: false
+  decision_fusion:
+    enabled: false

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.core.exceptions import ConfigurationError
 from src.core.time_utils import SESSION_NAMES
 
 
 class RuntimeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbols: list[str] = Field(default_factory=lambda: ["AAPL"])
     timeframe: str = "1Min"
     warmup_bars: int = 64

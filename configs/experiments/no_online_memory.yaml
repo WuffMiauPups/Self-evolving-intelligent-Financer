@@ -1,0 +1,4 @@
+# Online memory updates disabled: tests whether runtime memory learning
+# helps. The memory bank is frozen after initial build.
+runtime:
+  allow_online_memory_updates: false

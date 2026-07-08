@@ -5,18 +5,19 @@
 # more opportunities for the memory/fusion layer to add value (or blow up).
 #
 # NOTE: This preset differs from configs/experiments/loose_risk.yaml.
-# This preset: moderate loosening (min_trade_confidence=0.50).
-# experiments/loose_risk.yaml: aggressive (min_trade_confidence=0.10).
+# This preset: moderate loosening.  experiments/loose_risk.yaml: aggressive.
 # Use this for GUI interactive backtesting; the experiments version is
 # intended for automated ablation runs via scripts/run_experiments.py.
+#
+# min_trade_confidence was removed in the Great Simplification (trade
+# gating is EV-based now), so this preset only loosens position/turnover
+# limits.
 #
 # Delta vs default:
 #   max_position_notional:     12000 -> 20000
 #   max_concurrent_positions:  15    -> 25
-#   min_trade_confidence:      0.55  -> 0.50
 #   cooldown_sec:              60    -> 30
 risk:
   max_position_notional: 20000.0
   max_concurrent_positions: 25
-  min_trade_confidence: 0.50
   cooldown_sec: 30

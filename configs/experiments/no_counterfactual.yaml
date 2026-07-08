@@ -1,0 +1,9 @@
+# Counterfactual calibration disabled: tests whether the decision fusion
+# layer's self-calibration via counterfactual outcome tracking improves
+# trade selection accuracy.  All other new features remain enabled.
+memory:
+  enabled: true
+  counterfactual_calibration_enabled: false
+  decision_fusion:
+    enabled: true
+    counterfactual_calibration_enabled: false

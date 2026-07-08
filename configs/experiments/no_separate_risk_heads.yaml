@@ -1,0 +1,10 @@
+# Separate risk heads disabled: tests whether dedicated MFE/MAE/
+# volatility/drawdown prediction heads improve over the shared
+# value head architecture.  Requires separate training run.
+# All other new features remain enabled.
+memory:
+  enabled: true
+  decision_fusion:
+    enabled: true
+model:
+  separate_risk_heads: false

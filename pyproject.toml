@@ -8,10 +8,14 @@ version = "0.1.0"
 description = "Research-first, brain-inspired trading framework for Alpaca with PyTorch-first numerics."
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{ name = "OpenAI Codex" }]
+authors = [{ name = "SETAI" }]
 dependencies = [
   "alpaca-py>=0.42.0",
+  "numpy>=1.26.0",
   "pydantic>=2.7.0",
+  # alpaca-py imports pytz (alpaca/data/requests.py) but does not declare it;
+  # pandas 3.x no longer pulls pytz in transitively, so declare it here.
+  "pytz>=2024.1",
   "pyyaml>=6.0.1",
   "python-dotenv>=1.0.1",
   "structlog>=24.1.0",
@@ -21,6 +25,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.2.0",
+]
+gui = [
+  "PySide6>=6.6.0",
 ]
 
 [project.scripts]

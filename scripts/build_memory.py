@@ -84,8 +84,12 @@ def main() -> int:
     parser.add_argument(
         "--config",
         action="append",
-        default=["configs/default.yaml"],
-        help="Config file(s), later files override earlier files.",
+        default=None,
+        help=(
+            "Config file(s), later files override earlier files. "
+            "Default: configs/default.yaml. "
+            "Passing --config REPLACES the default (it does not append to it)."
+        ),
     )
     parser.add_argument(
         "--real-data",
@@ -98,6 +102,10 @@ def main() -> int:
         help="Allow mock historical generation when --real-data is requested without Alpaca credentials.",
     )
     args = parser.parse_args()
+    # argparse action='append' appends to a non-None default instead of
+    # replacing it, so the default stack is applied post-parse.
+    if args.config is None:
+        args.config = ["configs/default.yaml"]
     config = load_config(*args.config)
     # Configure logging so ``logger.info(...)`` calls from memory modules
     # (updater, memory_bank, topology_growth, etc.) are visible to whoever

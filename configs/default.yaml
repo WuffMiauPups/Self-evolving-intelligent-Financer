@@ -100,18 +100,12 @@ runtime:
   # Model weights are FROZEN at runtime by default.  Memory bank can learn online.
   allow_online_model_updates: false
   allow_online_memory_updates: true
-  # Regime hysteresis
+  # Regime hysteresis / market priors: removed in the Great Simplification.
+  # Only the top-level enabled flags survive (inert bools so GUI status
+  # widgets render "off"); the old sub-keys (thresholds, cooldowns, filters)
+  # have no model fields and would be rejected at load.
   regime_hysteresis_enabled: false
-  regime_consecutive_threshold: 3
-  regime_high_confidence_threshold: 0.65
-  regime_cooldown_bars: 5
-  regime_shift_detection_enabled: false
-  regime_shift_threshold_std: 2.5
-  # Market priors pre-filter
   market_priors_enabled: false
-  market_priors_trend_filter: true
-  market_priors_volume_filter: true
-  market_priors_volatility_filter: true
   # Alerting
   alert_webhook_url: null
   alert_timeout_sec: 5.0
@@ -292,9 +286,8 @@ training:
   disable_latent: false
   # --- Run output ---
   runs_dir: runs
-  # --- Sequential GRU training (stateful memory across batches) ---
-  sequential_memory_training: false
-  memory_truncation_steps: 16
+  # (sequential_memory_training / memory_truncation_steps removed — the
+  # sequential-GRU training path was never implemented; no model fields.)
   save_memory_after_training: true
   memory_build_split: train
   early_stopping_patience: 2          # stop training if val loss degrades for 2 consecutive epochs

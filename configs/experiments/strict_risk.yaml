@@ -1,0 +1,9 @@
+# Strict risk: lower position limits.
+# Tests whether tighter risk parameters improve risk-adjusted returns.
+# (min_trade_confidence removed in the Great Simplification — trade
+# gating is EV-based now, so this preset only tightens position limits.)
+risk:
+  max_position_per_symbol: 2
+  max_concurrent_positions: 8
+  max_position_notional: 8000.0
+  max_daily_loss: 200.0

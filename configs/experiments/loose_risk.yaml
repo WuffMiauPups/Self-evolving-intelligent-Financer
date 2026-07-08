@@ -1,0 +1,10 @@
+# Loose risk: higher position limits.
+# Tests whether relaxed risk parameters capture more alpha.
+# (min_trade_confidence / min_trade_fraction removed in the Great
+# Simplification — trade gating is EV-based now, so this preset only
+# loosens position/turnover limits.)
+risk:
+  max_position_per_symbol: 5
+  max_concurrent_positions: 25
+  max_position_notional: 20000.0
+  max_daily_loss: 500.0

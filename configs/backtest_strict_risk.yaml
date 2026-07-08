@@ -1,20 +1,21 @@
 # Backtest preset: stricter risk manager.
 #
-# Fewer, higher-conviction trades.  Lower position limits, longer cooldown,
-# higher min_trade_confidence so only the strongest signals fire.
+# Fewer, higher-conviction trades.  Lower position limits and a longer
+# cooldown so only the strongest signals fire.
 #
 # NOTE: This preset differs from configs/experiments/strict_risk.yaml.
-# This preset tightens max_position_notional + min_trade_confidence.
-# experiments/strict_risk.yaml tightens max_position_per_symbol +
-# min_trade_confidence. Different axes of risk; not redundant.
+# This preset tightens max_position_notional; experiments/strict_risk.yaml
+# tightens max_position_per_symbol.  Different axes of risk; not redundant.
+#
+# min_trade_confidence was removed in the Great Simplification (trade
+# gating is EV-based now), so this preset only tightens position/turnover
+# limits.
 #
 # Delta vs default:
 #   max_position_notional:     12000 -> 6000
 #   max_concurrent_positions:  15    -> 8
-#   min_trade_confidence:      0.55  -> 0.65
 #   cooldown_sec:              60    -> 120
 risk:
   max_position_notional: 6000.0
   max_concurrent_positions: 8
-  min_trade_confidence: 0.65
   cooldown_sec: 120

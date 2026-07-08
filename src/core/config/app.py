@@ -5,7 +5,7 @@ from typing import Any
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.core.config.broker import BrokerConfig
 from src.core.config.common import (
@@ -36,6 +36,11 @@ def _deep_merge(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
 
 
 class AppConfig(BaseModel):
+    # extra='forbid' package-wide: a YAML key without a model field is a
+    # hard error, never a silent no-op. The two documented inert stubs
+    # (DecisionFusionConfig / TopologyGrowthConfig) are the only exceptions.
+    model_config = ConfigDict(extra="forbid")
+
     app_name: str = "seif_trading_brain"
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     device: DeviceConfig = Field(default_factory=DeviceConfig)

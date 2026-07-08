@@ -1,7 +1,11 @@
-# Sweep: minimum trade confidence = 0.50 (looser than default 0.55).
+# Sweep: minimum trade confidence = 0.50 — CURRENTLY A NO-OP.
 #
-# Part of a 3-point sweep with backtest_sweep_confidence_070.yaml and
-# the default (0.55).  Tests whether a lower confidence threshold lets
-# more profitable trades through or just adds noise.
-risk:
-  min_trade_confidence: 0.50
+# This preset used to set risk.min_trade_confidence, which was removed in
+# the Great Simplification (trade gating is EV-based now, computed from the
+# risk head's MFE/MAE predictions — there is no confidence threshold knob).
+# Running this preset is identical to running the baseline.
+#
+# The file is kept (scripts/GUI reference presets by name) as a no-op
+# pending the strategy-layer rework, which will reintroduce a tunable
+# trade-gating axis (e.g. EV padding) worth sweeping.
+{}

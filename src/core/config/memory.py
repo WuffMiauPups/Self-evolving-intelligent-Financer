@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.core.exceptions import ConfigurationError
 
@@ -9,7 +9,12 @@ class DecisionFusionConfig(BaseModel):
     """Inert stub — the decision-fusion layer was removed in the Great
     Simplification. Kept as a ``config.memory.decision_fusion`` attribute so
     GUI and legacy log-filter code that read ``.enabled`` keep working.
-    Extra fields in old YAMLs are silently ignored by pydantic.
+
+    INTENTIONAL EXCEPTION to the package-wide ``extra='forbid'`` policy:
+    old YAMLs and presets still carry the deleted fusion layer's sub-keys
+    (conflict_veto_threshold, dampen weights, ...). This stub deliberately
+    swallows them so legacy configs keep loading. Do NOT tighten to
+    ``forbid`` unless every preset under configs/ has been scrubbed first.
     """
 
     enabled: bool = False
@@ -18,7 +23,12 @@ class DecisionFusionConfig(BaseModel):
 
 
 class TopologyGrowthConfig(BaseModel):
-    """Inert stub — topology growth removed in the Great Simplification."""
+    """Inert stub — topology growth removed in the Great Simplification.
+
+    INTENTIONAL EXCEPTION to the package-wide ``extra='forbid'`` policy:
+    deliberately swallows the deleted growth layer's legacy sub-keys
+    (insertion/split thresholds and weights) so old YAMLs keep loading.
+    """
 
     enabled: bool = False
 
@@ -26,6 +36,8 @@ class TopologyGrowthConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     enabled: bool = False
     build_from_real_checkpoint: bool = False
     latent_dim: int | None = None

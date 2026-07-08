@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class LoggingConfig(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     level: str = "INFO"
     json_logs: bool = Field(default=False, alias="json")
@@ -13,6 +13,8 @@ class LoggingConfig(BaseModel):
 
 
 class DeviceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     preferred: str = "auto"
     use_amp: bool = False
     matmul_precision: str = "high"
@@ -20,6 +22,8 @@ class DeviceConfig(BaseModel):
 
 
 class FeatureConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     windows: dict[str, int] = Field(default_factory=lambda: {"short": 5, "medium": 20, "long": 60})
     volatility_windows: list[int] = Field(default_factory=lambda: [5, 10, 20])
     momentum_windows: list[int] = Field(default_factory=lambda: [3, 5, 10])
@@ -36,6 +40,8 @@ class FeatureConfig(BaseModel):
 
 
 class BacktestConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     initial_cash: float = 100000.0
     fee_bps: float = 1.0
     slippage_bps: float = 2.0
@@ -45,6 +51,8 @@ class BacktestConfig(BaseModel):
 
 
 class ExecutionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     max_submit_retries: int = 2
     retry_backoff_sec: float = 0.5
     order_journal_enabled: bool = True

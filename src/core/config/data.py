@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.core.exceptions import ConfigurationError
 
 
 class PipelineConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     chunk_size: str = "monthly"
     max_fetch_workers: int = 4
     retry_count: int = 3
@@ -34,6 +36,8 @@ class PipelineConfig(BaseModel):
 
 
 class DataConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     symbols: list[str] = Field(default_factory=list)
     timeframe: str = "1Min"
     start_date: str | date | datetime | None = None

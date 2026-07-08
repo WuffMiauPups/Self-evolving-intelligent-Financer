@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.core.exceptions import ConfigurationError
 
@@ -11,6 +11,8 @@ class WalkForwardConfig(BaseModel):
     Defines how data is split into sequential train/val/test folds
     for out-of-sample evaluation. All durations are in bars.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     train_bars: int = 5000
     val_bars: int = 1000
@@ -40,6 +42,8 @@ class WalkForwardConfig(BaseModel):
 
 class EvaluationConfig(BaseModel):
     """Top-level evaluation / experiment configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     walk_forward: WalkForwardConfig = Field(default_factory=WalkForwardConfig)
     seed: int = 42

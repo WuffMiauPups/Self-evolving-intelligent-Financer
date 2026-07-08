@@ -1,0 +1,8 @@
+# RAN merge disabled: tests whether online prototype blending for
+# near-duplicate memory items improves retrieval quality and prevents
+# redundant unit accumulation.  All other new features remain enabled.
+memory:
+  enabled: true
+  ran_merge_enabled: false
+  decision_fusion:
+    enabled: true
