@@ -66,3 +66,74 @@ class PortfolioState:
         self.pnl_history.append(self.equity)
         self.last_update = timestamp
 
+    @property
+    def unrealized_pnl(self) -> float:
+        return sum(
+            (position.market_price - position.avg_price) * position.qty
+            for position in self.positions.values()
+        )
+
+
+def apply_fill(
+    portfolio: PortfolioState,
+    *,
+    symbol: str,
+    signed_delta: float,
+    fill_price: float,
+    timestamp: datetime,
+) -> float:
+    """Apply a signed fill to the position book and return realized PnL.
+
+    Shared close-out math for every fill source: the in-process
+    PaperExecutor and broker-reported fills captured during live-state
+    sync both route through here so simulated and broker accounting can
+    never diverge.  Does not touch cash/realized/daily PnL — callers own
+    those.
+    """
+    position = portfolio.positions.get(symbol)
+    if position is None:
+        if abs(signed_delta) < 1.0e-9:
+            return 0.0
+        portfolio.positions[symbol] = PositionState(
+            symbol=symbol,
+            qty=signed_delta,
+            avg_price=fill_price,
+            market_price=fill_price,
+            entry_time=timestamp,
+        )
+        return 0.0
+
+    old_qty = position.qty
+    new_qty = old_qty + signed_delta
+    if old_qty == 0:
+        position.qty = new_qty
+        position.avg_price = fill_price
+        position.market_price = fill_price
+        position.entry_time = timestamp
+        return 0.0
+
+    same_direction = old_qty * signed_delta > 0
+    if same_direction:
+        total_qty = abs(old_qty) + abs(signed_delta)
+        weighted_avg = ((abs(old_qty) * position.avg_price) + (abs(signed_delta) * fill_price)) / total_qty
+        position.qty = new_qty
+        position.avg_price = weighted_avg
+        position.market_price = fill_price
+        return 0.0
+
+    closing_qty = min(abs(old_qty), abs(signed_delta))
+    pnl_sign = 1.0 if old_qty > 0 else -1.0
+    realized_pnl = (fill_price - position.avg_price) * closing_qty * pnl_sign
+    if abs(new_qty) < 1.0e-9:
+        del portfolio.positions[symbol]
+        return realized_pnl
+    if old_qty * new_qty > 0:
+        position.qty = new_qty
+        position.market_price = fill_price
+        return realized_pnl
+    position.qty = new_qty
+    position.avg_price = fill_price
+    position.market_price = fill_price
+    position.entry_time = timestamp
+    return realized_pnl
+

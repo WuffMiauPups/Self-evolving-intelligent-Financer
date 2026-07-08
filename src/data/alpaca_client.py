@@ -177,6 +177,7 @@ class AlpacaClient:
             "buying_power": _safe_float(getattr(account, "buying_power", 0.0)),
             "cash": _safe_float(getattr(account, "cash", 0.0)),
             "equity": _safe_float(getattr(account, "equity", 0.0)),
+            "last_equity": _safe_float(getattr(account, "last_equity", 0.0)),
             "portfolio_value": _safe_float(getattr(account, "portfolio_value", 0.0)),
             "trading_blocked": bool(getattr(account, "trading_blocked", False)),
             "account_blocked": bool(getattr(account, "account_blocked", False)),
@@ -218,6 +219,15 @@ class AlpacaClient:
         return [self._normalize_order(order) for order in orders]
 
     def get_order_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None:
+        # Alpaca's dedicated endpoint covers closed orders too, so an
+        # order that filled between polls (and thus vanished from the
+        # open-orders list) is still resolvable with its fill price.
+        try:
+            order = self.trading_client.get_order_by_client_id(client_order_id)
+            if order is not None:
+                return self._normalize_order(order)
+        except Exception:
+            pass
         try:
             orders = self.get_open_orders()
         except Exception:
@@ -411,6 +421,7 @@ class AlpacaClient:
             "qty": qty,
             "filled_qty": filled_qty,
             "remaining_qty": remaining_qty,
+            "filled_avg_price": _safe_float(getattr(order, "filled_avg_price", 0.0)),
             "side": str(getattr(order, "side", "")),
             "status": status,
             "submitted_at": _safe_datetime(getattr(order, "submitted_at", utc_now())),
@@ -431,6 +442,7 @@ class MockBrokerClient:
             "buying_power": 100000.0,
             "cash": 100000.0,
             "equity": 100000.0,
+            "last_equity": 100000.0,
             "portfolio_value": 100000.0,
             "trading_blocked": False,
             "account_blocked": False,
@@ -536,6 +548,7 @@ class MockBrokerClient:
     ) -> dict[str, Any]:
         if qty <= 0:
             raise ExecutionError("Mock order qty must be positive")
+        fill_price = max(self.seed_price + self.step * 0.1, 1.0)
         order = {
             "id": f"mock-{client_order_id}",
             "client_order_id": client_order_id,
@@ -543,6 +556,7 @@ class MockBrokerClient:
             "qty": qty,
             "filled_qty": qty,
             "remaining_qty": 0.0,
+            "filled_avg_price": fill_price,
             "side": side,
             "status": "filled",
             "submitted_at": utc_now(),
@@ -550,7 +564,41 @@ class MockBrokerClient:
             "terminal": True,
         }
         self.submitted_orders[client_order_id] = dict(order)
+        self._apply_mock_fill(symbol=symbol, qty=qty, side=side, fill_price=fill_price)
         return order
+
+    def _apply_mock_fill(self, *, symbol: str, qty: float, side: str, fill_price: float) -> None:
+        """Track the fill in the mock position book and account.
+
+        Keeps mock rehearsals on the same lifecycle as the broker path:
+        submits mutate positions/cash, so per-tick hydration and account
+        sync exercise the real reconciliation flow instead of wiping the
+        local book every tick.
+        """
+        signed = qty if side.lower() == "buy" else -qty
+        existing = self.positions.get(symbol)
+        old_qty = float(existing["qty"]) if existing else 0.0
+        old_avg = float(existing["avg_entry_price"]) if existing else 0.0
+        new_qty = old_qty + signed
+        if abs(new_qty) < 1.0e-9:
+            self.positions.pop(symbol, None)
+        else:
+            if existing is None or old_qty == 0 or old_qty * signed < 0:
+                avg_price = fill_price if existing is None or old_qty * new_qty <= 0 else old_avg
+            else:
+                avg_price = ((abs(old_qty) * old_avg) + (abs(signed) * fill_price)) / (abs(old_qty) + abs(signed))
+            self.positions[symbol] = {
+                "symbol": symbol,
+                "qty": new_qty,
+                "avg_entry_price": avg_price,
+                "current_price": fill_price,
+                "market_value": new_qty * fill_price,
+                "side": "long" if new_qty > 0 else "short",
+            }
+        self.account_state["cash"] = float(self.account_state.get("cash", 0.0)) - signed * fill_price
+        notional = sum(float(p["qty"]) * float(p["current_price"]) for p in self.positions.values())
+        self.account_state["equity"] = float(self.account_state["cash"]) + notional
+        self.account_state["portfolio_value"] = self.account_state["equity"]
 
     def _generate_bars(self, symbol: str, count: int) -> list[MarketBar]:
         bars: list[MarketBar] = []

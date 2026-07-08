@@ -159,6 +159,7 @@ def hydrate_portfolio_positions(
     portfolio: PortfolioState,
     positions: list[dict[str, Any]],
 ) -> dict[str, PositionState]:
+    previous = dict(portfolio.positions)
     hydrated_positions: dict[str, PositionState] = {}
     portfolio.positions.clear()
     for position in positions:
@@ -168,10 +169,23 @@ def hydrate_portfolio_positions(
                 raw_entry = datetime.fromisoformat(str(raw_entry))
             except (ValueError, TypeError):
                 raw_entry = None
-        entry_time = raw_entry if raw_entry is not None else utc_now()
+        symbol = str(position["symbol"])
+        qty = float(position["qty"])
+        if raw_entry is not None:
+            entry_time = raw_entry
+        else:
+            # Alpaca position payloads carry no created_at; without this
+            # the entry_time reset every tick, so position age and
+            # peak/drawdown tracking never accumulated.  Keep the prior
+            # entry_time while the position stays on the same side.
+            prior = previous.get(symbol)
+            if prior is not None and prior.qty * qty > 0:
+                entry_time = prior.entry_time
+            else:
+                entry_time = utc_now()
         position_state = PositionState(
-            symbol=str(position["symbol"]),
-            qty=float(position["qty"]),
+            symbol=symbol,
+            qty=qty,
             avg_price=float(position["avg_entry_price"]),
             market_price=float(position.get("current_price", position["avg_entry_price"])),
             entry_time=entry_time,

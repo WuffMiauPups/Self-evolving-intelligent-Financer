@@ -15,8 +15,9 @@ from datetime import datetime
 
 from src.core.config import AppConfig
 from src.core.logging import get_logger
-from src.core.time_utils import utc_now
+from src.core.time_utils import MARKET_TZ, utc_now
 from src.data.alpaca_client import BrokerDataClient
+from src.data.bar_aggregator import TimeframeAggregator
 from src.data.buffers import BarBuffer
 from src.data.schemas import MarketBar
 from src.execution.order_router import OrderRouter
@@ -39,8 +40,8 @@ from src.monitoring.positions_status import (
     PositionsStatusWriter,
 )
 from src.monitoring.runtime_status import RuntimeStatusSnapshot, RuntimeStatusWriter
-from src.risk.ledger import Ledger
-from src.risk.portfolio_state import PortfolioState
+from src.risk.ledger import FillRecord, Ledger
+from src.risk.portfolio_state import PortfolioState, apply_fill
 from src.risk.risk_manager import RiskManager
 from src.strategies.base import BatchTradingPolicy, MemoryCapablePolicy, TradingPolicy
 
@@ -54,16 +55,257 @@ class TickResult:
     should_break: bool  # True if max_runtime_steps reached
 
 
-def _sync_live_state(
+# Consecutive broker-sync failures tolerated before trading is blocked.
+# At the default 2 s poll cadence this is roughly a one-minute outage;
+# each failed tick skips trading but keeps the loop (and data lane)
+# alive, mirroring the stream layer's empty-poll policy.
+_SYNC_FAILURE_LIMIT = 30
+
+
+def _sync_live_state(ctx: RuntimeContext, *, logger: object) -> list[object] | None:
+    """Reconcile broker truth into local state.  Never raises.
+
+    Order matters: fills are captured against the *pre-hydration*
+    position book (so close-out PnL is computed from the entry prices we
+    tracked), then positions are overwritten from the broker, then cash/
+    equity/daily-PnL sync from the account snapshot.
+
+    Returns the order transitions, or ``None`` when the broker was
+    unreachable — the caller must skip trading for the tick but keep the
+    loop alive.  After ``_SYNC_FAILURE_LIMIT`` consecutive failures,
+    trading is blocked via ``ctx.health`` (surfaced as a runtime error
+    by the trade engine) instead of crashing on the first blip.
+    """
+    try:
+        account = ctx.client.get_account()
+        positions = ctx.client.get_positions()
+        open_orders = build_order_states(ctx.client.get_open_orders())
+    except Exception as exc:  # noqa: BLE001 - any broker/network error is a skip-tick
+        ctx.sync_failure_count += 1
+        logger.warning(
+            "broker_sync_failed",
+            error=str(exc),
+            consecutive_failures=ctx.sync_failure_count,
+            failure_limit=_SYNC_FAILURE_LIMIT,
+        )
+        if ctx.sync_failure_count >= _SYNC_FAILURE_LIMIT and ctx.health.safe_to_trade:
+            ctx.health.block_trading(
+                ReasonCode.SAFE_TO_TRADE_FALSE,
+                timestamp=utc_now(),
+                details={
+                    "stage": "broker_sync",
+                    "consecutive_failures": ctx.sync_failure_count,
+                    "error": str(exc),
+                },
+            )
+        return None
+    ctx.sync_failure_count = 0
+    transitions, disappeared = ctx.router.sync_open_orders(open_orders)
+    _capture_broker_fills(ctx, transitions=transitions, disappeared=disappeared, logger=logger)
+    hydrate_portfolio_positions(ctx.portfolio, positions)
+    _sync_account_state(ctx, account=account)
+    return transitions
+
+
+def _capture_broker_fills(
+    ctx: RuntimeContext,
     *,
-    client: BrokerDataClient,
-    portfolio: PortfolioState,
-    router: OrderRouter,
-) -> list[object]:
-    positions = client.get_positions()
-    hydrate_portfolio_positions(portfolio, positions)
-    open_orders = build_order_states(client.get_open_orders())
-    return router.sync_open_orders(open_orders)
+    transitions: list,
+    disappeared: list[str],
+    logger: object,
+) -> None:
+    """Convert broker order events into portfolio/ledger/risk fill records.
+
+    Broker-routed fills used to vanish here: only the (unreachable)
+    PaperExecutor ever wrote realized PnL, the Ledger, or exit cooldowns.
+    Every terminal filled order — whether it transitioned in the open
+    list or disappeared between polls — is resolved via the closed-order
+    lookup so its fill price and quantity land in local accounting.
+    """
+    candidate_ids: list[str] = []
+    for state in transitions:
+        if state.terminal and state.status == "filled":
+            candidate_ids.append(state.client_order_id)
+    candidate_ids.extend(disappeared)
+    for client_order_id in candidate_ids:
+        if client_order_id in ctx.processed_fill_ids:
+            continue
+        try:
+            order = ctx.client.get_order_by_client_order_id(client_order_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("order_fill_lookup_failed", client_order_id=client_order_id, error=str(exc))
+            continue
+        if order is None:
+            logger.warning("order_disappeared_unresolved", client_order_id=client_order_id)
+            continue
+        if str(order.get("status", "")).lower() != "filled":
+            continue
+        _apply_broker_fill(ctx, order=order, logger=logger)
+
+
+def _apply_broker_fill(ctx: RuntimeContext, *, order: dict, logger: object) -> None:
+    client_order_id = str(order.get("client_order_id", ""))
+    filled_qty = float(order.get("filled_qty", 0.0))
+    price = float(order.get("filled_avg_price", 0.0))
+    symbol = str(order.get("symbol", ""))
+    if not client_order_id or not symbol or filled_qty <= 0 or price <= 0:
+        logger.warning(
+            "broker_fill_unusable",
+            client_order_id=client_order_id,
+            symbol=symbol,
+            filled_qty=filled_qty,
+            filled_avg_price=price,
+        )
+        return
+    ctx.processed_fill_ids.add(client_order_id)
+    side = "buy" if "buy" in str(order.get("side", "")).lower() else "sell"
+    signed_delta = filled_qty if side == "buy" else -filled_qty
+    fill_time = order.get("updated_at")
+    if not isinstance(fill_time, datetime):
+        fill_time = utc_now()
+    realized = apply_fill(
+        ctx.portfolio,
+        symbol=symbol,
+        signed_delta=signed_delta,
+        fill_price=price,
+        timestamp=fill_time,
+    )
+    ctx.portfolio.cash -= signed_delta * price
+    ctx.portfolio.realized_pnl += realized
+    ctx.portfolio.daily_pnl += realized
+    position = ctx.portfolio.get_position(symbol)
+    ctx.risk_manager.register_fill(
+        symbol,
+        position.qty if position else 0.0,
+        timestamp=fill_time,
+    )
+    ctx.ledger.record(
+        FillRecord(
+            timestamp=fill_time,
+            symbol=symbol,
+            side=side,
+            quantity=filled_qty,
+            price=price,
+            fee=0.0,
+            realized_pnl=realized,
+            client_order_id=client_order_id,
+        )
+    )
+    if ctx.order_journal is not None:
+        try:
+            from src.execution.order_journal import OrderJournalEntry
+            ctx.order_journal.record(OrderJournalEntry(
+                timestamp=fill_time.isoformat(),
+                symbol=symbol,
+                side=side,
+                quantity=filled_qty,
+                price=price,
+                status="filled",
+                client_order_id=client_order_id,
+                broker_order_id=order.get("id"),
+                fee=0.0,
+            ))
+        except Exception:
+            pass  # journal must never raise into trade loop
+    logger.info(
+        "broker_fill_captured",
+        symbol=symbol,
+        side=side,
+        quantity=filled_qty,
+        price=price,
+        realized_pnl=realized,
+        client_order_id=client_order_id,
+    )
+
+
+def _sync_account_state(ctx: RuntimeContext, *, account: dict) -> None:
+    """Overwrite cash/equity from broker truth and anchor daily PnL.
+
+    ``daily_pnl`` is equity-based (includes unrealized swings), anchored
+    to the broker's ``last_equity`` (previous trading-day close) when
+    available, else to the first equity seen for the current US/Eastern
+    trading date.  This is what the risk manager's daily-loss limits
+    compare against — previously frozen at 0.0 in broker mode.
+    """
+    cash = account.get("cash")
+    equity = account.get("equity")
+    if cash is None or equity is None:
+        return
+    ctx.portfolio.cash = float(cash)
+    ctx.portfolio.equity = float(equity)
+    today = utc_now().astimezone(MARKET_TZ).date()
+    if ctx.daily_anchor_date != today:
+        last_equity = float(account.get("last_equity", 0.0) or 0.0)
+        ctx.daily_anchor_date = today
+        ctx.daily_anchor_equity = last_equity if last_equity > 0 else float(equity)
+    if ctx.daily_anchor_equity > 0:
+        ctx.portfolio.daily_pnl = float(equity) - ctx.daily_anchor_equity
+
+
+def _ingest_bar(ctx: RuntimeContext, symbol: str, bar: MarketBar, *, logger: object) -> None:
+    """Fold a polled bar into its timeframe bucket and upsert the buffer.
+
+    Replaces the old unconditional append: re-polls of the same forming
+    bar revise the buffer's last row in place, so duplicates can never
+    accumulate, and every buffered row is a bucket-start-stamped bar of
+    the configured runtime timeframe — matching cold-start history and
+    training data.
+    """
+    if ctx.bar_aggregator is None:
+        ctx.bar_aggregator = TimeframeAggregator(ctx.config.runtime.timeframe)
+    bucket_bar = ctx.bar_aggregator.update(symbol, bar)
+    if bucket_bar is None:
+        return
+    buf = ctx.buffers[symbol]
+    _backfill_gap(ctx, symbol, buf, bucket_bar, logger=logger)
+    buf.upsert(bucket_bar)
+
+
+def _backfill_gap(
+    ctx: RuntimeContext,
+    symbol: str,
+    buf: BarBuffer,
+    bucket_bar: MarketBar,
+    *,
+    logger: object,
+) -> None:
+    """Fetch buckets missed between the buffer tail and the live bucket.
+
+    Fires once per gap (outage, symbol errors, session boundary): after
+    a successful backfill the buffer tail advances past the gap, so the
+    range fetch does not repeat.  Best-effort — a failed fetch leaves a
+    gap for the session guard's gap detection to handle.
+    """
+    if len(buf) == 0 or ctx.client is None or ctx.bar_aggregator is None:
+        return
+    last_ts = buf.last_bar().timestamp
+    delta = ctx.bar_aggregator.delta
+    if bucket_bar.timestamp - last_ts <= delta:
+        return
+    try:
+        missing = ctx.client.get_historical_bars_range(
+            symbol=symbol,
+            timeframe=ctx.config.runtime.timeframe,
+            start=last_ts + delta,
+            end=bucket_bar.timestamp,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("bar_backfill_failed", symbol=symbol, error=str(exc))
+        return
+    appended = 0
+    for missing_bar in missing:
+        if missing_bar.timestamp >= bucket_bar.timestamp:
+            continue
+        if buf.upsert(missing_bar) == "appended":
+            appended += 1
+    if appended:
+        logger.info(
+            "bar_backfill",
+            symbol=symbol,
+            bars=appended,
+            gap_start=last_ts.isoformat(),
+            gap_end=bucket_bar.timestamp.isoformat(),
+        )
 
 
 def _write_positions_snapshot(
@@ -204,9 +446,11 @@ def process_tick(
     # simulator", but now ``broker.paper=true`` with credentials
     # talks to Alpaca's paper endpoint and still needs reconciliation
     # for fills that arrive after submission.
+    sync_ok = True
     if ctx.router.broker_client is not None:
-        transitions = _sync_live_state(client=ctx.client, portfolio=ctx.portfolio, router=ctx.router)
-        for transition in transitions:
+        transitions = _sync_live_state(ctx, logger=logger)
+        sync_ok = transitions is not None
+        for transition in transitions or []:
             logger.info(
                 "order_transition",
                 symbol=transition.symbol,
@@ -219,7 +463,7 @@ def process_tick(
 
     latest_prices: dict[str, float] = {}
     for symbol, bar in latest_bars.items():
-        ctx.buffers[symbol].append(bar)
+        _ingest_bar(ctx, symbol, bar, logger=logger)
         latest_prices[symbol] = bar.close
     if not latest_prices:
         return TickResult(
@@ -236,8 +480,7 @@ def process_tick(
             ts=tick_time,
             equity=float(ctx.portfolio.equity),
             realized_pnl=float(getattr(ctx.portfolio, "realized_pnl", 0.0)),
-            unrealized_pnl=float(ctx.portfolio.equity - ctx.portfolio.cash
-                                  - getattr(ctx.portfolio, "realized_pnl", 0.0)),
+            unrealized_pnl=float(ctx.portfolio.unrealized_pnl),
             fills=len(ctx.ledger.fills),
             session_id=ctx.runtime_session_id,
         )
@@ -271,7 +514,13 @@ def process_tick(
     # per symbol inside ``MemoryAwarePolicy.propose_batch``.
     # ------------------------------------------------------------------
     eligible_batch: list[tuple[str, FeatureSnapshot, object]] = []
-    for symbol in ctx.eligible_symbols:
+    # A failed broker sync means portfolio/order state is stale: skip
+    # proposal generation for the tick (the data lane above still ran)
+    # and let the next poll retry the sync.
+    trading_symbols = ctx.eligible_symbols if sync_ok else []
+    if not sync_ok:
+        logger.info("tick_trading_skipped", reason="broker_sync_failed")
+    for symbol in trading_symbols:
         if not ctx.health.safe_to_trade:
             break
         quarantine = ctx.router.is_symbol_quarantined(symbol)
@@ -310,13 +559,19 @@ def process_tick(
                     bank_items=0 if ctx.memory_bank is None else len(ctx.memory_bank),
                 )
                 if ctx.memory_bank is not None:
-                    save_memory_bank(ctx.config.memory.persist_path, ctx.memory_bank)
+                    try:
+                        save_memory_bank(ctx.config.memory.persist_path, ctx.memory_bank)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("memory_bank_save_failed", symbol=symbol, error=str(exc))
             # Persist pending observations for restart safety
             if (
                 ctx.policy.updater is not None
                 and ctx.config.memory.persist_pending_observations
             ):
-                ctx.policy.updater.save_pending(ctx.config.memory.pending_store_path)
+                try:
+                    ctx.policy.updater.save_pending(ctx.config.memory.pending_store_path)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("pending_save_failed", symbol=symbol, error=str(exc))
 
         bar = latest_bars[symbol]
         guard_result = ctx.session_guard.evaluate(
@@ -517,21 +772,32 @@ def process_tick(
             ctx.metrics.increment_reason("order_rejection", result.reason_code or "unknown")
             continue
         # PaperExecutor updates the portfolio synchronously inside
-        # ``execute()``, so fills register immediately and the risk
-        # manager needs to be told now.  For broker-routed orders
-        # (Alpaca or MockBrokerClient), the portfolio is updated
-        # asynchronously by ``_sync_live_state`` when the broker
-        # reports the transition, so we skip this path — attempting
-        # to register a fill here would double-count.  The signal is
-        # ``client is None`` (== PaperExecutor fallback), not
-        # ``config.broker.paper`` which no longer correlates with
-        # the actual routing decision.
+        # ``execute()``, so its fills only need the risk manager told.
+        # Broker-routed orders that fill synchronously at submit (the
+        # normal market-order case) are never tracked as open, so the
+        # sync-time transition/disappearance capture would miss them —
+        # capture the fill here; ``processed_fill_ids`` keeps later
+        # sync events for the same order idempotent.
         if ctx.client is None and result.terminal:
             position = ctx.portfolio.get_position(symbol)
             ctx.risk_manager.register_fill(
                 symbol,
                 position.qty if position else 0.0,
                 timestamp=snapshot.timestamp,
+            )
+        elif ctx.client is not None and result.terminal and result.status == "filled":
+            _apply_broker_fill(
+                ctx,
+                order={
+                    "client_order_id": result.client_order_id,
+                    "symbol": result.symbol,
+                    "side": result.side,
+                    "filled_qty": result.filled_qty,
+                    "filled_avg_price": result.fill_price,
+                    "id": result.order_id,
+                    "updated_at": utc_now(),
+                },
+                logger=logger,
             )
         ctx.metrics.increment("orders_submitted")
 
@@ -551,7 +817,6 @@ def process_tick(
             safe_to_trade=bool(ctx.health.safe_to_trade),
             last_decision=last_decision_payload,
             last_risk=last_risk_payload,
-            fusion_enabled=bool(ctx.config.memory.decision_fusion.enabled),
             memory_enabled=bool(ctx.config.memory.enabled),
             frozen_brain=not bool(ctx.config.runtime.allow_online_model_updates),
         )

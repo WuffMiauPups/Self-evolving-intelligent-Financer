@@ -81,8 +81,18 @@ class OrderRouter:
                 details={"client_order_id": order.client_order_id},
             )
 
-    def sync_open_orders(self, orders: list[OrderState]) -> list[OrderState]:
+    def sync_open_orders(self, orders: list[OrderState]) -> tuple[list[OrderState], list[str]]:
+        """Reconcile tracked orders against the broker's open-order list.
+
+        Returns ``(transitions, disappeared)``: orders whose status or
+        fill quantity changed, and client ids of tracked orders that
+        vanished from the open list entirely — the normal path for an
+        order that filled between polls.  Callers must resolve
+        disappeared ids against the broker (closed-order lookup) to
+        capture the fill; the router only releases its tracking state.
+        """
         transitions: list[OrderState] = []
+        disappeared: list[str] = []
         latest_by_client_id = {order.client_order_id: order for order in orders}
         tracked_ids = set(self.open_orders_by_client_id)
         for client_order_id, order in latest_by_client_id.items():
@@ -97,7 +107,8 @@ class OrderRouter:
         for missing_id in tracked_ids - set(latest_by_client_id):
             self.open_orders_by_client_id.pop(missing_id, None)
             self._release_symbol_for_order(missing_id)
-        return transitions
+            disappeared.append(missing_id)
+        return transitions, disappeared
 
     def quarantine_symbol(
         self,
@@ -265,13 +276,18 @@ class OrderRouter:
         filled_qty = float(response.get("filled_qty", 0.0))
         remaining_qty = float(response.get("remaining_qty", max(intent.quantity - filled_qty, 0.0)))
         accepted = broker_status not in {"rejected", "canceled", "cancelled", "expired"}
+        # Prefer the broker's actual average fill price; the reference
+        # price is only a fallback for unfilled/rejected responses.
+        fill_price = float(response.get("filled_avg_price") or 0.0) or float(
+            response.get("fill_price", intent.reference_price)
+        )
         return ExecutionResult(
             accepted=accepted,
             status=broker_status,
             symbol=str(response.get("symbol", intent.symbol)),
             side=str(response.get("side", intent.side)),
             quantity=float(response.get("qty", intent.quantity)),
-            fill_price=float(response.get("fill_price", intent.reference_price)),
+            fill_price=fill_price,
             fee=float(response.get("fee", 0.0)),
             client_order_id=str(response.get("client_order_id", intent.client_order_id)),
             order_id=None if response.get("id") is None else str(response.get("id")),

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 import torch
@@ -12,6 +12,7 @@ from src.core.device import DeviceContext, build_device_context
 from src.core.logging import configure_logging, get_logger
 from src.core.time_utils import utc_now
 from src.data.alpaca_client import AlpacaClient, BrokerDataClient, MockBrokerClient, credentials_available
+from src.data.bar_aggregator import TimeframeAggregator
 from src.data.buffers import BarBuffer
 from src.data.historical_data import HistoricalDataService
 from src.data.stream_manager import PollingStreamManager
@@ -71,6 +72,12 @@ class RuntimeContext:
     started_at: datetime
     order_journal: object | None = None  # OrderJournal
     alerter: object | None = None  # WebhookAlerter
+    # --- per-tick mutable runtime state (owned by tick_processor) ---
+    bar_aggregator: TimeframeAggregator | None = None
+    sync_failure_count: int = 0
+    processed_fill_ids: set[str] = field(default_factory=set)
+    daily_anchor_equity: float = 0.0
+    daily_anchor_date: date | None = None
 
 
 def resolve_runtime_symbols(
@@ -614,4 +621,5 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
         started_at=started_at,
         order_journal=order_journal,
         alerter=alerter,
+        bar_aggregator=TimeframeAggregator(config.runtime.timeframe),
     )

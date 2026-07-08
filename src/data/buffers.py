@@ -69,6 +69,32 @@ class BarBuffer:
         for bar in bars:
             self.append(bar)
 
+    def upsert(self, bar: MarketBar) -> str:
+        """Timestamp-ordered write: replace the forming bar, append new ones.
+
+        Returns ``"replaced"`` when ``bar.timestamp`` matches the newest
+        buffered row (a revision of the forming timeframe bucket),
+        ``"appended"`` when it is strictly newer, and ``"skipped"`` when
+        it is older — so duplicate or backwards polls can never grow the
+        buffer or reorder history.
+        """
+        if self._count > 0:
+            last_ts = self._bars[-1].timestamp
+            if bar.timestamp == last_ts:
+                row = self._count - 1
+                self._tensor[row, 0] = bar.open
+                self._tensor[row, 1] = bar.high
+                self._tensor[row, 2] = bar.low
+                self._tensor[row, 3] = bar.close
+                self._tensor[row, 4] = bar.volume
+                self._tensor[row, 5] = bar.spread
+                self._bars[-1] = bar
+                return "replaced"
+            if bar.timestamp < last_ts:
+                return "skipped"
+        self.append(bar)
+        return "appended"
+
     def clear(self) -> None:
         self._bars.clear()
         self._count = 0
