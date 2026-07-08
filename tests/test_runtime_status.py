@@ -21,7 +21,6 @@ def _snap(step: int = 1) -> RuntimeStatusSnapshot:
         safe_to_trade=True,
         last_decision={"action": 1, "confidence": 0.71, "target_fraction": 0.05, "fusion_level": "support"},
         last_risk={"approved": True, "reasons": [], "side": "buy", "quantity": 25.0},
-        fusion_enabled=True,
         memory_enabled=True,
         frozen_brain=True,
     )
@@ -40,7 +39,7 @@ def test_write_and_read_latest(tmp_path: Path) -> None:
     assert latest["last_decision"]["action"] == 1
     assert latest["last_decision"]["fusion_level"] == "support"
     assert latest["last_risk"]["approved"] is True
-    assert latest["fusion_enabled"] is True
+    assert "fusion_enabled" not in latest  # removed: described a deleted fusion layer
     assert latest["frozen_brain"] is True
 
 

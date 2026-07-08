@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -60,6 +61,11 @@ class RuntimeService:
         self._last_error: str = ""
         self._config_paths: list[str] = list(_DEFAULT_PAPER_CONFIGS)
         self._cached_config_summary: dict[str, object] | None = None
+        # Drained live by a daemon thread; without it the runtime child
+        # blocks forever on a stderr write once the OS pipe buffer fills
+        # (TrainingService already drains — RuntimeService did not).
+        self._stderr_tail: deque[str] = deque(maxlen=200)
+        self._stderr_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
     # config selection
@@ -153,6 +159,14 @@ class RuntimeService:
                     creationflags=creationflags,
                 )
                 self._started_at = datetime.now()
+                self._stderr_tail.clear()
+                self._stderr_thread = threading.Thread(
+                    target=self._drain_stderr,
+                    args=(self._proc,),
+                    daemon=True,
+                    name="runtime-stderr-drain",
+                )
+                self._stderr_thread.start()
             except Exception as exc:  # noqa: BLE001
                 self._proc = None
                 self._last_error = f"Failed to spawn runtime: {exc}"
@@ -240,8 +254,6 @@ class RuntimeService:
         # decision_fusion is enabled at the YAML layer but the runtime
         # detected an empty bank).  ``runtime_status.jsonl`` is written
         # per-tick by the trade engine and is the source of truth.
-        if "fusion_enabled" in snap:
-            status.fusion_enabled = bool(snap.get("fusion_enabled"))
         if "memory_enabled" in snap:
             status.memory_enabled = bool(snap.get("memory_enabled"))
         if "frozen_brain" in snap:
@@ -285,6 +297,23 @@ class RuntimeService:
         status.last_message = " ".join(b for b in bits if b)[:500]
         return True
 
+    def _drain_stderr(self, proc: subprocess.Popen[bytes]) -> None:
+        """Consume the child's stderr for its whole lifetime (daemon thread)."""
+        try:
+            if proc.stderr is None:
+                return
+            for raw in iter(proc.stderr.readline, b""):
+                if not isinstance(raw, (bytes, bytearray)):
+                    # Not a real byte pipe (e.g. a test double) — a
+                    # non-bytes readline would never hit the b"" sentinel
+                    # and this loop would spin forever.
+                    return
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    self._stderr_tail.append(line)
+        except Exception:  # noqa: BLE001
+            pass
+
     def _compute_state(self) -> RuntimeState:
         if self._proc is None:
             return RuntimeState.STOPPED
@@ -293,13 +322,9 @@ class RuntimeService:
             return RuntimeState.RUNNING
         if rc == 0:
             return RuntimeState.STOPPED
-        # Capture stderr tail for the operator
-        try:
-            tail = (self._proc.stderr.read() or b"").decode("utf-8", errors="replace") if self._proc.stderr else ""
-            if tail:
-                self._last_error = tail.strip().splitlines()[-1][:500]
-        except Exception:  # noqa: BLE001
-            pass
+        # Surface the drained stderr tail for the operator.
+        if self._stderr_tail:
+            self._last_error = self._stderr_tail[-1][:500]
         return RuntimeState.ERROR
 
     def _fill_log_derived_fields(self, status: RuntimeStatus, log_path: Path) -> None:

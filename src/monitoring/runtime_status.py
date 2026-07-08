@@ -16,7 +16,6 @@ Schema (one line; all fields optional except ``ts`` and ``step``):
         "safe_to_trade":   bool,
         "last_decision":   {action, confidence, target_fraction, fusion_level} | null,
         "last_risk":       {approved, reasons[], side, quantity} | null,
-        "fusion_enabled":  bool,
         "memory_enabled":  bool,
         "frozen_brain":    bool,
     }
@@ -50,7 +49,6 @@ class RuntimeStatusSnapshot:
     safe_to_trade: bool = True
     last_decision: dict[str, Any] | None = None
     last_risk: dict[str, Any] | None = None
-    fusion_enabled: bool = False
     memory_enabled: bool = False
     frozen_brain: bool = True
 
@@ -66,7 +64,6 @@ class RuntimeStatusSnapshot:
                 "safe_to_trade": bool(self.safe_to_trade),
                 "last_decision": self.last_decision,
                 "last_risk": self.last_risk,
-                "fusion_enabled": bool(self.fusion_enabled),
                 "memory_enabled": bool(self.memory_enabled),
                 "frozen_brain": bool(self.frozen_brain),
             },

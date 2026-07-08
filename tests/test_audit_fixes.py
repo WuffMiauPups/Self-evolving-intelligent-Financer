@@ -385,7 +385,6 @@ def test_runtime_service_consumes_per_tick_truth_for_safety_flags(tmp_path) -> N
             equity=100_000.0,
             fills=0,
             safe_to_trade=True,
-            fusion_enabled=False,
             memory_enabled=False,
             frozen_brain=True,
         )
