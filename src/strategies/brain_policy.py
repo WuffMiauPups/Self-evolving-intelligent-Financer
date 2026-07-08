@@ -10,6 +10,7 @@ from src.core.constants import ACTION_TO_SIGN, Action
 from src.core.device import maybe_autocast
 from src.core.logging import get_logger
 from src.features.feature_pipeline import FeatureContract, FeatureSnapshot
+from src.features.normalization import NormalizationStats
 from src.models.base import TradingModelProtocol
 from src.risk.constraints import TradeProposal
 from src.utils.torch_utils import ensure_batch_dimension, to_tensor
@@ -68,6 +69,10 @@ class BrainPolicy:
     model: TradingModelProtocol
     device: torch.device
     feature_contract: FeatureContract | None = None
+    # Train-split z-score stats from the checkpoint (C2 fix): every model
+    # input is normalized with these before the forward, exactly as in
+    # training. None = pre-fix checkpoint (raw inputs, undefined behavior).
+    normalization: NormalizationStats | None = None
     max_state_gap_sec: int | None = None
     force_directional_flip: bool = False
     default_target_fraction: float = 0.05
@@ -179,6 +184,17 @@ class BrainPolicy:
         }
         regime_input = ensure_batch_dimension(to_tensor(snapshot.regime_input, device=self.device, dtype=torch.float32))
         features = ensure_batch_dimension(to_tensor(snapshot.features, device=self.device, dtype=torch.float32))
+        temporal_tensor = ensure_batch_dimension(
+            to_tensor(snapshot.temporal_tensor, device=self.device, dtype=torch.float32)
+        )
+        if self.normalization is not None:
+            branch_inputs = {
+                name: self.normalization.apply_branch(name, value)
+                for name, value in branch_inputs.items()
+            }
+            regime_input = self.normalization.apply_regime(regime_input)
+            features = self.normalization.apply_features(features)
+            temporal_tensor = self.normalization.apply_temporal(temporal_tensor)
         memory_state = self.memory_state_by_symbol.get(snapshot.symbol)
         with torch.no_grad(), maybe_autocast(self.device, self._amp_enabled()):
             output = self.model(
@@ -186,9 +202,7 @@ class BrainPolicy:
                 regime_input=regime_input,
                 memory_state=memory_state,
                 full_features=features,
-                temporal_tensor=ensure_batch_dimension(
-                    to_tensor(snapshot.temporal_tensor, device=self.device, dtype=torch.float32)
-                ),
+                temporal_tensor=temporal_tensor,
             )
         if output.memory_state is None:
             self.memory_state_by_symbol.pop(snapshot.symbol, None)
@@ -382,6 +396,10 @@ class BrainPolicy:
             ).squeeze(0)
             for snapshot in snapshots
         ]
+        if self.normalization is not None:
+            # Normalize each slice before padding so pad positions stay
+            # exactly zero, matching the single-sample path.
+            temporal_slices = [self.normalization.apply_temporal(s) for s in temporal_slices]
         max_time = max(slice_.shape[-1] for slice_ in temporal_slices)
         temporal_batch = torch.stack(
             [
@@ -390,6 +408,13 @@ class BrainPolicy:
             ],
             dim=0,
         )
+        if self.normalization is not None:
+            branch_inputs_batch = {
+                name: self.normalization.apply_branch(name, value)
+                for name, value in branch_inputs_batch.items()
+            }
+            regime_input_batch = self.normalization.apply_regime(regime_input_batch)
+            features_batch = self.normalization.apply_features(features_batch)
 
         # --- Per-symbol previous memory state → (N, memory_dim) ------------
         memory_dim = getattr(self.model, "memory_dim", None)

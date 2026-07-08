@@ -204,6 +204,7 @@ def main() -> int:
                 model=arts.model,
                 device=torch.device("cpu"),
                 feature_contract=arts.feature_contract,
+                normalization=arts.normalization,
                 max_state_gap_sec=cfg.runtime.state_reset_gap_sec,
             )
             if cfg.memory.enabled:
@@ -257,6 +258,7 @@ def main() -> int:
             model=artifacts.model,
             device=torch.device("cpu"),
             feature_contract=artifacts.feature_contract,
+            normalization=artifacts.normalization,
             max_state_gap_sec=config.runtime.state_reset_gap_sec,
         )
         policy2 = _make_memory_aware_policy(
@@ -273,6 +275,7 @@ def main() -> int:
             model=artifacts.model,
             device=torch.device("cpu"),
             feature_contract=artifacts.feature_contract,
+            normalization=artifacts.normalization,
             max_state_gap_sec=config.runtime.state_reset_gap_sec,
         )
         policy3 = _make_memory_aware_policy(
@@ -289,6 +292,7 @@ def main() -> int:
             model=artifacts.model,
             device=torch.device("cpu"),
             feature_contract=artifacts.feature_contract,
+            normalization=artifacts.normalization,
             max_state_gap_sec=config.runtime.state_reset_gap_sec,
         )
         policy4 = _make_memory_aware_policy(
@@ -355,6 +359,7 @@ def main() -> int:
         model=artifacts.model,
         device=torch.device("cpu"),
         feature_contract=artifacts.feature_contract,
+        normalization=artifacts.normalization,
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
     )
     if config.memory.enabled:

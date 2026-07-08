@@ -12,6 +12,7 @@ from src.core.logging import get_logger
 from src.data.dataset import HistoricalSequenceDataset, TrainingSample, collate_training_samples, make_columnar_collate
 from src.data.schemas import MarketBar, bars_to_tensor
 from src.features.feature_pipeline import FeatureContract, FeaturePipeline
+from src.features.normalization import NormalizationStats
 from src.memory.outcomes import compute_outcome_summary
 from src.training.class_balance import (
     TargetDiagnostics,
@@ -52,6 +53,11 @@ class TrainingDataBundle:
     # store one tensor per field instead of one tensor per sample.
     # See ``src/training/sample_columns.py`` for the rationale.
     samples_by_split: dict[str, ColumnarSamples]
+    # Train-split z-score statistics applied to every split above.  Must
+    # be persisted with any checkpoint trained on this bundle and
+    # re-applied at inference (see NormalizationStats) — otherwise the
+    # deployed model receives raw-scale inputs it never saw in training.
+    normalization_stats: NormalizationStats | None = None
 
 
 def _absorb_shard_samples(
@@ -492,8 +498,11 @@ def _finalize_training_bundle(
     # --- Z-score normalize input features for AMP safety ----------------
     # Compute mean/std from *train* only (no data leakage), apply to all
     # splits, clamp to +/-10 so float16 intermediates never overflow.
+    # The returned stats travel with the bundle into checkpoint meta so
+    # inference re-applies the identical transform (C2 train/serve skew).
+    normalization_stats = None
     if "train" in samples_by_split:
-        normalize_columns(
+        normalization_stats = normalize_columns(
             samples_by_split["train"],
             *[
                 samples_by_split[k]
@@ -617,4 +626,5 @@ def _finalize_training_bundle(
         split_ranges=split_ranges,
         class_weights=class_weights,
         samples_by_split=samples_by_split,
+        normalization_stats=normalization_stats,
     )

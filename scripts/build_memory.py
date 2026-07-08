@@ -152,6 +152,7 @@ def main() -> int:
         model=artifacts.model,
         device=build_device,
         feature_contract=artifacts.feature_contract,
+        normalization=artifacts.normalization,
         expected_latent_dim=config.memory.latent_dim,
         encoder_fingerprint=artifacts.encoder_fingerprint,
     )

@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from src.core.config import AppConfig
+from src.core.config import AppConfig, ModelConfig
 from src.core.device import build_device_context
 from src.core.device import maybe_autocast
 from src.core.logging import configure_logging, get_logger
@@ -28,7 +28,7 @@ def build_training_components(
     config: AppConfig,
     *,
     use_baseline: bool = False,
-) -> tuple[torch.nn.Module, TrainingDataBundle, dict[str, list[MarketBar]], dict[str, object]]:
+) -> tuple[torch.nn.Module, TrainingDataBundle, dict[str, list[MarketBar]], dict[str, object], ModelConfig]:
     logger = get_logger("training")
     seed_everything(7)
     device_ctx = build_device_context(config.device.preferred, config.training.use_amp or config.device.use_amp)
@@ -55,7 +55,12 @@ def build_training_components(
         feature_contract=bundle.feature_contract,
     )
     model = model.to(device_ctx.device)
-    return model, bundle, bars_by_symbol, data_meta
+    # effective_model_config is what the model was actually built with
+    # (fast-mode small-profile overrides applied).  Checkpoint meta must
+    # record THIS config, not config.model — saving the un-overridden
+    # config made fast-mode checkpoints unloadable (state_dict size
+    # mismatch on reconstruction).
+    return model, bundle, bars_by_symbol, data_meta, effective_model_config
 
 
 def inspect_training_data(config: AppConfig) -> dict[str, object]:
@@ -66,7 +71,7 @@ def inspect_training_data(config: AppConfig) -> dict[str, object]:
         file_path=config.logging.file_path,
     )
     logger = get_logger("training")
-    _, bundle, _, data_meta = build_training_components(config, use_baseline=False)
+    _, bundle, _, data_meta, _ = build_training_components(config, use_baseline=False)
     for split_name, diagnostics in bundle.diagnostics.items():
         logger.info(
             "target_diagnostics",
@@ -154,7 +159,7 @@ def run_supervised_training(
         run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     run_start = datetime.now(UTC)
     device_ctx = build_device_context(config.device.preferred, config.training.use_amp or config.device.use_amp)
-    model, bundle, bars_by_symbol, data_meta = build_training_components(config, use_baseline=use_baseline)
+    model, bundle, bars_by_symbol, data_meta, effective_model_config = build_training_components(config, use_baseline=use_baseline)
     # Fast-mode: log clear banner and compute effective settings
     fast = config.training.fast_mode
     if fast.enabled:
@@ -366,7 +371,7 @@ def run_supervised_training(
         optimizer=optimizer,
         meta=build_checkpoint_meta(
             model_kind="baseline" if use_baseline else "brain",
-            model_config=config.model,
+            model_config=effective_model_config,
             feature_config=config.features,
             feature_contract=bundle.feature_contract,
             extra={
@@ -393,6 +398,14 @@ def run_supervised_training(
                 "data_config": config.data.model_dump(mode="json"),
                 "training_config": config.training.model_dump(mode="json"),
                 "symbol_universe": list(config.data.symbols),
+                # Train-split z-score stats — inference MUST re-apply these
+                # (C2 train/serve skew). A checkpoint without this key was
+                # trained before the fix and needs retraining.
+                "normalization": (
+                    bundle.normalization_stats.to_dict()
+                    if bundle.normalization_stats is not None
+                    else None
+                ),
                 "training_split_ranges": {
                     split_name: {
                         symbol: {
@@ -574,7 +587,7 @@ def inspect_label_sensitivity(
         file_path=config.logging.file_path,
     )
     logger = get_logger("training")
-    _, bundle, _, data_meta = build_training_components(config, use_baseline=False)
+    _, bundle, _, data_meta, _ = build_training_components(config, use_baseline=False)
 
     # Collect future returns from all training samples
     samples_with_returns: list[dict[str, object]] = []
@@ -609,7 +622,7 @@ def evaluate_checkpoint(config: AppConfig, checkpoint_path: str) -> dict[str, ob
     )
     logger = get_logger("training")
     device_ctx = build_device_context(config.device.preferred, config.training.use_amp or config.device.use_amp)
-    _, bundle, _, data_meta = build_training_components(config, use_baseline=False)
+    _, bundle, _, data_meta, _ = build_training_components(config, use_baseline=False)
     artifacts = load_model_artifacts(checkpoint_path, device=device_ctx.device)
     artifacts.feature_contract.assert_matches(
         bundle.feature_contract,

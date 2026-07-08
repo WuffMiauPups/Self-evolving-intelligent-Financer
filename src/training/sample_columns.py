@@ -58,6 +58,7 @@ from datetime import datetime
 import torch
 
 from src.data.dataset import TrainingSample
+from src.features.normalization import NormalizationStats
 
 
 @dataclass
@@ -496,49 +497,89 @@ def normalize_columns(
     *others: ColumnarSamples,
     eps: float = 1e-6,
     clamp: float = 10.0,
-) -> None:
+) -> NormalizationStats:
     """Z-score normalize float input columns using train set statistics.
 
     Computes mean/std from *train*, applies to train + all *others* (val, test).
     Clamps to ``[-clamp, clamp]`` to prevent float16 overflow in AMP.
     Labels, regression targets, future returns, and metadata are untouched.
+
+    Returns the per-column statistics so callers can persist them in
+    checkpoint meta — inference paths MUST re-apply the identical
+    transform (see ``NormalizationStats``) or the deployed model receives
+    inputs on a different scale than anything it saw in training.
     """
 
-    def _normalize_tensor(train_t: torch.Tensor, *other_ts: torch.Tensor) -> None:
+    def _normalize_tensor(
+        train_t: torch.Tensor, *other_ts: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Normalize a 1-D, 2-D ``(N, D)``, or 3-D ``(N, C, T)`` tensor in-place."""
         if train_t.dtype not in (torch.float32, torch.float64):
-            return
+            return None
         if train_t.numel() == 0:
-            return
+            return None
         if train_t.dim() == 2:
             mean = train_t.mean(dim=0)
             std = train_t.std(dim=0).clamp(min=eps)
             train_t.sub_(mean).div_(std).clamp_(-clamp, clamp)
             for t in other_ts:
                 t.sub_(mean).div_(std).clamp_(-clamp, clamp)
-        elif train_t.dim() == 3:
+            return mean, std
+        if train_t.dim() == 3:
             # (N, C, T) -- normalize per channel
             mean = train_t.mean(dim=(0, 2), keepdim=True)
             std = train_t.std(dim=(0, 2), keepdim=True).clamp(min=eps)
             train_t.sub_(mean).div_(std).clamp_(-clamp, clamp)
             for t in other_ts:
                 t.sub_(mean).div_(std).clamp_(-clamp, clamp)
-        elif train_t.dim() == 1:
+            return mean.reshape(-1), std.reshape(-1)
+        if train_t.dim() == 1:
             mean = train_t.mean()
             std = train_t.std().clamp(min=eps)
             train_t.sub_(mean).div_(std).clamp_(-clamp, clamp)
             for t in other_ts:
                 t.sub_(mean).div_(std).clamp_(-clamp, clamp)
+            return mean.reshape(1), std.reshape(1)
+        return None
+
+    def _identity(dim: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.zeros(max(dim, 1)), torch.ones(max(dim, 1))
 
     # Normalize input feature tensors only (not labels/targets).
     others_list = list(others)
-    _normalize_tensor(train.features, *[o.features for o in others_list])
-    _normalize_tensor(train.regime_input, *[o.regime_input for o in others_list])
-    _normalize_tensor(train.temporal_tensor, *[o.temporal_tensor for o in others_list])
+    feature_stats = _normalize_tensor(train.features, *[o.features for o in others_list])
+    regime_stats = _normalize_tensor(train.regime_input, *[o.regime_input for o in others_list])
+    temporal_stats = _normalize_tensor(train.temporal_tensor, *[o.temporal_tensor for o in others_list])
 
     # Normalize each branch input tensor.
+    branch_means: dict[str, torch.Tensor] = {}
+    branch_stds: dict[str, torch.Tensor] = {}
     for branch_name in train.branch_inputs:
-        _normalize_tensor(
+        branch_stats = _normalize_tensor(
             train.branch_inputs[branch_name],
             *[o.branch_inputs[branch_name] for o in others_list],
         )
+        if branch_stats is None:
+            branch_stats = _identity(train.branch_inputs[branch_name].shape[-1])
+        branch_means[branch_name], branch_stds[branch_name] = branch_stats
+
+    if feature_stats is None:
+        feature_stats = _identity(train.features.shape[-1])
+    if regime_stats is None:
+        regime_stats = _identity(train.regime_input.shape[-1])
+    if temporal_stats is None:
+        temporal_stats = _identity(
+            train.temporal_tensor.shape[1] if train.temporal_tensor.dim() == 3 else 1
+        )
+
+    return NormalizationStats(
+        features_mean=feature_stats[0].detach().cpu(),
+        features_std=feature_stats[1].detach().cpu(),
+        regime_mean=regime_stats[0].detach().cpu(),
+        regime_std=regime_stats[1].detach().cpu(),
+        temporal_mean=temporal_stats[0].detach().cpu(),
+        temporal_std=temporal_stats[1].detach().cpu(),
+        branch_means={k: v.detach().cpu() for k, v in branch_means.items()},
+        branch_stds={k: v.detach().cpu() for k, v in branch_stds.items()},
+        clamp=clamp,
+    )

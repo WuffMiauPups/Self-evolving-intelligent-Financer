@@ -138,6 +138,7 @@ def build_brain_policy(
         model=artifacts.model,
         device=_resolve_backtest_device(config),
         feature_contract=artifacts.feature_contract,
+        normalization=artifacts.normalization,
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
         force_directional_flip=config.backtest.force_directional_flip_enabled,
     )
@@ -172,6 +173,7 @@ def build_brain_memory_policy(
         model=artifacts.model,
         device=device,
         feature_contract=artifacts.feature_contract,
+        normalization=artifacts.normalization,
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
         force_directional_flip=config.backtest.force_directional_flip_enabled,
     )
@@ -180,6 +182,7 @@ def build_brain_memory_policy(
         model=artifacts.model,
         device=device,
         feature_contract=artifacts.feature_contract,
+        normalization=artifacts.normalization,
         expected_latent_dim=config.memory.latent_dim,
         encoder_fingerprint=artifacts.encoder_fingerprint,
     )

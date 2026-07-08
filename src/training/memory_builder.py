@@ -62,6 +62,7 @@ def build_post_training_memory(
             model=model,
             device=device,
             feature_contract=bundle.feature_contract,
+            normalization=bundle.normalization_stats,
             expected_latent_dim=memory_config.latent_dim,
         )
         pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))

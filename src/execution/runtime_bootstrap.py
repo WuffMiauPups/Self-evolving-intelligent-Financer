@@ -488,6 +488,7 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
         model=artifacts.model,
         device=device_ctx.device,
         feature_contract=artifacts.feature_contract,
+        normalization=artifacts.normalization,
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
         default_target_fraction=config.runtime.default_target_fraction,
     )
@@ -498,6 +499,7 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
             model=artifacts.model,
             device=device_ctx.device,
             feature_contract=artifacts.feature_contract,
+            normalization=artifacts.normalization,
             expected_latent_dim=config.memory.latent_dim,
             encoder_fingerprint=artifacts.encoder_fingerprint,
         )

@@ -10,6 +10,7 @@ import torch
 from src.core.config import DeviceConfig, FeatureConfig, ModelConfig
 from src.core.exceptions import ConfigurationError
 from src.features.feature_pipeline import FeatureContract
+from src.features.normalization import NormalizationStats
 from src.memory.memory_bank import compute_encoder_fingerprint
 from src.models.baseline import BaselineMLP
 from src.models.brain_model import BrainTradingModel
@@ -31,6 +32,23 @@ class LoadedModelArtifacts:
         if fp is not None:
             return str(fp)
         return compute_encoder_fingerprint(self.meta) if self.meta else None
+
+    @property
+    def normalization(self) -> NormalizationStats | None:
+        """Train-split z-score stats persisted at save time (C2 fix).
+
+        ``None`` means a pre-fix checkpoint trained on normalized inputs
+        with no recorded stats — its live behavior is undefined relative
+        to its validation metrics and it should be retrained.
+        """
+        stats = NormalizationStats.from_meta(self.meta)
+        if stats is None and self.meta and not self.meta.get("untrained"):
+            logger.warning(
+                "checkpoint has no normalization stats; inference inputs will be "
+                "raw-scale while the model was trained on z-scored inputs — retrain "
+                "this checkpoint (pre-C2-fix artifact)."
+            )
+        return stats
 
 
 def build_model_from_contract(

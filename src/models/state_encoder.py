@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from src.core.device import maybe_autocast
 from src.features.feature_pipeline import FeatureContract, FeatureSnapshot
-from src.memory.memory_bank import feature_contract_fingerprint
+from src.features.normalization import NormalizationStats
 from src.models.base import TradingModelProtocol
 from src.utils.torch_utils import ensure_batch_dimension, to_tensor
 
@@ -33,6 +33,11 @@ class ModelStateEncoder:
     model: TradingModelProtocol
     device: torch.device
     feature_contract: FeatureContract | None = None
+    # Train-split z-score stats from the checkpoint (C2 fix): memory-bank
+    # latents must be encoded from the same input distribution the
+    # encoder was trained on, or retrieval keys live on a different
+    # manifold than training ever produced.
+    normalization: NormalizationStats | None = None
     expected_latent_dim: int | None = None
     encoder_fingerprint: str | None = None
     # FP16 autocast enable for the encoder forward. ``None`` auto-enables on
@@ -88,6 +93,14 @@ class ModelStateEncoder:
             ensure_batch_dimension(to_tensor(snapshot.temporal_tensor, device=self.device, dtype=torch.float32)).squeeze(0)
             for snapshot in snapshots
         ]
+        if self.normalization is not None:
+            branch_inputs = {
+                name: self.normalization.apply_branch(name, value)
+                for name, value in branch_inputs.items()
+            }
+            regime_input = self.normalization.apply_regime(regime_input)
+            full_features = self.normalization.apply_features(full_features)
+            temporal_slices = [self.normalization.apply_temporal(s) for s in temporal_slices]
         max_time = max(temporal_slice.shape[-1] for temporal_slice in temporal_slices)
         temporal_tensor = torch.stack(
             [
@@ -111,6 +124,11 @@ class ModelStateEncoder:
         latent_dim = output.fused_representation.shape[-1]
         if self.expected_latent_dim is not None and latent_dim != self.expected_latent_dim:
             raise ValueError(f"Expected latent dim {self.expected_latent_dim}, got {latent_dim}")
+
+        # Imported lazily: src.memory's package __init__ imports the updater,
+        # which imports this module — a module-level import here closes the
+        # cycle and breaks any consumer that imports state_encoder first.
+        from src.memory.memory_bank import feature_contract_fingerprint
 
         contract_id = feature_contract_fingerprint(reference_contract)
         # --- L2-normalize fused representations before they enter memory -----
