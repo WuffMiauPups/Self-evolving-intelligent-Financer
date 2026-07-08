@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +31,13 @@ from src.data.schemas import MarketBar
 # ---------------------------------------------------------------------------
 
 CACHE_FORMAT_TENSOR_V1 = "tensor_v1"
+
+# Cache schema version.  Bumped from "1.0" to "2.0" when historical
+# fetches switched to split/dividend-adjusted prices
+# (``adjustment=Adjustment.ALL``): version-1 caches hold raw prices and
+# must never be merged with adjusted fetches, so ``load`` treats them as
+# missing (forcing a refetch) instead of serving them.
+CACHE_VERSION = "2.0"
 
 
 def _ensure_utc(timestamp: datetime) -> datetime:
@@ -156,7 +165,7 @@ class HistoricalCacheMetadata:
     row_count: int
     generated_at: datetime
     updated_at: datetime
-    cache_version: str = "1.0"
+    cache_version: str = CACHE_VERSION
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -239,9 +248,19 @@ class HistoricalBarCache:
         try:
             payload = torch.load(path, map_location="cpu", weights_only=True)
         except Exception:
-            logger.warning("cache_load_legacy_format", path=str(path))
+            logger.warning("cache_load_legacy_format path=%s", path)
             payload = torch.load(path, map_location="cpu", weights_only=False)
-        return HistoricalCacheRecord.from_payload(payload)
+        record = HistoricalCacheRecord.from_payload(payload)
+        if record.metadata.cache_version != CACHE_VERSION:
+            # Pre-adjustment (raw-price) caches must not be served or
+            # merged with adjusted fetches; treat them as missing so the
+            # caller refetches the range.
+            logger.warning(
+                "cache_version_stale path=%s found=%s expected=%s",
+                path, record.metadata.cache_version, CACHE_VERSION,
+            )
+            return None
+        return record
 
     def summarize(self, symbol: str, timeframe: str) -> dict[str, Any] | None:
         record = self.load(symbol, timeframe)
@@ -263,7 +282,18 @@ class HistoricalBarCache:
     def save(self, record: HistoricalCacheRecord) -> Path:
         path = self.path_for(record.metadata.symbol, record.metadata.timeframe)
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(record.to_payload(), path)
+        # Atomic write: a crash mid-save must never leave a truncated
+        # cache file behind.  The tmp name includes pid + uuid so
+        # concurrent writers (threads or processes) can never collide on
+        # the same tmp path — os.replace on Windows fails if the source
+        # is open in another writer.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            torch.save(record.to_payload(), tmp)
+            os.replace(tmp, path)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
         return path
 
     def filter_range(

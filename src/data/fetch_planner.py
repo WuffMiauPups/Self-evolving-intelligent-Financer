@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -207,10 +209,16 @@ class CacheManifest:
             "version": self.version,
             "chunks": [c.to_dict() for c in self.chunks.values()],
         }
-        tmp = self.path.with_suffix(".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        tmp.replace(self.path)
+        # Unique tmp name (pid + uuid): concurrent savers sharing a fixed
+        # ".tmp" name would race each other's os.replace on Windows.
+        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, self.path)
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
 
     def record_chunk(
         self,

@@ -107,6 +107,11 @@ class HistoricalDataService:
 
         record = None if force_refresh else self.cache.load(symbol, timeframe)
         fetched_ranges: list[tuple[datetime, datetime]] = []
+        # Tolerate a cached range one timeframe-delta short at each edge:
+        # the cached end is the last bar's timestamp, so a request ending
+        # "now" is almost always a hair past it.  Without the tolerance,
+        # offline loads demand sliver refetches they can never satisfy.
+        edge_tolerance = _timeframe_delta(timeframe)
         if record is None:
             if self.client is None:
                 raise RuntimeError(f"No cached historical coverage for {symbol} {timeframe} and no broker client available")
@@ -117,12 +122,39 @@ class HistoricalDataService:
                 end=end_utc,
             )
             merged_bars = HistoricalBarCache.merge_bars(list(bars))
+            fetched_ranges.append((start_utc, end_utc))
+            if not merged_bars:
+                # Weekends, holidays, or symbols absent from the feed
+                # legitimately return zero bars — report the gap instead
+                # of crashing on an empty record.
+                logger.warning(
+                    "historical_range_empty",
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    requested_start=start_utc.isoformat(),
+                    requested_end=end_utc.isoformat(),
+                )
+                return [], HistoricalFetchReport(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    requested_start=start_utc,
+                    requested_end=end_utc,
+                    cache_hit=False,
+                    fetched_ranges=fetched_ranges,
+                    row_count=0,
+                    cache_path=str(self.cache.path_for(symbol, timeframe)),
+                    source=type(self.client).__name__,
+                    gap_count=1,
+                    max_gap_seconds=(end_utc - start_utc).total_seconds(),
+                )
             record = self._build_record(symbol, timeframe, merged_bars, source=type(self.client).__name__)
             self.cache.save(record)
-            fetched_ranges.append((start_utc, end_utc))
             cache_hit = False
         else:
-            cache_hit = record.metadata.start <= start_utc and record.metadata.end >= end_utc
+            cache_hit = (
+                record.metadata.start <= start_utc + edge_tolerance
+                and record.metadata.end >= end_utc - edge_tolerance
+            )
             merged_bars = list(record.bars)
             if not cache_hit:
                 if start_utc < record.metadata.start:
@@ -159,14 +191,15 @@ class HistoricalDataService:
                                 end=end_utc,
                             ),
                         )
-                record = self._build_record(
-                    symbol,
-                    timeframe,
-                    merged_bars,
-                    generated_at=record.metadata.generated_at,
-                    source=type(self.client).__name__,
-                )
-                self.cache.save(record)
+                if merged_bars:
+                    record = self._build_record(
+                        symbol,
+                        timeframe,
+                        merged_bars,
+                        generated_at=record.metadata.generated_at,
+                        source=type(self.client).__name__,
+                    )
+                    self.cache.save(record)
             else:
                 merged_bars = list(record.bars)
 

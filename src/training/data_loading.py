@@ -10,6 +10,28 @@ from src.data.historical_data import HistoricalDataService, generate_synthetic_b
 from src.data.schemas import MarketBar
 
 
+def _advisory_stylized_facts_check(bars_by_symbol: dict[str, list[MarketBar]], logger: object) -> None:
+    """Advisory data-quality gate: log suspected unadjusted splits / data errors.
+
+    Never raises — training proceeds regardless; the warning tells the
+    operator the cache likely needs an adjusted refetch.
+    """
+    try:
+        from src.evaluation.stylized_facts import compute_stylized_facts
+
+        report = compute_stylized_facts(bars_by_symbol)
+        if report.suspicious:
+            logger.warning(
+                "stylized_facts_suspicious",
+                flagged=[
+                    (symbol, ts.isoformat() if ts is not None else None, round(ret, 6))
+                    for symbol, ts, ret in report.flagged],
+                note="Single-bar |return| > 20% usually means an unadjusted split or bad data; refetch with adjusted bars.",
+            )
+    except Exception as exc:  # noqa: BLE001 - advisory only, never block training
+        logger.warning("stylized_facts_check_failed", error=str(exc))
+
+
 def _build_training_client(config: AppConfig) -> tuple[object | None, bool]:
     if credentials_available():
         return (
@@ -100,6 +122,7 @@ def _resolve_bars_by_symbol(config: AppConfig) -> tuple[dict[str, list[MarketBar
             )
         if client is None and any(not report.cache_hit for report in reports):
             raise RuntimeError("Real historical training requested bars outside cached coverage and no Alpaca credentials are available")
+        _advisory_stylized_facts_check(bars_by_symbol, logger)
         return bars_by_symbol, {
             "using_mock": using_mock,
             "source": "historical_cache",

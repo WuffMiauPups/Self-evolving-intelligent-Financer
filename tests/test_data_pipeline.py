@@ -12,7 +12,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import torch
 
+from src.data.cache import (
+    CACHE_VERSION,
+    HistoricalBarCache,
+    HistoricalCacheMetadata,
+    HistoricalCacheRecord,
+    serialize_bar,
+)
 from src.data.fetch_planner import (
     CacheManifest,
     FetchChunk,
@@ -21,6 +29,8 @@ from src.data.fetch_planner import (
     merge_dedupe_validate,
     plan_chunks,
 )
+from src.data.historical_data import HistoricalDataService
+from src.data.parallel_fetch import ParallelFetchExecutor
 from src.data.schemas import MarketBar
 
 
@@ -531,6 +541,221 @@ class TestOfflineBehavior:
 
 
 # ---------------------------------------------------------------------------
+# Historical bar cache tests (version bump, atomic writes, legacy fallback)
+# ---------------------------------------------------------------------------
+
+
+def _make_record(symbol: str, bars: list[MarketBar], *, timeframe: str = "1Min", cache_version: str = CACHE_VERSION) -> HistoricalCacheRecord:
+    now = datetime.now(UTC)
+    return HistoricalCacheRecord(
+        metadata=HistoricalCacheMetadata(
+            symbol=symbol,
+            timeframe=timeframe,
+            start=bars[0].timestamp,
+            end=bars[-1].timestamp,
+            source="test",
+            timezone="UTC",
+            row_count=len(bars),
+            generated_at=now,
+            updated_at=now,
+            cache_version=cache_version,
+        ),
+        bars=bars,
+    )
+
+
+class TestHistoricalBarCache:
+
+    def test_save_load_roundtrip_current_version(self, tmp_path: Path):
+        cache = HistoricalBarCache(tmp_path)
+        bars = [_make_bar("AAPL", _utc(2023, 1, 2) + timedelta(minutes=i)) for i in range(5)]
+        cache.save(_make_record("AAPL", bars))
+
+        record = cache.load("AAPL", "1Min")
+        assert record is not None
+        assert record.metadata.cache_version == CACHE_VERSION
+        assert len(record.bars) == 5
+
+    def test_save_is_atomic_leaves_no_tmp_files(self, tmp_path: Path):
+        cache = HistoricalBarCache(tmp_path)
+        bars = [_make_bar("AAPL", _utc(2023, 1, 2))]
+        path = cache.save(_make_record("AAPL", bars))
+        assert path.exists()
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_stale_cache_version_treated_as_missing(self, tmp_path: Path):
+        """Version-1 (raw-price) caches must not be served after the
+        switch to split/dividend-adjusted fetches."""
+        cache = HistoricalBarCache(tmp_path)
+        bars = [_make_bar("AAPL", _utc(2023, 1, 2) + timedelta(minutes=i)) for i in range(3)]
+        cache.save(_make_record("AAPL", bars, cache_version="1.0"))
+
+        assert cache.load("AAPL", "1Min") is None
+
+    def test_legacy_format_load_does_not_crash_logger(self, tmp_path: Path):
+        """The legacy fallback used to call the stdlib logger with a
+        structlog-style kwarg, raising TypeError and making legacy files
+        permanently unreadable."""
+        cache = HistoricalBarCache(tmp_path)
+        bars = [_make_bar("AAPL", _utc(2023, 1, 2) + timedelta(minutes=i)) for i in range(3)]
+        now = datetime.now(UTC)
+        legacy_payload = {
+            "metadata": {
+                "symbol": "AAPL",
+                "timeframe": "1Min",
+                "start": bars[0].timestamp.isoformat(),
+                "end": bars[-1].timestamp.isoformat(),
+                "source": "test",
+                "timezone": "UTC",
+                "row_count": len(bars),
+                "generated_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "cache_version": CACHE_VERSION,
+            },
+            "bars": [serialize_bar(bar) for bar in bars],
+            # A datetime object fails ``weights_only=True`` loading and
+            # forces the legacy fallback path.
+            "_legacy_marker": now,
+        }
+        torch.save(legacy_payload, cache.path_for("AAPL", "1Min"))
+
+        record = cache.load("AAPL", "1Min")  # must not raise TypeError
+        assert record is not None
+        assert len(record.bars) == 3
+        assert record.bars[0].close == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------
+# Historical data service tests (zero-bar fetches, cached-range tolerance)
+# ---------------------------------------------------------------------------
+
+
+class _EmptyRangeClient:
+    def get_historical_bars_range(self, *, symbol, timeframe, start, end):
+        return []
+
+
+class TestHistoricalDataService:
+
+    def test_zero_bar_fetch_returns_empty_with_gap_report(self, tmp_path: Path):
+        """Weekend/holiday/no-IEX ranges return no bars — report the gap
+        instead of crashing in _build_record."""
+        service = HistoricalDataService(client=_EmptyRangeClient(), cache=HistoricalBarCache(tmp_path))
+        bars, report = service.load_bars_range(
+            "AAPL",
+            timeframe="1Min",
+            start=_utc(2023, 1, 7),  # Saturday
+            end=_utc(2023, 1, 8),
+        )
+        assert bars == []
+        assert report.row_count == 0
+        assert report.gap_count == 1
+        assert not report.cache_hit
+
+    def test_offline_sliver_within_tolerance_served_from_cache(self, tmp_path: Path):
+        cache = HistoricalBarCache(tmp_path)
+        base = _utc(2023, 1, 2)
+        bars = [_make_bar("AAPL", base + timedelta(minutes=i)) for i in range(100)]
+        cache.save(_make_record("AAPL", bars))
+        service = HistoricalDataService(client=None, cache=cache)
+
+        # Cached end is base+99min; requesting one timeframe-delta past
+        # it must be served offline instead of demanding a sliver fetch.
+        got, report = service.load_bars_range(
+            "AAPL",
+            timeframe="1Min",
+            start=base - timedelta(minutes=1),
+            end=base + timedelta(minutes=100),
+        )
+        assert report.cache_hit
+        assert len(got) == 100
+
+    def test_offline_gap_beyond_tolerance_still_raises(self, tmp_path: Path):
+        cache = HistoricalBarCache(tmp_path)
+        base = _utc(2023, 1, 2)
+        bars = [_make_bar("AAPL", base + timedelta(minutes=i)) for i in range(100)]
+        cache.save(_make_record("AAPL", bars))
+        service = HistoricalDataService(client=None, cache=cache)
+
+        with pytest.raises(RuntimeError):
+            service.load_bars_range(
+                "AAPL",
+                timeframe="1Min",
+                start=base,
+                end=base + timedelta(minutes=110),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Parallel fetch executor tests (force refresh, manifest serialization)
+# ---------------------------------------------------------------------------
+
+
+class _CountingRangeClient:
+    def __init__(self):
+        self.calls = 0
+
+    def get_historical_bars_range(self, *, symbol, timeframe, start, end):
+        self.calls += 1
+        return [_make_bar(symbol, start + timedelta(minutes=i)) for i in range(3)]
+
+
+class TestParallelFetchExecutor:
+
+    def _executor(self, tmp_path: Path, client) -> ParallelFetchExecutor:
+        return ParallelFetchExecutor(
+            client=client,
+            cache=HistoricalBarCache(tmp_path / "cache"),
+            manifest=CacheManifest.load(tmp_path / "manifest.json"),
+            max_workers=4,
+        )
+
+    def test_force_refresh_refetches_covered_chunks(self, tmp_path: Path):
+        """skip_covered=False must actually hit the client, even when the
+        manifest already covers the chunk (--force-refresh regression)."""
+        client = _CountingRangeClient()
+        executor = self._executor(tmp_path, client)
+        chunk = FetchChunk(
+            symbol="AAPL", timeframe="1Min",
+            start=_utc(2023, 1, 1), end=_utc(2023, 2, 1),
+            chunk_id="AAPL_1Min_20230101_20230201",
+        )
+        executor.manifest.record_chunk(chunk, row_count=999)
+
+        results = executor.execute([chunk], skip_covered=True)
+        assert results == []
+        assert client.calls == 0
+
+        results = executor.execute([chunk], skip_covered=False)
+        assert len(results) == 1
+        assert results[0].success
+        assert results[0].row_count == 3
+        assert client.calls == 1
+
+    def test_concurrent_chunks_all_land_in_manifest(self, tmp_path: Path):
+        """Cross-symbol chunks share one manifest: the global lock and
+        unique tmp names must keep every record intact under parallelism."""
+        client = _CountingRangeClient()
+        executor = self._executor(tmp_path, client)
+        chunks = plan_chunks(
+            symbols=["AAPL", "MSFT", "SPY", "TSLA"],
+            timeframe="1Min",
+            start=_utc(2023, 1, 1),
+            end=_utc(2023, 7, 1),
+            chunk_size="monthly",
+        )
+        assert len(chunks) == 24
+
+        results = executor.execute(chunks)
+        assert all(r.success for r in results)
+        assert client.calls == 24
+
+        reloaded = CacheManifest.load(tmp_path / "manifest.json")
+        assert len(reloaded.chunks) == 24
+        assert list((tmp_path).glob("*.tmp")) == []
+
+
+# ---------------------------------------------------------------------------
 # Pipeline config tests
 # ---------------------------------------------------------------------------
 
@@ -560,3 +785,12 @@ class TestPipelineConfig:
         assert config.data.pipeline.chunk_size == "monthly"
         assert config.data.pipeline.max_fetch_workers == 4
         assert config.data.pipeline.manifest_path == "artifacts/historical/manifest.json"
+
+    def test_bar_adjustment_defaults_to_all(self):
+        from src.core.config import DataConfig
+        assert DataConfig().bar_adjustment == "all"
+
+    def test_bar_adjustment_rejects_unknown_value(self):
+        from src.core.config import DataConfig
+        with pytest.raises(Exception):
+            DataConfig(bar_adjustment="weekly")

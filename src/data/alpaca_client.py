@@ -14,6 +14,13 @@ def credentials_available() -> bool:
     return bool(os.getenv("ALPACA_API_KEY") and os.getenv("ALPACA_API_SECRET"))
 
 
+# Historical bars must be split/dividend-adjusted by default: raw prices
+# contain corporate actions (e.g. NVDA's 10:1 split) as fake >90% crashes
+# inside training data.  Values mirror ``alpaca.data.enums.Adjustment``.
+DEFAULT_BAR_ADJUSTMENT = "all"
+_VALID_BAR_ADJUSTMENTS = {"raw", "split", "dividend", "all"}
+
+
 def _timeframe_from_string(timeframe: str) -> Any:
     from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
@@ -42,10 +49,18 @@ def _historical_lookback_delta(
 ) -> timedelta:
     normalized = timeframe.strip().lower()
     if normalized.endswith("min"):
-        trading_days = max(min_lookback_days_minute, (limit // bars_per_trading_day) + 2)
+        # ``limit`` counts bars of the requested timeframe, so an NMin
+        # request spans N times as many minutes as a 1Min request for the
+        # same limit.  ``bars_per_trading_day`` is denominated in 1-minute
+        # bars (390 per regular session).
+        amount = max(int(normalized[:-3] or 1), 1)
+        trading_days = max(min_lookback_days_minute, (limit * amount // bars_per_trading_day) + 2)
         return timedelta(days=trading_days)
     if normalized.endswith("hour"):
-        lookback_days = max(5, (limit // min_lookback_days_hourly) + 3)
+        # ~7 hourly bars per regular session; NHour bars span N times as
+        # many hours per bar.
+        amount = max(int(normalized[:-4] or 1), 1)
+        lookback_days = max(5, (limit * amount // min_lookback_days_hourly) + 3)
         return timedelta(days=lookback_days)
     if normalized.endswith("day"):
         return timedelta(days=max(limit * min_lookback_multiplier_daily, min_lookback_days_daily))
@@ -139,11 +154,22 @@ class BrokerDataClient(Protocol):
 
 
 class AlpacaClient:
-    def __init__(self, *, paper: bool = True, data_feed: str = "iex") -> None:
+    def __init__(
+        self,
+        *,
+        paper: bool = True,
+        data_feed: str = "iex",
+        bar_adjustment: str = DEFAULT_BAR_ADJUSTMENT,
+    ) -> None:
         if not credentials_available():
             raise DataUnavailableError("Alpaca credentials are not configured in the environment")
+        if bar_adjustment not in _VALID_BAR_ADJUSTMENTS:
+            raise ValueError(
+                f"Unsupported bar_adjustment {bar_adjustment!r}; expected one of {sorted(_VALID_BAR_ADJUSTMENTS)}"
+            )
         self.paper = paper
         self.data_feed = data_feed
+        self.bar_adjustment = bar_adjustment
         self._trading_client = None
         self._data_client = None
 
@@ -256,8 +282,6 @@ class AlpacaClient:
         return True
 
     def get_historical_bars(self, symbol: str, timeframe: str, limit: int) -> list[MarketBar]:
-        from alpaca.data.requests import StockBarsRequest
-
         end = datetime.now(UTC)
         start = end - _historical_lookback_delta(timeframe, limit)
         return self.get_historical_bars_range(symbol=symbol, timeframe=timeframe, start=start, end=end)[-limit:]
@@ -270,6 +294,7 @@ class AlpacaClient:
         start: datetime,
         end: datetime,
     ) -> list[MarketBar]:
+        from alpaca.data.enums import Adjustment
         from alpaca.data.requests import StockBarsRequest
 
         request = StockBarsRequest(
@@ -278,6 +303,7 @@ class AlpacaClient:
             start=start,
             end=end,
             feed=self.data_feed,
+            adjustment=Adjustment(self.bar_adjustment),
         )
         bars = self.data_client.get_stock_bars(request)
         series = bars.data.get(symbol, [])

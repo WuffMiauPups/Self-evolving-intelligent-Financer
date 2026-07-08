@@ -39,6 +39,10 @@ class DataConfig(BaseModel):
     start_date: str | date | datetime | None = None
     end_date: str | date | datetime | None = None
     cache_dir: str = "artifacts/historical"
+    # Corporate-action adjustment for historical bar fetches.  "all"
+    # (split + dividend) is the only value that keeps splits from showing
+    # up as fake crashes in training data.
+    bar_adjustment: str = "all"
     force_refresh: bool = False
     max_missing_gap_handling: str = "warn"
     timezone_normalization: str = "UTC"
@@ -53,6 +57,8 @@ class DataConfig(BaseModel):
     def validate_data_config(self) -> "DataConfig":
         if self.max_missing_gap_handling not in {"ignore", "warn", "error"}:
             raise ConfigurationError("data.max_missing_gap_handling must be one of: ignore, warn, error")
+        if self.bar_adjustment not in {"raw", "split", "dividend", "all"}:
+            raise ConfigurationError("data.bar_adjustment must be one of: raw, split, dividend, all")
         if not self.timezone_normalization:
             raise ConfigurationError("data.timezone_normalization must not be empty")
         return self

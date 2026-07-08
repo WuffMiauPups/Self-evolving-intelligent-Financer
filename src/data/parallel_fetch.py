@@ -21,6 +21,13 @@ from src.data.schemas import MarketBar
 
 logger = logging.getLogger(__name__)
 
+# The manifest is shared across ALL symbols, but the per-symbol cache
+# locks only serialize writers of the same symbol — two workers on
+# different symbols could interleave record_chunk/save and lose entries
+# (or race os.replace on the manifest file).  One global lock guards
+# every record+save pair.
+_MANIFEST_LOCK = threading.Lock()
+
 
 @dataclass(frozen=True)
 class ChunkFetchResult:
@@ -65,9 +72,13 @@ class ParallelFetchExecutor:
                 self._symbol_locks[symbol] = threading.Lock()
             return self._symbol_locks[symbol]
 
-    def _fetch_single_chunk(self, chunk: FetchChunk) -> ChunkFetchResult:
-        """Fetch a single chunk with retry logic. Thread-safe."""
-        if self.manifest.is_covered(chunk.chunk_id):
+    def _fetch_single_chunk(self, chunk: FetchChunk, *, skip_covered: bool = True) -> ChunkFetchResult:
+        """Fetch a single chunk with retry logic. Thread-safe.
+
+        ``skip_covered=False`` (force refresh) bypasses the manifest
+        short-circuit so already-covered chunks are actually refetched.
+        """
+        if skip_covered and self.manifest.is_covered(chunk.chunk_id):
             logger.debug("chunk_already_covered chunk_id=%s", chunk.chunk_id)
             coverage = self.manifest.chunks[chunk.chunk_id]
             return ChunkFetchResult(
@@ -113,7 +124,10 @@ class ParallelFetchExecutor:
                     )
                     cache_path = self.cache.save(record)
 
-                    # Record in manifest (also serialized to avoid torn writes)
+                # Record in manifest under the global manifest lock: the
+                # manifest is shared across symbols, so the per-symbol
+                # lock above is not enough to serialize record+save.
+                with _MANIFEST_LOCK:
                     self.manifest.record_chunk(
                         chunk,
                         row_count=len(bars),
@@ -194,7 +208,7 @@ class ParallelFetchExecutor:
         results: list[ChunkFetchResult] = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             futures = {
-                pool.submit(self._fetch_single_chunk, chunk): chunk
+                pool.submit(self._fetch_single_chunk, chunk, skip_covered=skip_covered): chunk
                 for chunk in to_fetch
             }
             for future in as_completed(futures):
