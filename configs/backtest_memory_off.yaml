@@ -1,0 +1,14 @@
+# Backtest preset: memory bank + fusion both OFF.
+#
+# Pure brain policy: no retrieval, no fusion, no topology.  Equivalent to
+# running the brain checkpoint as a stateless policy.  Useful for
+# measuring the memory system's marginal contribution.
+#
+# NOTE: Semantically equivalent to configs/experiments/brain_only.yaml.
+# This preset serves the GUI Backtest tab dropdown; the experiments
+# version serves the automated ablation runner (run_experiments.py).
+# Kept separate by audience, not by behavior.
+memory:
+  enabled: false
+  decision_fusion:
+    enabled: false

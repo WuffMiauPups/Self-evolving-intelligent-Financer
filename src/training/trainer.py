@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from time import perf_counter
 
@@ -9,14 +10,12 @@ from torch.utils.data import DataLoader
 from src.core.logging import get_logger
 from src.core.device import maybe_autocast
 from src.models.base import TradingModelProtocol
+from src.training.augmentation import TrainingAugmenter
 from src.training.losses import (
     direction_classification_loss,
     future_return_regression_loss,
-    latent_consistency_loss,
     multitask_regression_loss,
-    path_label_classification_loss,
     risk_path_regression_loss,
-    soma_gating_confidence_loss,
 )
 from src.training.metrics import BatchMetrics, build_collapse_warnings, compute_classification_report
 from src.utils.torch_utils import move_batch_to_device
@@ -56,6 +55,7 @@ class Trainer:
         class_weights: torch.Tensor | None = None,
         multitask_enabled: bool = True,
         contrastive_enabled: bool = False,
+        contrastive_margin: float = 0.1,
         classification_loss_mode: str = "cross_entropy",
         focal_gamma: float = 2.0,
         label_smoothing: float = 0.0,
@@ -64,9 +64,18 @@ class Trainer:
         report_prediction_distribution: bool = True,
         report_per_class_metrics: bool = True,
         # State + future-path config
-        enable_path_label_head: bool = False,
         enable_future_return_targets: bool = False,
         enable_risk_path_targets: bool = False,
+        adaptive_focal_gamma: bool = False,
+        focal_gamma_base: float = 1.5,
+        focal_gamma_boost: float = 2.0,
+        scheduler: object | None = None,
+        early_stopping_patience: int = 0,
+        restore_best_on_finish: bool = True,
+        metrics_flat_dominance_threshold: float = 0.75,
+        augmentation_enabled: bool = True,
+        noise_std: float = 0.01,
+        temporal_jitter_prob: float = 0.0,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
@@ -75,8 +84,12 @@ class Trainer:
         self.class_weights = class_weights
         self.multitask_enabled = multitask_enabled
         self.contrastive_enabled = contrastive_enabled
+        self.contrastive_margin = contrastive_margin
         self.classification_loss_mode = classification_loss_mode
         self.focal_gamma = focal_gamma
+        self.adaptive_focal_gamma = adaptive_focal_gamma
+        self.focal_gamma_base = focal_gamma_base
+        self.focal_gamma_boost = focal_gamma_boost
         self.label_smoothing = label_smoothing
         # Defaults are merged with the caller-supplied dict so new loss terms
         # (like gating_confidence, added 2026-04-07) automatically apply to
@@ -84,13 +97,8 @@ class Trainer:
         default_loss_weights = {
             "classification": 1.0,
             "regression": 0.35,
-            "latent": 0.10,
-            "path_label": 0.30,
             "future_return": 0.20,
             "risk_path": 0.15,
-            # Penalises soma gating that puts weight on low-confidence branches.
-            # Small weight: it's a regularizer, not the primary objective.
-            "gating_confidence": 0.05,
         }
         self.loss_weights = {**default_loss_weights, **dict(loss_weights or {})}
         self.collapse_warning_thresholds = dict(
@@ -98,11 +106,42 @@ class Trainer:
         )
         self.report_prediction_distribution = report_prediction_distribution
         self.report_per_class_metrics = report_per_class_metrics
-        self.enable_path_label_head = enable_path_label_head
         self.enable_future_return_targets = enable_future_return_targets
         self.enable_risk_path_targets = enable_risk_path_targets
+        self.scheduler = scheduler
+        self.early_stopping_patience = early_stopping_patience
+        self.restore_best_on_finish = restore_best_on_finish
+        self.metrics_flat_dominance_threshold = metrics_flat_dominance_threshold
+        self.augmentation_enabled = augmentation_enabled
+        self.augmenter = TrainingAugmenter(
+            noise_std=noise_std,
+            temporal_jitter_prob=temporal_jitter_prob,
+        )
         self.scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
         self.logger = get_logger("trainer")
+
+    def _update_focal_gamma(self, val_metrics) -> None:
+        """Adapt focal gamma based on minority class recall.
+
+        Formula: gamma = base + boost * (1 - min_class_recall)
+        When minority recall is 0% → gamma = base + boost (most aggressive).
+        When minority recall is 100% → gamma = base (standard).
+        """
+        if not self.adaptive_focal_gamma:
+            return
+        long_recall = getattr(val_metrics, 'long_recall', 0.0) or 0.0
+        short_recall = getattr(val_metrics, 'short_recall', 0.0) or 0.0
+        min_recall = min(long_recall, short_recall)
+        new_gamma = self.focal_gamma_base + self.focal_gamma_boost * (1.0 - min_recall)
+        self.logger.info(
+            "adaptive_focal_gamma_update",
+            old_gamma=self.focal_gamma,
+            new_gamma=round(new_gamma, 4),
+            min_class_recall=round(min_recall, 4),
+            long_recall=round(long_recall, 4),
+            short_recall=round(short_recall, 4),
+        )
+        self.focal_gamma = new_gamma
 
     def fit(
         self,
@@ -112,6 +151,9 @@ class Trainer:
         epochs: int,
     ) -> TrainingHistory:
         history = TrainingHistory()
+        best_val_loss = float("inf")
+        patience_counter = 0
+        best_model_state: dict | None = None
         for epoch_index in range(epochs):
             self.logger.info("epoch_start", epoch=epoch_index + 1, epochs=epochs)
             train_metrics = self._run_epoch(
@@ -130,10 +172,29 @@ class Trainer:
             )
             history.train.append(train_metrics)
             history.val.append(val_metrics)
+            # --- Early stopping check ---
+            if val_metrics.loss < best_val_loss:
+                best_val_loss = val_metrics.loss
+                patience_counter = 0
+                if self.restore_best_on_finish:
+                    best_model_state = copy.deepcopy(self.model.state_dict())
+            else:
+                patience_counter += 1
+                if self.early_stopping_patience > 0 and patience_counter >= self.early_stopping_patience:
+                    self.logger.info("early_stopping", epoch=epoch_index + 1, best_val_loss=best_val_loss)
+                    break
+            self._update_focal_gamma(val_metrics)
+            # Step the learning rate scheduler (if configured)
+            if self.scheduler is not None:
+                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step(val_metrics.loss)
+                else:
+                    self.scheduler.step()
             self.logger.info(
                 "epoch_complete",
                 epoch=epoch_index + 1,
                 epochs=epochs,
+                current_lr=self.optimizer.param_groups[0]["lr"],
                 train_loss=train_metrics.loss,
                 train_accuracy=train_metrics.accuracy,
                 train_macro_f1=train_metrics.macro_f1,
@@ -157,6 +218,8 @@ class Trainer:
                 val_per_class_metrics=(val_metrics.per_class_metrics if self.report_per_class_metrics else {}),
                 val_warnings=val_metrics.warnings,
             )
+        if self.restore_best_on_finish and best_model_state is not None:
+            self.model.load_state_dict(best_model_state)
         return history
 
     def _run_epoch(
@@ -181,15 +244,14 @@ class Trainer:
         LOSS_IDX_ACC = 1
         LOSS_IDX_CLS = 2
         LOSS_IDX_REG = 3
-        LOSS_IDX_LAT = 4
-        LOSS_IDX_PL = 5
+        # slot 4 intentionally unused (was LOSS_IDX_LAT, removed in Phase 8)
+        # slot 5 intentionally unused (was LOSS_IDX_PL, removed when path_label head was killed)
         LOSS_IDX_FR = 6
         LOSS_IDX_RP = 7
         component_totals: dict[str, torch.Tensor] = {}
         logits_batches: list[torch.Tensor] = []
         label_batches: list[torch.Tensor] = []
-        path_label_logits_batches: list[torch.Tensor] = []
-        path_label_batches: list[torch.Tensor] = []
+        grad_norms: list[float] = []
         batches = 0
         try:
             total_batches = len(loader)
@@ -197,9 +259,15 @@ class Trainer:
             total_batches = None
         progress_interval = 200 if training else 100
         started_at = perf_counter()
+        _t_iter = perf_counter()
         for batch_index, batch in enumerate(loader, start=1):
+            _t_data = perf_counter() - _t_iter  # time spent in DataLoader iterator
             batch = _move_batch_non_blocking(batch, self.device)
             self.optimizer.zero_grad(set_to_none=True)
+            # --- Training-time augmentation: add Gaussian noise to features.
+            # Only fires during training, never during validation.
+            if training and self.augmentation_enabled:
+                batch["features"] = self.augmenter.augment(batch["features"])
             with maybe_autocast(self.device, self.use_amp and training):
                 output = self.model(
                     branch_inputs=batch["branch_inputs"],
@@ -217,23 +285,6 @@ class Trainer:
                     focal_gamma=self.focal_gamma,
                     label_smoothing=self.label_smoothing,
                 )
-
-                # --- B. Path label classification loss ---
-                path_label_loss = output.action_logits.new_zeros(())
-                if self.enable_path_label_head and "path_label" in batch:
-                    # Use regime_weights as path label logits if available and right shape,
-                    # otherwise reuse action_logits projected to 5 classes
-                    path_logits = self._get_path_logits(output, batch)
-                    if path_logits is not None:
-                        path_label_loss = path_label_classification_loss(
-                            path_logits,
-                            batch["path_label"],
-                            loss_mode=self.classification_loss_mode,
-                            focal_gamma=self.focal_gamma,
-                            label_smoothing=self.label_smoothing,
-                        )
-                        path_label_logits_batches.append(path_logits.detach())
-                        path_label_batches.append(batch["path_label"].detach())
 
                 # --- C. Legacy multitask regression loss ---
                 regression_loss = output.action_logits.new_zeros(())
@@ -262,39 +313,39 @@ class Trainer:
                     risk_path_loss = rp_loss
                     regression_components.update(rp_components)
 
-                # --- F. Latent consistency loss ---
-                latent_loss = output.action_logits.new_zeros(())
-                if self.multitask_enabled and self.contrastive_enabled:
-                    latent_loss = latent_consistency_loss(output.fused_representation, batch["label"])
-
-                # --- G. Soma gating-confidence regularization ---
-                # Pulls the soma weights toward high-confidence branches so the
-                # gate can no longer learn to over-weight the regime branch
-                # while ignoring its own confidence (the observed runtime bug).
-                # Skipped for the baseline model which has no real branch
-                # confidences (it ships an empty dict).
-                gating_loss = output.action_logits.new_zeros(())
-                if output.branch_confidences:
-                    bc_stack = torch.stack(
-                        [output.branch_confidences[name].squeeze(-1) for name in output.branch_confidences],
-                        dim=-1,
-                    )
-                    if output.soma_weights.shape == bc_stack.shape:
-                        gating_loss = soma_gating_confidence_loss(output.soma_weights, bc_stack)
-
                 # --- Weighted total loss ---
                 loss = (
                     self.loss_weights.get("classification", 1.0) * classification_loss
                     + self.loss_weights.get("regression", 0.0) * regression_loss
-                    + self.loss_weights.get("latent", 0.0) * latent_loss
-                    + self.loss_weights.get("path_label", 0.0) * path_label_loss
                     + self.loss_weights.get("future_return", 0.0) * future_return_loss
                     + self.loss_weights.get("risk_path", 0.0) * risk_path_loss
-                    + self.loss_weights.get("gating_confidence", 0.0) * gating_loss
                 )
 
             if training:
+                if torch.isnan(loss):
+                    # Diagnose which component produced NaN
+                    _nan_parts = []
+                    for _name, _val in [
+                        ("classification", classification_loss),
+                        ("regression", regression_loss),
+                        ("future_return", future_return_loss),
+                        ("risk_path", risk_path_loss),
+                    ]:
+                        if torch.isnan(_val):
+                            _nan_parts.append(_name)
+                    raise RuntimeError(
+                        f"NaN loss at batch {batch_index}: "
+                        f"nan_components={_nan_parts}, "
+                        f"total={loss.item()}"
+                    )
                 self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
+                total_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
+                if torch.isnan(total_norm) or torch.isinf(total_norm):
+                    self.optimizer.zero_grad(set_to_none=True)
+                    self.scaler.update()
+                    continue
+                grad_norms.append(float(total_norm.item()))
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             # Accumulate on-device; no sync here.
@@ -305,8 +356,6 @@ class Trainer:
                 loss_accum[LOSS_IDX_ACC] += accuracy
                 loss_accum[LOSS_IDX_CLS] += classification_loss.detach()
                 loss_accum[LOSS_IDX_REG] += regression_loss.detach()
-                loss_accum[LOSS_IDX_LAT] += latent_loss.detach()
-                loss_accum[LOSS_IDX_PL] += path_label_loss.detach()
                 loss_accum[LOSS_IDX_FR] += future_return_loss.detach()
                 loss_accum[LOSS_IDX_RP] += risk_path_loss.detach()
                 # Keep full logits/labels for end-of-epoch metrics, but stay
@@ -320,6 +369,7 @@ class Trainer:
                     else:
                         component_totals[name] += v.detach()
             batches += 1
+            _t_iter = perf_counter()  # reset for next iteration's data timing
             if batch_index == 1 or batch_index % progress_interval == 0 or (total_batches is not None and batch_index == total_batches):
                 elapsed = perf_counter() - started_at
                 # Progress logging is the *only* place we sync mid-epoch.
@@ -335,6 +385,8 @@ class Trainer:
                     avg_loss=avg[0],
                     avg_accuracy=avg[1],
                     elapsed_sec=elapsed,
+                    ms_per_batch=round(elapsed / batches * 1000, 1),
+                    last_data_ms=round(_t_data * 1000, 1),
                 )
         if batches == 0:
             return BatchMetrics(loss=0.0, accuracy=0.0)
@@ -344,8 +396,6 @@ class Trainer:
         total_accuracy = loss_totals[LOSS_IDX_ACC]
         total_classification_loss = loss_totals[LOSS_IDX_CLS]
         total_regression_loss = loss_totals[LOSS_IDX_REG]
-        total_latent_loss = loss_totals[LOSS_IDX_LAT]
-        total_path_label_loss = loss_totals[LOSS_IDX_PL]
         total_future_return_loss = loss_totals[LOSS_IDX_FR]
         total_risk_path_loss = loss_totals[LOSS_IDX_RP]
         epoch_logits = torch.cat(logits_batches, dim=0).cpu()
@@ -354,26 +404,16 @@ class Trainer:
         warnings = build_collapse_warnings(
             classification_report=classification_report,
             thresholds=self.collapse_warning_thresholds,
+            flat_dominance_threshold=self.metrics_flat_dominance_threshold,
         )
-
-        # Path label accuracy (if tracked)
-        path_label_accuracy = 0.0
-        if path_label_logits_batches:
-            all_pl_logits = torch.cat(path_label_logits_batches, dim=0).cpu()
-            all_pl_labels = torch.cat(path_label_batches, dim=0).cpu()
-            pl_preds = all_pl_logits.argmax(dim=-1)
-            path_label_accuracy = float((pl_preds == all_pl_labels).float().mean())
 
         return BatchMetrics(
             loss=total_loss / batches,
             accuracy=total_accuracy / batches,
             classification_loss=total_classification_loss / batches,
             regression_loss=total_regression_loss / batches,
-            latent_loss=total_latent_loss / batches,
-            path_label_loss=total_path_label_loss / batches,
             future_return_loss=total_future_return_loss / batches,
             risk_path_loss=total_risk_path_loss / batches,
-            path_label_accuracy=path_label_accuracy,
             balanced_accuracy=float(classification_report["balanced_accuracy"]),
             macro_f1=float(classification_report["macro_f1"]),
             weighted_f1=float(classification_report["weighted_f1"]),
@@ -384,37 +424,6 @@ class Trainer:
             per_class_metrics=dict(classification_report["per_class"]),
             warnings=warnings,
             components={name: float(value.detach().cpu()) / batches for name, value in component_totals.items()},
+            grad_norm_mean=sum(grad_norms) / len(grad_norms) if grad_norms else 0.0,
+            grad_norm_max=max(grad_norms) if grad_norms else 0.0,
         )
-
-    def _get_path_logits(self, output: object, batch: dict) -> torch.Tensor | None:
-        """Extract or construct path-label logits from model output.
-
-        The model has regime_weights (shape [batch, regime_count]) which we can
-        repurpose if regime_count == 5 (matching PATH_LABEL_VOCABULARY size).
-        Otherwise, we reuse action_logits expanded to 5 classes via a simple
-        linear projection on the fused representation.
-        """
-        # Try regime_weights first (naturally 4-class but close to 5)
-        if hasattr(output, "regime_weights") and output.regime_weights is not None:
-            rw = output.regime_weights
-            if rw.shape[-1] == 5:
-                return rw
-        # Fall back: use fused_representation to produce 5-class logits
-        # We use a simple linear combination from the 3-class action logits + bias
-        # This gives the optimizer a gradient path through the existing representation
-        logits_3 = output.action_logits  # [batch, 3]
-        batch_size = logits_3.shape[0]
-        # Map 3 direction logits → 5 path logits via a fixed deterministic expansion:
-        # breakout_down ← short logit, mean_rev_down ← (short + flat)/2,
-        # chop ← flat logit, mean_rev_up ← (flat + long)/2, breakout_up ← long logit
-        short_l = logits_3[:, 0:1]
-        flat_l = logits_3[:, 1:2]
-        long_l = logits_3[:, 2:3]
-        path_logits = torch.cat([
-            short_l,                        # breakout_down
-            (short_l + flat_l) * 0.5,       # mean_reversion_down
-            flat_l,                         # chop
-            (flat_l + long_l) * 0.5,        # mean_reversion_up
-            long_l,                         # breakout_up
-        ], dim=-1)
-        return path_logits

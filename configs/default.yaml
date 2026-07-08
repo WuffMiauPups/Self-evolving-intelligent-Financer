@@ -8,8 +8,9 @@ logging:
 
 device:
   preferred: auto
-  use_amp: false
+  use_amp: true
   matmul_precision: high
+  torch_compile_enabled: false   # opt-in: needs MSVC cl.exe on Windows; set true once env has it
 
 broker:
   provider: alpaca
@@ -22,10 +23,27 @@ broker:
   polling_interval_sec: 2.0
   mock_data_on_missing_credentials: true
 
+# NOTE: broker.base_url default is null in the Python config; the YAML
+# explicitly sets it to the paper endpoint.  Left as-is intentionally.
+
 data:
   symbols:
+    # ── Mega-cap tech ──
     - AAPL
     - MSFT
+    - NVDA
+    - AMZN
+    - GOOGL
+    - META
+    - TSLA
+    # ── Broad-market & sector ETFs ──
+    - SPY
+    - QQQ
+    - VOO
+    # ── Single names: fintech / growth / consumer ──
+    - PLTR
+    - MSTR
+    - NFLX
   timeframe: 5Min
   start_date: 2022-01-01
   end_date: null
@@ -33,6 +51,12 @@ data:
   force_refresh: false
   max_missing_gap_handling: warn
   timezone_normalization: UTC
+  # --- Lookback / bar-count defaults ---
+  bars_per_trading_day: 390
+  min_lookback_days_minute: 3
+  min_lookback_days_hourly: 7
+  min_lookback_multiplier_daily: 3
+  min_lookback_days_daily: 30
   pipeline:
     chunk_size: monthly
     max_fetch_workers: 4
@@ -46,6 +70,17 @@ runtime:
   symbols:
     - AAPL
     - MSFT
+    - NVDA
+    - AMZN
+    - GOOGL
+    - META
+    - TSLA
+    - SPY
+    - QQQ
+    - VOO
+    - PLTR
+    - MSTR
+    - NFLX
   timeframe: 5Min
   warmup_bars: 48
   decision_interval_sec: 2.0
@@ -65,6 +100,31 @@ runtime:
   # Model weights are FROZEN at runtime by default.  Memory bank can learn online.
   allow_online_model_updates: false
   allow_online_memory_updates: true
+  # Regime hysteresis
+  regime_hysteresis_enabled: false
+  regime_consecutive_threshold: 3
+  regime_high_confidence_threshold: 0.65
+  regime_cooldown_bars: 5
+  regime_shift_detection_enabled: false
+  regime_shift_threshold_std: 2.5
+  # Market priors pre-filter
+  market_priors_enabled: false
+  market_priors_trend_filter: true
+  market_priors_volume_filter: true
+  market_priors_volatility_filter: true
+  # Alerting
+  alert_webhook_url: null
+  alert_timeout_sec: 5.0
+  # --- Log rotation ---
+  log_rotation_max_bytes: 50000000     # 50 MB
+  log_rotation_max_backups: 3
+  # --- Stream manager ---
+  stream_circuit_breaker_limit: 60     # consecutive failures before circuit opens
+  stream_empty_poll_warn_frequency: 10 # warn every N empty polls
+  # --- Brain policy ---
+  default_target_fraction: 0.05        # default position size as fraction of equity
+  # --- Parallelism ---
+  max_parallel_workers: 8
 
 features:
   windows:
@@ -76,104 +136,210 @@ features:
   volume_windows: [5, 20]
   epsilon: 0.0005
   branch_feature_prefixes:
-    trend: ["return_", "log_return_", "momentum_"]
-    volatility: ["volatility_", "range_", "body_", "upper_wick_", "lower_wick_"]
+    trend: ["return_", "log_return_", "momentum_", "rsi_", "macd_"]
+    volatility: ["volatility_", "range_", "body_", "upper_wick_", "lower_wick_", "atr_"]
     volume: ["volume_", "volume_z_", "volume_change_"]
-    regime: ["regime_"]
+    regime: ["regime_", "calendar_"]
 
 model:
-  feature_dim_hint: 32
-  branch_hidden_dim: 32
-  branch_output_dim: 24
+  feature_dim_hint: 128
+  branch_hidden_dim: 128
+  branch_output_dim: 96
   branch_depth: 2
   regime_input_dim: 4
-  regime_hidden_dim: 16
-  regime_embedding_dim: 12
-  regime_count: 4
-  soma_hidden_dim: 32
-  memory_dim: 24
-  head_hidden_dim: 32
-  dropout: 0.05
-  baseline_hidden_dim: 48
+  regime_hidden_dim: 64
+  regime_embedding_dim: 64
+  regime_count: 6
+  soma_hidden_dim: 192
+  memory_dim: 128
+  head_hidden_dim: 192
+  head_depth: 2
+  dropout: 0.10
+  decouple_confidence_from_soma: false
+  baseline_hidden_dim: 192
   use_cnn_encoder: true
-  cnn_channels: [16, 32, 64]
+  cnn_channels: [64, 128, 256]
   cnn_kernel_sizes: [3, 5, 7]
+  cnn_dilations: [1, 2, 4]
   temporal_blocks: 3
-  checkpoint_path: checkpoints/brain.pt
+  checkpoint_path: checkpoints/brain.pt  # canonical trained checkpoint
+  # --- Ablation flags (all true = full model) ---
+  regime_encoder_enabled: true
+  latent_gru_memory_enabled: true
+  branch_confidence_gating_enabled: true
+  soma_confidence_weighting_enabled: true
+  regime_prototype_init_scale: 0.02    # scale for regime embedding initialization
+  separate_risk_heads: true           # Dedicated heads for MFE/MAE/volatility/drawdown (feed the EV gate)
 
 risk:
   max_daily_loss: 350.0
+  max_daily_loss_pct: null       # percentage of equity; overrides absolute when set
   max_position_notional: 12000.0
+  max_aggregate_notional: 50000.0
+  max_leverage_ratio: 2.0
   max_position_per_symbol: 3
   max_concurrent_positions: 15
+  max_rolling_drawdown: -0.10    # -10% rolling drawdown limit
+  rolling_drawdown_window: 100
   cooldown_sec: 60
   stale_data_sec: 30
   max_spread_bps: 100.0
   duplicate_order_window_sec: 15
-  min_trade_confidence: 0.55
-  min_trade_fraction: 0.02
+  # min_trade_confidence / min_trade_fraction removed (Great Simplification
+  # Phase 7). Trade gating is now EV-based: the risk manager computes
+  # (confidence * expected_gain_bps - (1-confidence) * expected_loss_bps - cost_bps)
+  # and approves only when the result is positive. fee_bps + slippage_bps below
+  # feed the cost side; expected_gain_bps / expected_loss_bps come from the
+  # model's risk head (MFE / MAE predictions in bps).
+  fee_bps: 1.0
+  slippage_bps: 2.0
+  quantity_precision: 0.001
   kill_switch: false
   allowed_sessions: []
+  # --- Deduplication ---
+  max_processed_request_ids: 100000   # cap on seen request ID set
 
 backtest:
   initial_cash: 100000.0
   fee_bps: 1.0
   slippage_bps: 2.0
+  force_directional_flip_enabled: true
+  # --- Annualization / simulation timing ---
+  bars_per_year: 19656                # 252 days * 78 five-min bars
+  seconds_per_bar: 300.0
 
 training:
   use_real_historical_data: true
-  batch_size: 16
-  epochs: 3
+  batch_size: 384
+  epochs: 5
   learning_rate: 0.001
   weight_decay: 0.0001
+  scheduler_type: cosine
+  # --- Extended scheduler controls ---
+  scheduler_warmup_epochs: 0
+  scheduler_patience: 2               # for ReduceLROnPlateau
+  scheduler_factor: 0.5               # for ReduceLROnPlateau
+  scheduler_min_lr: 0.000001
+  scheduler_t_max: null               # for CosineAnnealingLR; defaults to epochs if null
   train_split: 0.7
   val_split: 0.2
   test_split: 0.1
   label_epsilon: 0.0005
+  # --- Adaptive label epsilon (per-symbol volatility scaling) ---
+  adaptive_label_epsilon: true
+  adaptive_epsilon_multiplier: 1.0
+  adaptive_epsilon_min: 0.0001
+  adaptive_epsilon_max: 0.005
   checkpoint_dir: checkpoints
   sequence_length: 48
-  use_amp: false
+  use_amp: true
   forward_horizons: [1, 3, 6]
+  # --- Horizon / target head controls ---
+  primary_direction_horizon: null      # defaults to max(forward_horizons) if null
+  auxiliary_horizons: []               # extra horizons for future-path targets
+  enable_future_return_targets: true
+  enable_risk_path_targets: true       # MFE/MAE/volatility/drawdown regression
   path_label_rules:
     breakout_return_threshold: 0.003
     mean_reversion_return_threshold: 0.0015
     flat_return_threshold: 0.00075
     time_to_move_threshold: 0.002
+  classification_loss: focal
+  focal_gamma: 2.0
+  # --- Adaptive focal gamma (adjusts per-epoch based on minority recall) ---
+  adaptive_focal_gamma: true
+  focal_gamma_base: 1.5
+  focal_gamma_boost: 2.0
+  label_smoothing: 0.0
   class_weight_mode: balanced
-  use_weighted_sampler: false
+  class_weight_cap: 3.0               # max class weight; null = uncapped
+  use_weighted_sampler: true
+  weighted_sampler_mode: inverse_frequency  # or "effective_number"
   minority_class_floor_warning: 0.1
   report_target_stats: true
+  # --- Extended training diagnostics ---
+  report_logit_stats: true
+  report_prediction_distribution: true
+  report_per_class_metrics: true
+  inspect_target_boundaries: true
+  # --- Diagnostic thresholds (class_balance / metrics) ---
+  label_epsilon_min_bars: 20           # min bars for adaptive epsilon estimation
+  near_flat_multiplier: 1.25
+  epsilon_reduction_factor: 0.5
+  flat_dominance_threshold: 0.80       # warn if FLAT share exceeds this
+  metrics_flat_dominance_threshold: 0.75
   multitask_enabled: true
-  contrastive_enabled: false
+  contrastive_enabled: false             # RESERVED
+  contrastive_margin: 0.1               # RESERVED
+  # --- Loss weights (path_label head removed — 5-class task didn't earn its keep,
+  # train→val gap was 7.7pt, val acc below majority baseline) ---
+  loss_weights:
+    classification: 1.0
+    regression: 0.35
+    latent: 0.10
+    future_return: 0.20
+    risk_path: 0.15
   regression_targets:
     - primary_return
     - drawdown
     - stability
+  # --- Collapse detection thresholds ---
+  collapse_warning_thresholds:
+    long_prediction_floor: 0.08
+    minority_recall_floor: 0.15
+  # --- Task disabling flags ---
+  disable_regression: false
+  disable_latent: false
+  # --- Run output ---
+  runs_dir: runs
+  # --- Sequential GRU training (stateful memory across batches) ---
+  sequential_memory_training: false
+  memory_truncation_steps: 16
   save_memory_after_training: true
   memory_build_split: train
+  early_stopping_patience: 2          # stop training if val loss degrades for 2 consecutive epochs
+  restore_best_model: true            # Restore best epoch weights after training
+  transaction_cost_bps: 0.0           # Widen FLAT band by estimated round-trip cost (basis points)
+  platt_calibration_enabled: true     # Fit Platt scaling on validation set after training
+  # --- RL fine-tuning (reserved scaffold) ---
+  rl_finetune_enabled: false
+  rl_finetune_episodes: 100
+  rl_replay_buffer_capacity: 10000
+  rl_gamma: 0.99
+  rl_batch_size: 32
+  rl_learning_rate: 0.0001
+  # --- Self-supervised pretraining (reserved scaffold) ---
+  pretrain_enabled: false
+  pretrain_epochs: 5
+  pretrain_learning_rate: 0.0005
   # --- Fast experiment mode (disabled by default) ---
   # Enable with --fast CLI flag or by setting enabled: true here.
   # Fast runs are explicitly marked in logs and run summaries.
   # Do NOT promote a fast-mode checkpoint to production.
   fast_mode:
-    enabled: true
+    enabled: false
     sample_seed: 42
-    # fast_months: 6           # restrict to last N months of cached data
-    # fast_start_date: null    # explicit ISO date override, e.g. "2025-01-01"
-    # fast_end_date: null      # explicit ISO date override
-    # symbols: []              # symbol subset, e.g. [AAPL] — empty = all configured
-    # max_train_samples: null  # cap training samples (deterministic)
-    # max_val_samples: null    # cap val samples
-    # max_test_samples: null   # cap test samples
-    # max_epochs: null         # cap epochs (min of this and training.epochs)
-    # disable_path_label: false
-    # disable_future_return: false
-    # disable_risk_path: false
-    # model_profile: default   # "default" or "small" (reduced capacity)
+    fast_months: 6
+    fast_start_date: null              # explicit ISO start override
+    fast_end_date: null                # explicit ISO end override
+    symbols: [AAPL, MSFT, NVDA, SPY, QQQ]
+    max_train_samples: 50000
+    max_val_samples: 15000
+    max_test_samples: 10000
+    max_epochs: null                   # cap epochs; min of this and training.epochs
+    # --- Target/loss simplification ---
+    disable_future_return: false
+    disable_risk_path: false
+    model_profile: default             # "default" or "small" (reduced capacity)
 
 execution:
   max_submit_retries: 2
   retry_backoff_sec: 0.5
+  order_journal_enabled: true
+  order_journal_path: "runs/order_journal.jsonl"
+  # --- Journal rotation ---
+  order_journal_max_bytes: 50000000   # 50 MB
+  order_journal_max_backups: 3
 
 memory:
   enabled: true
@@ -184,7 +350,7 @@ memory:
   min_similarity: 0.75
   allow_unknown_state: true
   cluster_method: incremental_prototypes
-  max_items: 5000
+  max_items: 20000     # stratified per-symbol: 13 symbols * ~1.5K items each — small for fast retrieval at backtest time
   rebuild_on_startup: false
   persist_path: artifacts/market_memory.pt
   forward_horizons: [1, 3, 6, 12]
@@ -200,10 +366,51 @@ memory:
   min_effective_matches: 2
   attention_temperature: 1.0
   use_hopfield_retrieval: true
+  # Modern Hopfield (Ramsauer 2020) — iterative retrieval
+  modern_hopfield_enabled: false
+  modern_hopfield_iterations: 3
+  # Deep projections — learnable W_Q/W_K/W_V
+  deep_projections_enabled: false
+  deep_projections_hidden_dim: 64
+  deep_projections_train_epochs: 100
+  deep_projections_initial_beta: 8.0   # initial inverse-temperature for Hopfield energy
+  deep_projections_mse_weight: 0.7     # weight of MSE loss in deep projection training
+  deep_projections_lr: 0.001           # learning rate for deep projection training
+  # Multi-timescale retrieval
+  multi_timescale_retrieval: false
+  retrieval_temperature_multipliers: [2.0, 1.0, 0.5]
+  retrieval_temperature_weights: [0.5, 0.3, 0.2]
+  # --- Health tracker thresholds ---
+  retrieval_health_warmup: 100         # min retrievals before health tracking activates
+  outcome_similarity_adjustment: -0.1  # similarity penalty for poor-outcome matches
+  fusion_cold_start_veto: 0.15         # veto threshold during fusion cold start
+  fusion_cold_start_support: 0.65      # support threshold during fusion cold start
+  fusion_health_warmup: 50             # min fusion evaluations before health tracking
+  veto_profit_threshold: 0.01          # return threshold for profitable veto review
+  veto_relax_factor: 0.9              # relax veto threshold after profitable vetoes
+  veto_tighten_factor: 1.1            # tighten veto threshold after loss-causing vetoes
+  veto_loss_threshold: -0.005          # return threshold for loss-causing veto review
+  topology_health_warmup: 20           # min topology operations before health tracking
+  # RAN merge — blend similar items into prototypes
+  ran_merge_enabled: false
+  ran_merge_alpha: 0.3
+  # Auto-tune temperature via LOO cross-validation
+  auto_tune_temperature: false
+  temperature_candidates: [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+  # ESOM regime labeling from trade outcomes
+  esom_regime_labeling: false
+  # Counterfactual self-calibration
+  counterfactual_calibration_enabled: false
+  # Value-aware memory decay
+  value_aware_decay: false
+  value_protection_threshold: 0.02     # return threshold for value-aware decay protection
+  value_protection_cap: 0.5            # max protection factor for high-value items
+  outlier_filter_enabled: false
+  outlier_sigma: 3.0
   use_esom_map: true
   dynamic_growth_enabled: true
   novelty_mode: quantile
-  novelty_quantile: 0.2
+  novelty_quantile: 0.5
   match_calibration_enabled: true
   min_calibrated_match: 0.15
   require_strong_match_for_memory_support: true
@@ -218,17 +425,55 @@ memory:
   prune_enabled: true
   utility_decay: 0.995
   min_utility: 0.025
-  max_units: 256
+  max_units: 2000  # was 256 — sized for ~40-symbol universe (~50 mature units per symbol)
   archive_pruned: true
   calibration_enabled: true
   match_conflict_penalty: 0.5
   require_calibrated_strong_match_for_trade_support: true
   topology_neighbor_k: 3
+  adaptive_topology_k: true
+  topology_k_min: 2
+  topology_k_max: 5
+  plasticity_floor: 0.05
   health_report_enabled: true
   symbol_specific_profiles: true
   regime_specific_profiles: true
+  # --- Adaptive homeostatic gating ---
+  # Replaces fixed similarity/calibration thresholds with self-regulating
+  # EMA-based gating.  The bank tracks its own retrieval distribution and
+  # adjusts sensitivity dynamically — no magic numbers.
+  adaptive_gating: true
+  adaptation_rate: 0.01
   # --- Encoder versioning ---
   require_encoder_match: true
+  # --- Dynamic unit lifecycle (previously hardcoded) ---
+  conflict_history_max_size: 100
+  conflict_history_keep_size: 50
+  conflict_rate_window: 20
+  conflict_rate_threshold: 0.5
+  saturation_support_multiplier: 2.0
+  saturation_min_support_floor: 6
+  quarantine_conflict_threshold: 0.6   # conflict rate above this quarantines the unit
+  min_outcome_samples: 3               # min observations before outcome stats used
+  direction_alignment_threshold: 0.5   # threshold for directional agreement check
+  # --- Retrieval thresholds (previously hardcoded) ---
+  adaptive_coherence_floor: 0.1
+  adaptive_weak_quality_threshold: 0.3
+  cluster_top_k_cap: 3
+  size_averaging_weight: 0.5           # blend weight for cluster-size averaging
+  weak_support_size_cap: 0.25          # cap weak-support size factor
+  legacy_coherence_threshold: 0.35
+  # --- Calibration (previously hardcoded) ---
+  calibration_num_buckets: 5
+  calibration_graded_conflict_mid: 0.5
+  # --- ESOM (previously hardcoded) ---
+  esom_neighbor_agreement_threshold: 0.5
+  # --- ESOM regime thresholds ---
+  regime_strong_threshold: 0.010       # return threshold for strong regime label
+  regime_trend_threshold: 0.002        # return threshold for trend regime label
+  regime_volatility_threshold: 0.025   # volatility threshold for volatile regime label
+  # --- Async memory refresh ---
+  async_memory_refresh: true           # run rebuild/refresh on background thread
   # --- SatSOM-inspired saturation / plasticity ---
   saturation_enabled: true
   maturity_update_attenuation: 0.875
@@ -259,6 +504,30 @@ memory:
     topology_disagreement_dampen: true
     min_neighbor_agreement_for_support: 0.50
     sparse_topology_policy: neutral  # "neutral" or "dampen"
+    # --- Resolve-level parameters (previously hardcoded) ---
+    veto_confidence_adjustment: 0.3
+    neutral_confidence_adjustment: 0.5
+    weak_match_max_multiplier: 0.25
+    dampen_conflict_weight: 0.3
+    dampen_misalignment_weight: 0.4
+    dampen_candidate_weight: 0.2
+    dampen_no_mature_weight: 0.2
+    dampen_saturation_weight: 0.15
+    dampen_sparse_topology_weight: 0.1
+    dampen_topo_disagreement_scale: 0.2
+    topo_boost_scale: 0.2
+    dampen_threshold: 0.5
+    multiplier_floor: 0.1
+    confidence_floor: 0.1
+    legacy_misalignment_multiplier: 0.5
+    legacy_coherence_veto_threshold: 0.35
+    adaptive_supportive_threshold: 0.7
+    unknown_state_quality_threshold: 0.2
+    topology_warning_quality_threshold: 0.3
+    factor_floor: 0.01
+    direction_misalignment_factor: 0.5
+    # --- Counterfactual calibration ---
+    counterfactual_calibration_enabled: false
   # --- Conservative adaptive topology growth ---
   # Bounded insertion of new candidate units for novel states.
   # All OFF by default — enable after reviewing fusion evaluation output.
@@ -266,7 +535,7 @@ memory:
     enabled: true
     min_novelty_score: 0.60
     min_topology_sparsity: 0.30
-    max_insertions_per_refresh: 3
+    max_insertions_per_refresh: 5
     min_support_for_insertion: 2
     split_conflict_threshold: 0.50
     split_variance_threshold: 0.60
@@ -274,3 +543,28 @@ memory:
     max_growth_rate: 0.10
     require_mature_neighbors_for_support: true
     respect_quarantine: true
+    # --- Scoring weights (previously hardcoded) ---
+    insertion_novelty_weight: 0.5
+    insertion_sparsity_weight: 0.3
+    insertion_support_weight: 0.2
+    insertion_support_divisor: 10.0
+    sparsity_distance_weight: 0.5
+    sparsity_esom_weight: 0.5
+    split_conflict_weight: 0.4
+    split_variance_weight: 0.3
+    split_direction_weight: 0.3
+    split_direction_threshold: 0.60
+
+# --- Evaluation / experiment framework ---
+evaluation:
+  seed: 42
+  output_dir: experiments
+  walk_forward:
+    train_bars: 5000
+    val_bars: 1000
+    test_bars: 1000
+    step_bars: 1000
+    window_type: rolling
+    min_train_bars: 2000
+    reset_model_per_fold: true
+    reset_memory_per_fold: true

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import torch
@@ -11,150 +11,17 @@ from src.core.device import build_device_context
 from src.core.device import maybe_autocast
 from src.core.logging import configure_logging, get_logger
 from src.core.seeds import seed_everything
-from src.data.alpaca_client import AlpacaClient, MockBrokerClient, credentials_available
-from src.data.cache import HistoricalBarCache
-from src.data.historical_data import HistoricalDataService, generate_synthetic_bars, parse_date_or_datetime
 from src.data.schemas import MarketBar
 from src.features.feature_pipeline import FeaturePipeline
-from src.memory.storage import save_memory_bank
-from src.memory.updater import build_memory_bank_from_bars
 from src.models.factory import build_checkpoint_meta, build_model_from_contract, load_model_artifacts
-from src.models.state_encoder import ModelStateEncoder
 from src.training.checkpoints import save_checkpoint
+from src.training.data_loading import _build_training_client, _resolve_bars_by_symbol, _FAST_SMALL_MODEL_OVERRIDES
 from src.training.data_module import TrainingDataBundle, build_real_data_training_bundle
+from src.training.memory_builder import build_post_training_memory
 from src.training.metrics import build_collapse_warnings, compute_classification_report, compute_logit_diagnostics
 from src.training.run_summary import build_run_summary, save_run_summary
 from src.training.trainer import Trainer
 from src.utils.torch_utils import move_batch_to_device
-
-
-def _build_training_client(config: AppConfig) -> tuple[object | None, bool]:
-    if credentials_available():
-        return (
-            AlpacaClient(
-                paper=config.broker.paper,
-                data_feed=config.broker.data_feed,
-            ),
-            False,
-        )
-    if config.training.use_real_historical_data:
-        return None, False
-    return MockBrokerClient(paper=True, data_feed="mock"), True
-
-
-def _resolve_bars_by_symbol(config: AppConfig) -> tuple[dict[str, list[MarketBar]], dict[str, object]]:
-    logger = get_logger("training")
-    fast = config.training.fast_mode
-
-    # Fast-mode: determine effective symbol list
-    effective_symbols = list(config.data.symbols)
-    if fast.enabled and fast.symbols:
-        effective_symbols = [s for s in fast.symbols if s in set(config.data.symbols)]
-        skipped = [s for s in fast.symbols if s not in set(config.data.symbols)]
-        if skipped:
-            logger.warning(
-                "fast_mode_symbol_not_in_config",
-                skipped=skipped,
-                configured=list(config.data.symbols),
-                note="These fast_mode.symbols are not in data.symbols and will be ignored.",
-            )
-        if not effective_symbols:
-            raise RuntimeError(
-                f"fast_mode.symbols {list(fast.symbols)!r} has no overlap with "
-                f"configured data.symbols {list(config.data.symbols)!r}"
-            )
-
-    if config.training.use_real_historical_data:
-        client, using_mock = _build_training_client(config)
-        start = parse_date_or_datetime(
-            config.data.start_date,
-            default=datetime.now(UTC) - timedelta(days=365 * 2),
-        )
-        end = parse_date_or_datetime(config.data.end_date, default=datetime.now(UTC))
-
-        # Fast-mode: override date range
-        if fast.enabled:
-            if fast.fast_months is not None:
-                start = datetime.now(UTC) - timedelta(days=30 * fast.fast_months)
-                logger.info(
-                    "fast_mode_date_range_override",
-                    fast_months=fast.fast_months,
-                    effective_start=start.isoformat(),
-                )
-            elif fast.fast_start_date is not None:
-                start = parse_date_or_datetime(fast.fast_start_date, default=start)
-                logger.info("fast_mode_date_range_override", fast_start_date=fast.fast_start_date)
-            if fast.fast_end_date is not None:
-                end = parse_date_or_datetime(fast.fast_end_date, default=end)
-
-        service = HistoricalDataService(
-            client=client,
-            cache=HistoricalBarCache(config.data.cache_dir),
-            timezone_normalization=config.data.timezone_normalization,
-            max_missing_gap_handling=config.data.max_missing_gap_handling,
-        )
-        bars_by_symbol, reports = service.load_bars_for_symbols(
-            effective_symbols,
-            timeframe=config.data.timeframe,
-            start=start,
-            end=end,
-            force_refresh=config.data.force_refresh,
-        )
-        for report in reports:
-            logger.info(
-                "historical_fetch_report",
-                symbol=report.symbol,
-                timeframe=report.timeframe,
-                cache_hit=report.cache_hit,
-                row_count=report.row_count,
-                requested_start=report.requested_start.isoformat(),
-                requested_end=report.requested_end.isoformat(),
-                fetched_ranges=[(left.isoformat(), right.isoformat()) for left, right in report.fetched_ranges],
-                cache_path=report.cache_path,
-                source=report.source,
-                using_mock=using_mock,
-                gap_count=report.gap_count,
-                max_gap_seconds=report.max_gap_seconds,
-            )
-        if client is None and any(not report.cache_hit for report in reports):
-            raise RuntimeError("Real historical training requested bars outside cached coverage and no Alpaca credentials are available")
-        return bars_by_symbol, {
-            "using_mock": using_mock,
-            "source": "historical_cache",
-            "timeframe": config.data.timeframe,
-            "start_date": start.isoformat(),
-            "end_date": end.isoformat(),
-            "symbols": effective_symbols,
-        }
-
-    synthetic_count = max(
-        config.training.sequence_length * 8,
-        config.runtime.warmup_bars + max(config.training.forward_horizons) + 128,
-    )
-    bars_by_symbol = {
-        symbol: generate_synthetic_bars(symbol, synthetic_count)
-        for symbol in effective_symbols
-    }
-    logger.info(
-        "synthetic_training_data",
-        symbols=effective_symbols,
-        bar_count=synthetic_count,
-    )
-    return bars_by_symbol, {
-        "using_mock": True,
-        "source": "synthetic",
-        "timeframe": config.data.timeframe,
-        "symbols": effective_symbols,
-    }
-
-
-_FAST_SMALL_MODEL_OVERRIDES = {
-    "cnn_channels": [8, 16],
-    "temporal_blocks": 2,
-    "branch_hidden_dim": 16,
-    "branch_output_dim": 12,
-    "soma_hidden_dim": 16,
-}
 
 
 def build_training_components(
@@ -275,6 +142,13 @@ def run_supervised_training(
         file_path=config.logging.file_path,
     )
     logger = get_logger("training")
+
+    # Auto-cleanup training cache if it exceeds the size limit (default 10 GB).
+    from src.training.sample_cache import enforce_cache_limit
+    freed = enforce_cache_limit()
+    if freed > 0:
+        logger.info("training_cache_freed_on_startup", freed_gb=round(freed / 1_073_741_824, 2))
+
     explicit_run_id = run_id is not None
     if run_id is None:
         run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
@@ -298,7 +172,6 @@ def run_supervised_training(
             max_val_samples=fast.max_val_samples,
             max_test_samples=fast.max_test_samples,
             max_epochs=fast.max_epochs,
-            disable_path_label=fast.disable_path_label,
             disable_future_return=fast.disable_future_return,
             disable_risk_path=fast.disable_risk_path,
             model_profile=fast.model_profile,
@@ -334,6 +207,22 @@ def run_supervised_training(
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
     )
+    # --- Learning rate scheduler ---
+    scheduler = None
+    sched_type = config.training.scheduler_type
+    if sched_type == "cosine":
+        t_max = config.training.scheduler_t_max or effective_epochs
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(t_max, 1), eta_min=config.training.scheduler_min_lr,
+        )
+    elif sched_type == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=config.training.scheduler_factor,
+            patience=config.training.scheduler_patience,
+            min_lr=config.training.scheduler_min_lr,
+        )
     effective_multitask = config.training.multitask_enabled and not config.training.disable_regression
     effective_contrastive = config.training.contrastive_enabled and not config.training.disable_latent
     effective_loss_weights = dict(config.training.loss_weights)
@@ -342,13 +231,9 @@ def run_supervised_training(
     if config.training.disable_latent:
         effective_loss_weights["latent"] = 0.0
     # Fast-mode: optional target/loss simplification
-    effective_enable_path_label = config.training.enable_path_label_head
     effective_enable_future_return = config.training.enable_future_return_targets
     effective_enable_risk_path = config.training.enable_risk_path_targets
     if fast.enabled:
-        if fast.disable_path_label:
-            effective_enable_path_label = False
-            effective_loss_weights["path_label"] = 0.0
         if fast.disable_future_return:
             effective_enable_future_return = False
             effective_loss_weights["future_return"] = 0.0
@@ -363,6 +248,7 @@ def run_supervised_training(
         class_weights=bundle.class_weights if isinstance(bundle.class_weights, torch.Tensor) else None,
         multitask_enabled=effective_multitask,
         contrastive_enabled=effective_contrastive,
+        contrastive_margin=config.training.contrastive_margin,
         classification_loss_mode=config.training.classification_loss,
         focal_gamma=config.training.focal_gamma,
         label_smoothing=config.training.label_smoothing,
@@ -370,9 +256,18 @@ def run_supervised_training(
         collapse_warning_thresholds=config.training.collapse_warning_thresholds,
         report_prediction_distribution=config.training.report_prediction_distribution,
         report_per_class_metrics=config.training.report_per_class_metrics,
-        enable_path_label_head=effective_enable_path_label,
         enable_future_return_targets=effective_enable_future_return,
         enable_risk_path_targets=effective_enable_risk_path,
+        adaptive_focal_gamma=config.training.adaptive_focal_gamma,
+        focal_gamma_base=config.training.focal_gamma_base,
+        focal_gamma_boost=config.training.focal_gamma_boost,
+        scheduler=scheduler,
+        early_stopping_patience=config.training.early_stopping_patience,
+        restore_best_on_finish=config.training.restore_best_model,
+        metrics_flat_dominance_threshold=config.training.metrics_flat_dominance_threshold,
+        augmentation_enabled=config.training.augmentation_enabled,
+        noise_std=config.training.noise_std,
+        temporal_jitter_prob=config.training.temporal_jitter_prob,
     )
     for split_name, symbols in bundle.split_ranges.items():
         for symbol, split in symbols.items():
@@ -420,6 +315,7 @@ def run_supervised_training(
         use_amp=device_ctx.use_amp,
         split="val",
         collapse_warning_thresholds=config.training.collapse_warning_thresholds,
+        metrics_flat_dominance_threshold=config.training.metrics_flat_dominance_threshold,
     )
     test_report = _evaluate_detailed_split(
         loader=bundle.test_loader,
@@ -428,6 +324,7 @@ def run_supervised_training(
         use_amp=device_ctx.use_amp,
         split="test",
         collapse_warning_thresholds=config.training.collapse_warning_thresholds,
+        metrics_flat_dominance_threshold=config.training.metrics_flat_dominance_threshold,
     )
     _log_evaluation_report(
         logger,
@@ -543,7 +440,6 @@ def run_supervised_training(
                     "primary_direction_horizon": config.training.effective_primary_horizon,
                     "auxiliary_horizons": list(config.training.auxiliary_horizons),
                     "all_horizons": config.training.all_horizons,
-                    "enable_path_label_head": config.training.enable_path_label_head,
                     "enable_future_return_targets": config.training.enable_future_return_targets,
                     "enable_risk_path_targets": config.training.enable_risk_path_targets,
                     "path_label_rules": dict(config.training.path_label_rules),
@@ -573,43 +469,57 @@ def run_supervised_training(
     summary_path = save_run_summary(run_summary, runs_dir=config.training.runs_dir)
     logger.info("run_summary_saved", path=str(summary_path), run_id=run_id)
 
-    memory_path: str | None = None
-    if config.training.save_memory_after_training:
-        selected_bars = _select_bars_for_memory_build(
-            config=config,
-            bars_by_symbol=bars_by_symbol,
-            split_ranges=bundle.split_ranges,
-        )
-        memory_config = config.memory.model_copy(
-            update={
-                "build_from_real_checkpoint": config.training.use_real_historical_data,
-                "forward_horizons": list(config.training.forward_horizons),
-                "path_label_rules": dict(config.training.path_label_rules),
-            }
-        )
-        encoder = ModelStateEncoder(
-            model=model,
-            device=device_ctx.device,
-            feature_contract=bundle.feature_contract,
-            expected_latent_dim=memory_config.latent_dim,
-        )
-        pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
-        memory_bank = build_memory_bank_from_bars(
-            bars_by_symbol=selected_bars,
-            pipeline=pipeline,
-            encoder=encoder,
-            memory_config=memory_config,
-            warmup_bars=max(config.runtime.warmup_bars, config.training.sequence_length - 1),
-        )
-        save_memory_bank(config.memory.persist_path, memory_bank)
-        memory_path = config.memory.persist_path
-        logger.info(
-            "memory_prebuild_complete",
-            path=config.memory.persist_path,
-            item_count=len(memory_bank),
-            unit_count=len(memory_bank.memory_units),
-            split=config.training.memory_build_split,
-        )
+    # --- Platt calibration fitting ---
+    if config.training.platt_calibration_enabled:
+        from src.training.platt_calibration import PlattCalibrator
+        import numpy as np
+
+        model.eval()
+        all_confidences: list[float] = []
+        all_primary_returns: list[float] = []
+        with torch.no_grad():
+            for batch in bundle.val_loader:
+                batch_on_device = move_batch_to_device(batch, device_ctx.device)
+                with maybe_autocast(device_ctx.device, device_ctx.use_amp):
+                    output = model(
+                        branch_inputs=batch_on_device["branch_inputs"],
+                        regime_input=batch_on_device["regime_input"],
+                        full_features=batch_on_device["features"],
+                        temporal_tensor=batch_on_device.get("temporal_tensor"),
+                    )
+                all_confidences.extend(output.confidence.cpu().numpy().flatten().tolist())
+                reg_targets = batch.get("regression_targets", {})
+                if "primary_return" in reg_targets:
+                    all_primary_returns.extend(
+                        reg_targets["primary_return"].cpu().numpy().flatten().tolist()
+                    )
+        if len(all_confidences) >= 20 and len(all_primary_returns) == len(all_confidences):
+            calibrator = PlattCalibrator()
+            calibrator.fit(np.array(all_confidences), np.array(all_primary_returns))
+            platt_path = Path(config.training.runs_dir) / "platt_calibration.json"
+            calibrator.save(platt_path)
+            logger.info(
+                "platt_calibration_fitted",
+                a=calibrator.a,
+                b=calibrator.b,
+                n=calibrator.n_samples,
+                path=str(platt_path),
+            )
+        else:
+            logger.warning(
+                "platt_calibration_skipped",
+                n_confidences=len(all_confidences),
+                n_returns=len(all_primary_returns),
+                reason="insufficient_samples" if len(all_confidences) < 20 else "length_mismatch",
+            )
+
+    memory_path = build_post_training_memory(
+        config=config,
+        model=model,
+        bundle=bundle,
+        bars_by_symbol=bars_by_symbol,
+        device=device_ctx.device,
+    )
 
     logger.info(
         "training_complete",
@@ -626,12 +536,7 @@ def run_supervised_training(
         test_accuracy=test_metrics.accuracy,
         test_macro_f1=test_report["macro_f1"],
         test_balanced_accuracy=test_report["balanced_accuracy"],
-        train_path_label_loss=history.train[-1].path_label_loss if history.train else 0.0,
-        train_path_label_accuracy=history.train[-1].path_label_accuracy if history.train else 0.0,
-        val_path_label_loss=history.val[-1].path_label_loss if history.val else 0.0,
-        val_path_label_accuracy=history.val[-1].path_label_accuracy if history.val else 0.0,
         primary_direction_horizon=config.training.effective_primary_horizon,
-        enable_path_label_head=config.training.enable_path_label_head,
         enable_future_return_targets=config.training.enable_future_return_targets,
         enable_risk_path_targets=config.training.enable_risk_path_targets,
         class_weight_mode=config.training.class_weight_mode,
@@ -724,6 +629,7 @@ def evaluate_checkpoint(config: AppConfig, checkpoint_path: str) -> dict[str, ob
         use_amp=device_ctx.use_amp,
         split="val",
         collapse_warning_thresholds=config.training.collapse_warning_thresholds,
+        metrics_flat_dominance_threshold=config.training.metrics_flat_dominance_threshold,
     )
     test_report = _evaluate_detailed_split(
         loader=bundle.test_loader,
@@ -732,6 +638,7 @@ def evaluate_checkpoint(config: AppConfig, checkpoint_path: str) -> dict[str, ob
         use_amp=device_ctx.use_amp,
         split="test",
         collapse_warning_thresholds=config.training.collapse_warning_thresholds,
+        metrics_flat_dominance_threshold=config.training.metrics_flat_dominance_threshold,
     )
     _log_evaluation_report(
         logger,
@@ -755,30 +662,6 @@ def evaluate_checkpoint(config: AppConfig, checkpoint_path: str) -> dict[str, ob
     }
 
 
-def _select_bars_for_memory_build(
-    *,
-    config: AppConfig,
-    bars_by_symbol: dict[str, list[MarketBar]],
-    split_ranges: dict[str, dict[str, object]],
-) -> dict[str, list[MarketBar]]:
-    if config.training.memory_build_split == "all":
-        return {
-            symbol: list(bars)
-            for symbol, bars in bars_by_symbol.items()
-        }
-    max_horizon = max(config.training.forward_horizons)
-    history_padding = max(config.runtime.warmup_bars, config.training.sequence_length - 1)
-    selected: dict[str, list[MarketBar]] = {}
-    for symbol, bars in bars_by_symbol.items():
-        split = split_ranges[config.training.memory_build_split].get(symbol)
-        if split is None or getattr(split, "sample_count", 0) == 0:
-            continue
-        left = max(0, int(getattr(split, "start_index")) - history_padding)
-        right = min(len(bars), int(getattr(split, "end_index")) + max_horizon + 1)
-        selected[symbol] = list(bars[left:right])
-    return selected
-
-
 def _evaluate_detailed_split(
     *,
     loader: DataLoader,
@@ -787,6 +670,7 @@ def _evaluate_detailed_split(
     use_amp: bool,
     split: str,
     collapse_warning_thresholds: dict[str, float],
+    metrics_flat_dominance_threshold: float = 0.75,
 ) -> dict[str, object]:
     class_names = ("short", "flat", "long")
     all_logits: list[torch.Tensor] = []
@@ -817,6 +701,7 @@ def _evaluate_detailed_split(
     warnings = build_collapse_warnings(
         classification_report=classification_report,
         thresholds=collapse_warning_thresholds,
+        flat_dominance_threshold=metrics_flat_dominance_threshold,
     )
     predictions = epoch_logits.argmax(dim=-1) if epoch_logits.numel() > 0 else torch.empty((0,), dtype=torch.long)
     symbol_correct: dict[str, int] = {}

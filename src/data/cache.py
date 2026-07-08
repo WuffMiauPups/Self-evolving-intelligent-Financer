@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,7 +8,27 @@ from typing import Any
 
 import torch
 
+logger = logging.getLogger(__name__)
+
 from src.data.schemas import MarketBar
+
+# ---------------------------------------------------------------------------
+# Fast columnar payload format
+# ---------------------------------------------------------------------------
+# The legacy cache stored every bar as a Python dict with an ISO-8601
+# timestamp string.  Loading 500k 1-minute bars then parses 500k strings
+# through ``datetime.fromisoformat`` and constructs 500k ``MarketBar``
+# instances — several seconds of pure-Python work even on a warm cache hit.
+#
+# The fast format stores each numeric column as a single torch tensor
+# (float64 for prices/volume/spread, int64 nanoseconds for timestamps) and
+# reconstructs ``MarketBar`` objects in one tight loop.  Files written in
+# this format carry ``cache_format == "tensor_v1"``.  Legacy files are still
+# readable so existing caches don't need to be regenerated; they will be
+# rewritten in the new format the next time the cache is saved.
+# ---------------------------------------------------------------------------
+
+CACHE_FORMAT_TENSOR_V1 = "tensor_v1"
 
 
 def _ensure_utc(timestamp: datetime) -> datetime:
@@ -40,6 +61,88 @@ def deserialize_bar(payload: dict[str, Any]) -> MarketBar:
         volume=float(payload["volume"]),
         spread=float(payload.get("spread", 0.0)),
     )
+
+
+def _bars_to_columnar_payload(symbol: str, bars: list[MarketBar]) -> dict[str, Any]:
+    """Pack a list of bars into a columnar tensor payload.
+
+    Uses Python list comprehensions feeding into ``torch.tensor`` once per
+    column.  ``torch.tensor`` accepts plain Python lists and is one of the
+    fastest ways to materialize a numeric tensor from a list of attribute
+    accesses (slightly slower than going through numpy + ``from_numpy``,
+    but avoids the numpy dependency at this layer).
+    """
+    if not bars:
+        return {
+            "cache_format": CACHE_FORMAT_TENSOR_V1,
+            "symbol": symbol,
+            "timestamps_ns": torch.empty(0, dtype=torch.int64),
+            "open": torch.empty(0, dtype=torch.float64),
+            "high": torch.empty(0, dtype=torch.float64),
+            "low": torch.empty(0, dtype=torch.float64),
+            "close": torch.empty(0, dtype=torch.float64),
+            "volume": torch.empty(0, dtype=torch.float64),
+            "spread": torch.empty(0, dtype=torch.float64),
+        }
+    # Per-column list comprehensions are ~10x faster than per-bar tensor
+    # index assignment because they avoid the per-element tensor write
+    # path entirely.
+    timestamps_ns = [
+        int(_ensure_utc(bar.timestamp).timestamp() * 1_000_000_000) for bar in bars
+    ]
+    return {
+        "cache_format": CACHE_FORMAT_TENSOR_V1,
+        "symbol": symbol,
+        "timestamps_ns": torch.tensor(timestamps_ns, dtype=torch.int64),
+        "open": torch.tensor([float(bar.open) for bar in bars], dtype=torch.float64),
+        "high": torch.tensor([float(bar.high) for bar in bars], dtype=torch.float64),
+        "low": torch.tensor([float(bar.low) for bar in bars], dtype=torch.float64),
+        "close": torch.tensor([float(bar.close) for bar in bars], dtype=torch.float64),
+        "volume": torch.tensor([float(bar.volume) for bar in bars], dtype=torch.float64),
+        "spread": torch.tensor([float(bar.spread) for bar in bars], dtype=torch.float64),
+    }
+
+
+def _columnar_payload_to_bars(payload: dict[str, Any], symbol: str) -> list[MarketBar]:
+    """Reconstruct MarketBar objects from a columnar tensor payload."""
+    timestamps = payload["timestamps_ns"]
+    opens = payload["open"]
+    highs = payload["high"]
+    lows = payload["low"]
+    closes = payload["close"]
+    volumes = payload["volume"]
+    spreads = payload["spread"]
+    if hasattr(timestamps, "tolist"):
+        ts_list = timestamps.tolist()
+        opens_list = opens.tolist()
+        highs_list = highs.tolist()
+        lows_list = lows.tolist()
+        closes_list = closes.tolist()
+        volumes_list = volumes.tolist()
+        spreads_list = spreads.tolist()
+    else:
+        ts_list = list(timestamps)
+        opens_list = list(opens)
+        highs_list = list(highs)
+        lows_list = list(lows)
+        closes_list = list(closes)
+        volumes_list = list(volumes)
+        spreads_list = list(spreads)
+    bars: list[MarketBar] = []
+    for i, ts_ns in enumerate(ts_list):
+        bars.append(
+            MarketBar(
+                symbol=symbol,
+                timestamp=datetime.fromtimestamp(ts_ns / 1_000_000_000, tz=UTC),
+                open=float(opens_list[i]),
+                high=float(highs_list[i]),
+                low=float(lows_list[i]),
+                close=float(closes_list[i]),
+                volume=float(volumes_list[i]),
+                spread=float(spreads_list[i]),
+            )
+        )
+    return bars
 
 
 @dataclass(frozen=True)
@@ -91,17 +194,29 @@ class HistoricalCacheRecord:
     bars: list[MarketBar]
 
     def to_payload(self) -> dict[str, Any]:
+        """Serialize the record using the fast columnar tensor format.
+
+        New writes always use ``cache_format == "tensor_v1"``.  Existing
+        legacy files (a list of per-bar dicts) are still readable via
+        ``from_payload`` so users do not need to regenerate caches.
+        """
         return {
             "metadata": self.metadata.to_payload(),
-            "bars": [serialize_bar(bar) for bar in self.bars],
+            "bars_columnar": _bars_to_columnar_payload(self.metadata.symbol, self.bars),
         }
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "HistoricalCacheRecord":
-        return cls(
-            metadata=HistoricalCacheMetadata.from_payload(payload["metadata"]),
-            bars=[deserialize_bar(bar_payload) for bar_payload in payload.get("bars", [])],
-        )
+        metadata = HistoricalCacheMetadata.from_payload(payload["metadata"])
+        # Fast path: columnar tensor format.
+        columnar = payload.get("bars_columnar")
+        if isinstance(columnar, dict) and columnar.get("cache_format") == CACHE_FORMAT_TENSOR_V1:
+            bars = _columnar_payload_to_bars(columnar, symbol=metadata.symbol)
+            return cls(metadata=metadata, bars=bars)
+        # Legacy fallback: list of per-bar dicts.
+        legacy_bars = payload.get("bars", [])
+        bars = [deserialize_bar(bar_payload) for bar_payload in legacy_bars]
+        return cls(metadata=metadata, bars=bars)
 
 
 class HistoricalBarCache:
@@ -121,7 +236,11 @@ class HistoricalBarCache:
         path = self.path_for(symbol, timeframe)
         if not path.exists():
             return None
-        payload = torch.load(path, map_location="cpu", weights_only=False)
+        try:
+            payload = torch.load(path, map_location="cpu", weights_only=True)
+        except Exception:
+            logger.warning("cache_load_legacy_format", path=str(path))
+            payload = torch.load(path, map_location="cpu", weights_only=False)
         return HistoricalCacheRecord.from_payload(payload)
 
     def summarize(self, symbol: str, timeframe: str) -> dict[str, Any] | None:
@@ -158,11 +277,18 @@ class HistoricalBarCache:
             return []
         start_utc = _ensure_utc(start)
         end_utc = _ensure_utc(end)
-        return [
-            bar
-            for bar in record.bars
-            if start_utc <= _ensure_utc(bar.timestamp) <= end_utc
-        ]
+        # Reconstruction by ``_columnar_payload_to_bars`` already returns
+        # tz-aware UTC timestamps, so the redundant per-bar
+        # ``_ensure_utc`` round-trip can be skipped on the fast path.  We
+        # still tolerate naive bars from older legacy paths just in case.
+        result: list[MarketBar] = []
+        for bar in record.bars:
+            ts = bar.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if start_utc <= ts <= end_utc:
+                result.append(bar)
+        return result
 
     @staticmethod
     def merge_bars(*bar_lists: list[MarketBar]) -> list[MarketBar]:

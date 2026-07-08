@@ -38,10 +38,8 @@ def build_run_summary(
             "classification_loss": float(getattr(m, "classification_loss", 0.0)),
             "regression_loss": float(getattr(m, "regression_loss", 0.0)),
             "latent_loss": float(getattr(m, "latent_loss", 0.0)),
-            "path_label_loss": float(getattr(m, "path_label_loss", 0.0)),
             "future_return_loss": float(getattr(m, "future_return_loss", 0.0)),
             "risk_path_loss": float(getattr(m, "risk_path_loss", 0.0)),
-            "path_label_accuracy": float(getattr(m, "path_label_accuracy", 0.0)),
         }
 
     def _report_summary(report: dict[str, Any]) -> dict[str, Any]:
@@ -117,7 +115,6 @@ def build_run_summary(
             "primary_direction_horizon": int(getattr(training_config, "effective_primary_horizon", 0)) if training_config else 0,
             "auxiliary_horizons": list(getattr(training_config, "auxiliary_horizons", [])) if training_config else [],
             "all_horizons": list(getattr(training_config, "all_horizons", [])) if training_config else [],
-            "enable_path_label_head": bool(getattr(training_config, "enable_path_label_head", False)) if training_config else False,
             "enable_future_return_targets": bool(getattr(training_config, "enable_future_return_targets", False)) if training_config else False,
             "enable_risk_path_targets": bool(getattr(training_config, "enable_risk_path_targets", False)) if training_config else False,
             "path_label_rules": dict(getattr(training_config, "path_label_rules", {})) if training_config else {},
@@ -140,7 +137,6 @@ def build_run_summary(
             "max_test_samples": getattr(fast_mode_config, "max_test_samples", None) if fast_mode_config else None,
             "max_epochs": getattr(fast_mode_config, "max_epochs", None) if fast_mode_config else None,
             "effective_epochs": _effective_epochs,
-            "disable_path_label": bool(getattr(fast_mode_config, "disable_path_label", False)) if fast_mode_config else False,
             "disable_future_return": bool(getattr(fast_mode_config, "disable_future_return", False)) if fast_mode_config else False,
             "disable_risk_path": bool(getattr(fast_mode_config, "disable_risk_path", False)) if fast_mode_config else False,
             "model_profile": str(getattr(fast_mode_config, "model_profile", "default")) if fast_mode_config else "default",

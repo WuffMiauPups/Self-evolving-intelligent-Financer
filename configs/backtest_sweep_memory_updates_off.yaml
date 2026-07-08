@@ -1,0 +1,7 @@
+# Sweep: memory updates OFF (read-only memory).
+#
+# The memory bank is loaded and retrieval works, but nothing is appended
+# or reorganized during the run.  Tests whether online memory updates
+# contribute signal or just add noise under the current update policy.
+runtime:
+  allow_online_memory_updates: false

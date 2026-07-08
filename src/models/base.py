@@ -20,6 +20,7 @@ class ModelOutput:
     value: torch.Tensor | None = None
     memory_state: torch.Tensor | None = None
     temporal_embedding: torch.Tensor | None = None
+    risk_predictions: dict[str, torch.Tensor] | None = None
 
 
 class TradingModelProtocol(Protocol):

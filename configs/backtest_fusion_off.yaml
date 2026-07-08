@@ -1,0 +1,10 @@
+# Backtest preset: decision fusion OFF.
+#
+# Memory bank is still loaded and retrieval still runs, but the fusion
+# layer is bypassed — the brain policy's raw base action is executed
+# without veto/dampen/support modulation.
+#
+# Use this to isolate the brain's raw behavior from fusion effects.
+memory:
+  decision_fusion:
+    enabled: false

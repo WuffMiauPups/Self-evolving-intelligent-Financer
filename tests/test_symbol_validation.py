@@ -5,7 +5,7 @@ import pytest
 from src.data.alpaca_client import MockBrokerClient
 from src.execution.reason_codes import ReasonCode
 from src.execution.symbol_validation import SymbolEligibilityResult, SymbolValidationService
-from src.execution.trade_engine import resolve_runtime_symbols
+from src.execution.runtime_bootstrap import resolve_runtime_symbols
 
 
 def test_ineligible_symbols_are_skipped_by_default() -> None:

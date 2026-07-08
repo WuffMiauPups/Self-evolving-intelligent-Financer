@@ -81,12 +81,23 @@ def run_startup_reconciliation(
         )
 
     for position in positions:
+        # Prefer the broker's actual entry timestamp when available
+        # (Alpaca returns ``created_at`` on position objects).  Fall
+        # back to ``utc_now()`` if the field is missing so position-age
+        # tracking degrades gracefully rather than crashing.
+        raw_entry = position.get("created_at")
+        if raw_entry is not None and not isinstance(raw_entry, datetime):
+            try:
+                raw_entry = datetime.fromisoformat(str(raw_entry))
+            except (ValueError, TypeError):
+                raw_entry = None
+        entry_time = raw_entry if raw_entry is not None else utc_now()
         position_state = PositionState(
             symbol=str(position["symbol"]),
             qty=float(position["qty"]),
             avg_price=float(position["avg_entry_price"]),
             market_price=float(position.get("current_price", position["avg_entry_price"])),
-            entry_time=utc_now(),
+            entry_time=entry_time,
         )
         hydrated_positions[position_state.symbol] = position_state
         portfolio.positions[position_state.symbol] = position_state
@@ -151,12 +162,19 @@ def hydrate_portfolio_positions(
     hydrated_positions: dict[str, PositionState] = {}
     portfolio.positions.clear()
     for position in positions:
+        raw_entry = position.get("created_at")
+        if raw_entry is not None and not isinstance(raw_entry, datetime):
+            try:
+                raw_entry = datetime.fromisoformat(str(raw_entry))
+            except (ValueError, TypeError):
+                raw_entry = None
+        entry_time = raw_entry if raw_entry is not None else utc_now()
         position_state = PositionState(
             symbol=str(position["symbol"]),
             qty=float(position["qty"]),
             avg_price=float(position["avg_entry_price"]),
             market_price=float(position.get("current_price", position["avg_entry_price"])),
-            entry_time=utc_now(),
+            entry_time=entry_time,
         )
         hydrated_positions[position_state.symbol] = position_state
         portfolio.positions[position_state.symbol] = position_state

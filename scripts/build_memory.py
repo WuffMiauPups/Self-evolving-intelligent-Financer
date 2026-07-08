@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -22,7 +23,6 @@ from src.memory.bank_cache import (
     load_cached_bank,
     save_cached_bank,
 )
-from src.memory.encoder_eval import evaluate_encoder_quality
 from src.memory.storage import save_memory_bank
 from src.memory.updater import build_memory_bank_from_bars
 from src.models.factory import resolve_inference_model
@@ -93,11 +93,6 @@ def main() -> int:
         help="Config file(s), later files override earlier files.",
     )
     parser.add_argument(
-        "--evaluate",
-        action="store_true",
-        help="Run encoder/memory quality evaluation after building the bank.",
-    )
-    parser.add_argument(
         "--real-data",
         action="store_true",
         help="Build memory from cached/fetched real historical bars.",
@@ -108,17 +103,6 @@ def main() -> int:
         help="Allow mock historical generation when --real-data is requested without Alpaca credentials.",
     )
     parser.add_argument(
-        "--evaluate-fusion",
-        action="store_true",
-        help="Run offline decision fusion evaluation after building the bank.",
-    )
-    parser.add_argument(
-        "--fusion-max-samples",
-        type=int,
-        default=None,
-        help="Cap the number of samples for offline fusion evaluation (default: all).",
-    )
-    parser.add_argument(
         "--no-bank-cache",
         action="store_true",
         help="Skip the on-disk bank cache and force a fresh build even when a "
@@ -126,6 +110,18 @@ def main() -> int:
     )
     args = parser.parse_args()
     config = load_config(*args.config)
+    # Configure logging so ``logger.info(...)`` calls from memory modules
+    # (updater, memory_bank, topology_growth, etc.) are visible to whoever
+    # is driving the subprocess.  Without this, stdlib loggers have no
+    # handlers and all the phase_timing / progress logs are silently
+    # dropped — which makes the build look hung for ~20 min.
+    from src.core.logging import configure_logging
+    configure_logging(
+        level=config.logging.level,
+        json_logs=config.logging.json,
+        file_enabled=False,  # subprocess stdout is the primary channel
+        file_path=None,
+    )
     config.memory.enabled = True
     if args.checkpoint:
         config.model.checkpoint_path = args.checkpoint
@@ -138,6 +134,18 @@ def main() -> int:
         bar_override=args.bars,
         allow_mock=args.allow_mock,
     )
+    # Device selection: the encode phase is the dominant cost of building
+    # a multi-symbol bank (one full brain forward per chunk of samples).
+    # On a 40-symbol × 4-year × 5-minute dataset the encoder alone churns
+    # through ~3 M samples — running it on CPU takes ~20 minutes while
+    # running it on a 4070-class GPU completes in ~1-2 minutes.  Use CUDA
+    # when available; fall back to CPU only if torch reports no CUDA.
+    # The FeaturePipeline stays on CPU because its rolling reductions are
+    # already vectorized via torch.unfold and copying bars to the GPU for
+    # a single-pass reduction would cost more than it saves.
+    build_device = (
+        torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    )
     pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
     sample_symbol = next(iter(bars_by_symbol))
     sample_snapshot = pipeline.build(
@@ -148,15 +156,17 @@ def main() -> int:
         model_config=config.model,
         feature_config=config.features,
         feature_contract=sample_snapshot.contract,
-        device=torch.device("cpu"),
+        device=build_device,
         default_model_kind="brain",
     )
     encoder = ModelStateEncoder(
         model=artifacts.model,
-        device=torch.device("cpu"),
+        device=build_device,
         feature_contract=artifacts.feature_contract,
         expected_latent_dim=config.memory.latent_dim,
+        encoder_fingerprint=artifacts.encoder_fingerprint,
     )
+    print(f"memory_build_device={build_device}")
     # forward_horizons / path_label_rules are auto-synced training -> memory
     # by AppConfig.normalize_data_defaults; only the real-data flag merges here.
     memory_config = config.memory.model_copy(
@@ -191,8 +201,14 @@ def main() -> int:
             warmup_bars=config.runtime.warmup_bars,
         )
         if bank_fingerprint is not None and not args.no_bank_cache:
+            _t0 = time.perf_counter()
+            print(f"phase_timing phase=save_cached_bank_start items={len(bank)}", flush=True)
             save_cached_bank(fingerprint=bank_fingerprint, bank=bank)
+            print(f"phase_timing phase=save_cached_bank_done elapsed_sec={time.perf_counter() - _t0:.2f}", flush=True)
+    _t_save = time.perf_counter()
+    print(f"phase_timing phase=save_memory_bank_start items={len(bank)} path={config.memory.persist_path}", flush=True)
     save_memory_bank(config.memory.persist_path, bank)
+    print(f"phase_timing phase=save_memory_bank_done elapsed_sec={time.perf_counter() - _t_save:.2f}", flush=True)
     print(
         "memory_build_complete"
         f" path={config.memory.persist_path}"
@@ -204,68 +220,6 @@ def main() -> int:
         f" latent_dim={bank.latent_dim}"
         f" source={'real' if use_real_data else 'synthetic'}"
     )
-    if args.evaluate:
-        report = evaluate_encoder_quality(bank)
-        organization_report = bank.meta.get("organization_report", {})
-        health = organization_report.get("health", {})
-        summary = bank.summary()
-        print(
-            "memory_eval"
-            f" nn_similarity={report.nearest_neighbor_similarity:.4f}"
-            f" nn_consistency={report.nearest_neighbor_directional_consistency:.4f}"
-            f" outcome_dispersion={report.average_outcome_dispersion:.4f}"
-            f" unit_compactness={report.unit_compactness:.4f}"
-            f" unit_separation={report.unit_separation:.4f}"
-            f" retrieval_coverage={report.retrieval_coverage:.4f}"
-            f" weak_match_rate={report.weak_match_rate:.4f}"
-            f" conflict_rate={report.conflict_rate:.4f}"
-            f" avg_calibrated_confidence={report.average_calibrated_confidence:.4f}"
-            f" mature_candidate_ratio={float(health.get('mature_candidate_ratio', 0.0)):.4f}"
-            f" topology_density={float(health.get('topology_density', 0.0)):.4f}"
-            f" avg_saturation={float(health.get('average_saturation', 0.0)):.4f}"
-            f" avg_plasticity={float(health.get('average_plasticity', 0.0)):.4f}"
-            f" conflict_heavy_units={int(health.get('conflict_heavy_unit_count', 0))}"
-            f" graph_edges={int(health.get('graph_edge_count', 0))}"
-            f" create_vs_update={float(health.get('create_vs_update_ratio', 0.0)):.4f}"
-            f" quarantined={int(health.get('quarantined_units', 0))}"
-            f" symbol_profiles={int(summary.get('symbol_calibration_profile_count', 0))}"
-            f" regime_profiles={int(summary.get('regime_calibration_profile_count', 0))}"
-        )
-    if args.evaluate_fusion:
-        from src.strategies.fusion_evaluation import evaluate_fusion_offline
-
-        # Enable fusion for evaluation (even if not enabled in config)
-        eval_config = memory_config.model_copy(
-            update={"decision_fusion": memory_config.decision_fusion.model_copy(update={"enabled": True})}
-        )
-        fusion_summary = evaluate_fusion_offline(
-            bank, eval_config, max_samples=args.fusion_max_samples,
-        )
-        bank.meta["fusion_evaluation"] = fusion_summary.to_dict()
-        save_memory_bank(config.memory.persist_path, bank)
-        print(
-            "fusion_evaluation_complete"
-            f" evaluated={fusion_summary.evaluated_samples}"
-            f" support={fusion_summary.support_count}"
-            f" neutral={fusion_summary.neutral_count}"
-            f" dampen={fusion_summary.dampen_count}"
-            f" veto={fusion_summary.veto_count}"
-            f" avg_return={fusion_summary.avg_future_return_all:.6f}"
-            f" hit_rate={fusion_summary.directional_hit_rate_all:.4f}"
-            f" support_vs_outcome={fusion_summary.support_vs_outcome_correlation:.6f}"
-            f" topo_disagreement_bad_rate={fusion_summary.topology_disagreement_bad_outcome_rate:.4f}"
-        )
-        for level, level_summary in fusion_summary.level_summaries.items():
-            if level_summary.sample_count > 0:
-                print(
-                    f"  {level}:"
-                    f" n={level_summary.sample_count}"
-                    f" avg_ret={level_summary.avg_future_return:.6f}"
-                    f" hit_rate={level_summary.directional_hit_rate:.4f}"
-                    f" avg_mfe={level_summary.avg_mfe:.6f}"
-                    f" avg_mae={level_summary.avg_mae:.6f}"
-                    f" avg_dd={level_summary.avg_drawdown:.6f}"
-                )
     return 0
 
 

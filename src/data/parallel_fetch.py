@@ -141,6 +141,9 @@ class ParallelFetchExecutor:
                         "chunk_fetch_retry chunk_id=%s attempt=%d/%d backoff=%.1fs error=%s",
                         chunk.chunk_id, attempt + 1, self.retry_count, backoff, last_error,
                     )
+                    # time.sleep is safe here: runs inside a ThreadPoolExecutor
+                    # worker thread, so it blocks only this worker, not the
+                    # main thread or any async event loop.
                     time.sleep(backoff)
 
         elapsed = time.monotonic() - start_time

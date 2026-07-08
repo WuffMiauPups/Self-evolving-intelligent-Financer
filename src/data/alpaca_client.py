@@ -30,16 +30,25 @@ def _timeframe_from_string(timeframe: str) -> Any:
     raise ValueError(f"Unsupported timeframe: {timeframe}")
 
 
-def _historical_lookback_delta(timeframe: str, limit: int) -> timedelta:
+def _historical_lookback_delta(
+    timeframe: str,
+    limit: int,
+    *,
+    bars_per_trading_day: int = 390,
+    min_lookback_days_minute: int = 3,
+    min_lookback_days_hourly: int = 7,
+    min_lookback_multiplier_daily: int = 3,
+    min_lookback_days_daily: int = 30,
+) -> timedelta:
     normalized = timeframe.strip().lower()
     if normalized.endswith("min"):
-        trading_days = max(3, (limit // 390) + 2)
+        trading_days = max(min_lookback_days_minute, (limit // bars_per_trading_day) + 2)
         return timedelta(days=trading_days)
     if normalized.endswith("hour"):
-        lookback_days = max(5, (limit // 7) + 3)
+        lookback_days = max(5, (limit // min_lookback_days_hourly) + 3)
         return timedelta(days=lookback_days)
     if normalized.endswith("day"):
-        return timedelta(days=max(limit * 3, 30))
+        return timedelta(days=max(limit * min_lookback_multiplier_daily, min_lookback_days_daily))
     return timedelta(days=5)
 
 
@@ -102,6 +111,20 @@ class BrokerDataClient(Protocol):
         ...
 
     def get_latest_bar(self, symbol: str, timeframe: str) -> MarketBar:
+        ...
+
+    def get_latest_bars(
+        self, symbols: list[str], timeframe: str
+    ) -> tuple[dict[str, MarketBar], dict[str, str]]:
+        """Batch variant of ``get_latest_bar``.
+
+        Returns a ``(bars, errors)`` tuple where ``bars`` maps each
+        symbol that succeeded to its latest ``MarketBar`` and ``errors``
+        maps each symbol that failed to a short error string.  Clients
+        may implement this as a single batched API call (Alpaca
+        supports ``symbol_or_symbols=[...]`` natively) or fall back to
+        a per-symbol loop.
+        """
         ...
 
     def submit_market_order(
@@ -284,6 +307,76 @@ class AlpacaClient:
             spread=spread,
         )
 
+    def get_latest_bars(
+        self, symbols: list[str], timeframe: str
+    ) -> tuple[dict[str, MarketBar], dict[str, str]]:
+        """Fetch the latest bar for many symbols in two SDK calls total.
+
+        Alpaca's ``StockLatestBarRequest`` accepts ``symbol_or_symbols``
+        as a list natively, so the whole universe is one HTTPS round-
+        trip for the bars and one more for the quotes.  This turns what
+        used to be ``N × (latency + serialization)`` (at 50 symbols,
+        roughly 2.5–5s per tick against the IEX feed) into 2 round-
+        trips total — a 25–50x improvement on broker-I/O wall time.
+
+        Any symbol that fails (missing in the response, parse error,
+        network hiccup) goes into the ``errors`` dict; successful ones
+        go into the ``bars`` dict.  Individual symbol failures do NOT
+        abort the whole batch.
+        """
+        del timeframe
+        bars_out: dict[str, MarketBar] = {}
+        errors_out: dict[str, str] = {}
+        if not symbols:
+            return bars_out, errors_out
+        from alpaca.data.requests import StockLatestBarRequest, StockLatestQuoteRequest
+
+        try:
+            bar_response = self.data_client.get_stock_latest_bar(
+                StockLatestBarRequest(symbol_or_symbols=list(symbols), feed=self.data_feed)
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Whole-batch failure: record the error for every symbol and
+            # let the trade loop re-evaluate guards on the next tick.
+            err = f"get_stock_latest_bar_failed: {exc}"
+            return bars_out, {symbol: err for symbol in symbols}
+        try:
+            quote_response = self.data_client.get_stock_latest_quote(
+                StockLatestQuoteRequest(symbol_or_symbols=list(symbols), feed=self.data_feed)
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Quote failure alone should not hide the bars — we fall
+            # through and default the spread to 0 for each symbol.
+            quote_response = {}
+            errors_out["_quote_batch"] = f"get_stock_latest_quote_failed: {exc}"
+        for symbol in symbols:
+            bar = bar_response.get(symbol)
+            if bar is None:
+                errors_out[symbol] = "no_latest_bar"
+                continue
+            quote = quote_response.get(symbol) if quote_response else None
+            if quote is not None:
+                try:
+                    spread = max(float(quote.ask_price) - float(quote.bid_price), 0.0)
+                except Exception:  # noqa: BLE001
+                    spread = 0.0
+            else:
+                spread = 0.0
+            try:
+                bars_out[symbol] = MarketBar(
+                    symbol=symbol,
+                    timestamp=bar.timestamp,
+                    open=float(bar.open),
+                    high=float(bar.high),
+                    low=float(bar.low),
+                    close=float(bar.close),
+                    volume=float(bar.volume),
+                    spread=spread,
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors_out[symbol] = f"parse_failed: {exc}"
+        return bars_out, errors_out
+
     def submit_market_order(
         self,
         *,
@@ -421,6 +514,17 @@ class MockBrokerClient:
         del timeframe
         self.step += 1
         return self._generate_bars(symbol, 1)[-1]
+
+    def get_latest_bars(
+        self, symbols: list[str], timeframe: str
+    ) -> tuple[dict[str, MarketBar], dict[str, str]]:
+        del timeframe
+        bars_out: dict[str, MarketBar] = {}
+        errors_out: dict[str, str] = {}
+        for symbol in symbols:
+            self.step += 1
+            bars_out[symbol] = self._generate_bars(symbol, 1)[-1]
+        return bars_out, errors_out
 
     def submit_market_order(
         self,

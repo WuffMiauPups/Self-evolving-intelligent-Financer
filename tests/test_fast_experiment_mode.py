@@ -43,7 +43,6 @@ class _FakeFastMode:
         self.max_val_samples = kwargs.get("max_val_samples", None)
         self.max_test_samples = kwargs.get("max_test_samples", None)
         self.max_epochs = kwargs.get("max_epochs", None)
-        self.disable_path_label = kwargs.get("disable_path_label", False)
         self.disable_future_return = kwargs.get("disable_future_return", False)
         self.disable_risk_path = kwargs.get("disable_risk_path", False)
         self.model_profile = kwargs.get("model_profile", "default")
@@ -62,7 +61,6 @@ class _FakeTraining:
         "classification": 1.0,
         "regression": 0.25,
         "latent": 0.05,
-        "path_label": 0.30,
         "future_return": 0.20,
         "risk_path": 0.15,
     }
@@ -75,7 +73,6 @@ class _FakeTraining:
     auxiliary_horizons = [30, 60]
     all_horizons = [1, 5, 15, 30, 60]
     effective_primary_horizon = 15
-    enable_path_label_head = True
     enable_future_return_targets = True
     enable_risk_path_targets = True
     path_label_rules = {}
@@ -118,7 +115,6 @@ class TestFastModeConfig:
         assert fc.max_val_samples is None
         assert fc.max_test_samples is None
         assert fc.max_epochs is None
-        assert fc.disable_path_label is False
         assert fc.disable_future_return is False
         assert fc.disable_risk_path is False
         assert fc.model_profile == "default"
@@ -144,11 +140,9 @@ class TestFastModeConfig:
     def test_enable_with_all_disables(self):
         fc = FastModeConfig(
             enabled=True,
-            disable_path_label=True,
             disable_future_return=True,
             disable_risk_path=True,
         )
-        assert fc.disable_path_label is True
         assert fc.disable_future_return is True
         assert fc.disable_risk_path is True
 
@@ -349,7 +343,6 @@ class TestFastTargetSimplification:
         "classification": 1.0,
         "regression": 0.25,
         "latent": 0.05,
-        "path_label": 0.30,
         "future_return": 0.20,
         "risk_path": 0.15,
     }
@@ -357,25 +350,17 @@ class TestFastTargetSimplification:
     def _apply_fast_disables(self, fast: FastModeConfig) -> dict:
         weights = dict(self._BASE_WEIGHTS)
         if fast.enabled:
-            if fast.disable_path_label:
-                weights["path_label"] = 0.0
             if fast.disable_future_return:
                 weights["future_return"] = 0.0
             if fast.disable_risk_path:
                 weights["risk_path"] = 0.0
         return weights
 
-    def test_disable_path_label_zeros_weight(self):
-        fast = FastModeConfig(enabled=True, disable_path_label=True)
-        weights = self._apply_fast_disables(fast)
-        assert weights["path_label"] == 0.0
-        assert weights["classification"] == 1.0  # unchanged
-
     def test_disable_future_return_zeros_weight(self):
         fast = FastModeConfig(enabled=True, disable_future_return=True)
         weights = self._apply_fast_disables(fast)
         assert weights["future_return"] == 0.0
-        assert weights["path_label"] == 0.30  # unchanged
+        assert weights["classification"] == 1.0  # unchanged
 
     def test_disable_risk_path_zeros_weight(self):
         fast = FastModeConfig(enabled=True, disable_risk_path=True)
@@ -383,15 +368,13 @@ class TestFastTargetSimplification:
         assert weights["risk_path"] == 0.0
         assert weights["future_return"] == 0.20  # unchanged
 
-    def test_disable_all_three(self):
+    def test_disable_both(self):
         fast = FastModeConfig(
             enabled=True,
-            disable_path_label=True,
             disable_future_return=True,
             disable_risk_path=True,
         )
         weights = self._apply_fast_disables(fast)
-        assert weights["path_label"] == 0.0
         assert weights["future_return"] == 0.0
         assert weights["risk_path"] == 0.0
         assert weights["classification"] == 1.0  # unchanged
@@ -404,7 +387,7 @@ class TestFastTargetSimplification:
     def test_fast_disabled_leaves_weights_unchanged(self):
         fast = FastModeConfig(
             enabled=False,
-            disable_path_label=True,  # should be ignored
+            disable_future_return=True,  # should be ignored
         )
         weights = self._apply_fast_disables(fast)
         assert weights == self._BASE_WEIGHTS
@@ -559,11 +542,9 @@ class TestFastRunSummary:
     def test_run_summary_disable_flags(self):
         summary = self._build_summary(
             fast_enabled=True,
-            disable_path_label=True,
             disable_future_return=True,
             disable_risk_path=True,
         )
-        assert summary["fast_mode"]["disable_path_label"] is True
         assert summary["fast_mode"]["disable_future_return"] is True
         assert summary["fast_mode"]["disable_risk_path"] is True
 

@@ -15,6 +15,11 @@ class TradeProposal:
     spread_bps: float
     request_id: str
     metadata: dict[str, object] = field(default_factory=dict)
+    # Expected-value signals from the model's risk head (in basis points).
+    # Default 0.0 means "unknown"; the EV gate in RiskManager treats zero-gain
+    # proposals as negative-EV and rejects them.
+    expected_gain_bps: float = 0.0
+    expected_loss_bps: float = 0.0
 
 
 @dataclass(frozen=True)

@@ -22,6 +22,23 @@ class PaperExecutor:
         notional = fill_price * intent.quantity
         fee = abs(notional) * (self.fee_bps / 10_000.0)
         signed_delta = intent.quantity if intent.side == "buy" else -intent.quantity
+        cost = (signed_delta * fill_price) + fee
+        if cost > 0 and cost > self.portfolio.cash:
+            return ExecutionResult(
+                accepted=False,
+                status="rejected",
+                symbol=intent.symbol,
+                side=intent.side,
+                quantity=0.0,
+                fill_price=fill_price,
+                fee=0.0,
+                client_order_id=intent.client_order_id,
+                order_id=f"paper-{intent.client_order_id}",
+                broker_status="insufficient_cash",
+                filled_qty=0.0,
+                remaining_qty=intent.quantity,
+                terminal=True,
+            )
         realized_pnl = self._apply_fill(
             symbol=intent.symbol,
             signed_delta=signed_delta,
@@ -29,7 +46,7 @@ class PaperExecutor:
             fee=fee,
             timestamp=intent.timestamp,
         )
-        self.portfolio.cash -= (signed_delta * fill_price) + fee
+        self.portfolio.cash -= cost
         self.portfolio.realized_pnl += realized_pnl
         self.portfolio.daily_pnl += realized_pnl
         self.portfolio.mark_to_market({intent.symbol: fill_price}, intent.timestamp)

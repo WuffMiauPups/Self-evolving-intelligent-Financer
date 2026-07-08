@@ -12,18 +12,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.backtest.engine import BacktestEngine
+from src.backtest.policy_factory import build_brain_memory_policy
 from src.core.config import load_config
 from src.data.alpaca_client import AlpacaClient, MockBrokerClient, credentials_available
 from src.data.cache import HistoricalBarCache
 from src.data.historical_data import HistoricalDataService, generate_synthetic_bars, parse_date_or_datetime
 from src.data.schemas import MarketBar
 from src.features.feature_pipeline import FeaturePipeline
-from src.memory.memory_bank import MemoryBank
-from src.memory.retrieval import AssociativeRetriever
-from src.memory.storage import load_memory_bank, save_memory_bank
-from src.memory.updater import AssociativeMemoryUpdater
 from src.models.factory import resolve_inference_model
-from src.models.state_encoder import ModelStateEncoder
 from src.risk.risk_manager import RiskManager
 from src.strategies.baseline_policy import BaselineMomentumPolicy
 from src.strategies.brain_policy import BrainPolicy
@@ -72,76 +68,41 @@ def _make_memory_aware_policy(
     conservative_thresholds: bool = False,
     verbose_fusion: bool = False,
 ) -> MemoryAwarePolicy:
-    encoder = ModelStateEncoder(
-        model=artifacts.model,
-        device=torch.device("cpu"),
-        feature_contract=artifacts.feature_contract,
-        expected_latent_dim=config.memory.latent_dim,
-    )
-    sample_symbol = next(iter(bars_by_symbol))
-    sample_snapshot = pipeline.build(
-        bars_by_symbol[sample_symbol][: config.runtime.warmup_bars + 1],
-        symbol=sample_symbol,
-    )
-    sample_encoded = encoder.encode(sample_snapshot)
-    memory_bank: MemoryBank
-    persist_path = Path(config.memory.persist_path)
-    if enable_memory and persist_path.exists() and not config.memory.rebuild_on_startup:
-        memory_bank = load_memory_bank(persist_path, map_location="cpu")
-        memory_bank.feature_contract.assert_matches(
-            artifacts.feature_contract,
-            context=f"memory_bank[{persist_path.name}]",
-        )
-        if config.memory.dynamic_growth_enabled and not memory_bank.memory_units:
-            memory_bank.refresh_organization(config.memory)
-            save_memory_bank(persist_path, memory_bank)
-    else:
-        memory_bank = MemoryBank(
-            feature_contract=artifacts.feature_contract,
-            latent_dim=sample_encoded.latent.shape[0],
-            similarity_metric=config.memory.similarity_metric,
-            max_items=config.memory.max_items,
-            require_encoder_match=config.memory.require_encoder_match,
-            meta={"source": "backtest_runtime"},
-        )
+    """Thin shim around src.backtest.policy_factory.build_brain_memory_policy.
 
-    fusion_config = config.memory.decision_fusion.model_copy()
-    if not enable_memory:
-        # Memory disabled: fusion runs on base-policy signals only (no retrieval support)
-        fusion_config = fusion_config.model_copy(update={"enabled": True})
-    if conservative_thresholds:
-        # Lower thresholds = stricter: conflict dampens/vetoes fire more readily
-        fusion_config = fusion_config.model_copy(update={
-            "conflict_dampen_threshold": min(fusion_config.conflict_dampen_threshold, 0.25),
-            "conflict_veto_threshold": min(fusion_config.conflict_veto_threshold, 0.50),
-            "weak_match_policy": "veto",
-            "unknown_state_policy": "veto",
-        })
-
-    updater = AssociativeMemoryUpdater(memory_bank, config.memory) if enable_memory else None
-    policy = MemoryAwarePolicy(
-        base_policy=brain_policy,
-        encoder=encoder,
-        retriever=AssociativeRetriever(memory_bank, config.memory),
-        updater=updater,
-        require_strong_match_for_trade=config.memory.require_strong_match_for_trade,
-        fusion_config=fusion_config,
+    Kept for callers that already have a constructed ``brain_policy`` and
+    resolved ``artifacts`` in scope.  The factory rebuilds those itself
+    from ``config``, but the inputs are the same so the constructed
+    MemoryAwarePolicy is byte-identical to the pre-refactor behavior.
+    """
+    # ``brain_policy`` and ``artifacts`` are unused here — the factory
+    # rebuilds them from the same config, so the semantics are preserved.
+    return build_brain_memory_policy(
+        config,
+        bars_by_symbol=bars_by_symbol,
+        pipeline=pipeline,
+        enable_memory=enable_memory,
+        conservative_thresholds=conservative_thresholds,
+        verbose_fusion=verbose_fusion,
     )
-    if verbose_fusion:
-        policy._logged_path_mode = False  # force re-log on first call
-    return policy
 
 
 def _collect_fusion_counts(policy: object, metrics: dict[str, float]) -> dict[str, float]:
-    """Merge raw fusion counts into the metrics dict."""
+    """Merge memory-policy diagnostic snapshot into metrics.
+
+    Post-Great-Simplification the fusion layer is gone; ``vetoed_count`` /
+    ``dampened_count`` / ``supported_count`` / ``neutral_count`` no longer
+    exist on ``MemoryAwarePolicy``. The reporter still prints the labels
+    so we just leave them at zero.
+    """
     if not isinstance(policy, MemoryAwarePolicy):
         return metrics
-    snap = policy.metrics_snapshot()
     metrics = dict(metrics)
-    metrics["fusion_veto_count"] = float(policy.vetoed_count)
-    metrics["fusion_dampen_count"] = float(policy.dampened_count)
-    metrics["fusion_support_count"] = float(policy.supported_count)
-    metrics["fusion_neutral_count"] = float(policy.neutral_count)
+    metrics["fusion_veto_count"] = 0.0
+    metrics["fusion_dampen_count"] = 0.0
+    metrics["fusion_support_count"] = 0.0
+    metrics["fusion_neutral_count"] = 0.0
+    snap = getattr(policy, "metrics_snapshot", lambda: {})()
     metrics.update({k: v for k, v in snap.items() if k not in metrics})
     return metrics
 
@@ -208,6 +169,11 @@ def main() -> int:
         action="store_true",
         help="Run all 4 comparison scenarios: baseline, fusion-only, fusion+memory, fusion+memory+conservative.",
     )
+    parser.add_argument(
+        "--walk-forward",
+        action="store_true",
+        help="Run walk-forward cross-validation instead of a single contiguous backtest.",
+    )
     args = parser.parse_args()
     config = load_config(*args.config)
     if args.checkpoint:
@@ -219,6 +185,52 @@ def main() -> int:
     use_real_data = args.real_data or config.training.use_real_historical_data
     bars_by_symbol = _load_bars_by_symbol(config, use_real_data=use_real_data, allow_mock=args.allow_mock)
     pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
+
+    if args.walk_forward:
+        from src.evaluation.walk_forward import WalkForwardRunner
+        from src.strategies.base import MemoryCapablePolicy
+
+        def _wf_policy_builder(cfg, train_bars, pipe):
+            sample_sym = next(iter(train_bars))
+            snap = pipe.build(train_bars[sample_sym][:cfg.runtime.warmup_bars + 1], symbol=sample_sym)
+            arts = resolve_inference_model(
+                model_config=cfg.model,
+                feature_config=cfg.features,
+                feature_contract=snap.contract,
+                device=torch.device("cpu"),
+                default_model_kind="brain",
+            )
+            bp = BrainPolicy(
+                model=arts.model,
+                device=torch.device("cpu"),
+                feature_contract=arts.feature_contract,
+                max_state_gap_sec=cfg.runtime.state_reset_gap_sec,
+            )
+            if cfg.memory.enabled:
+                return _make_memory_aware_policy(bp, cfg, arts, train_bars, pipe, enable_memory=True)
+            return bp
+
+        runner = WalkForwardRunner(config, bars_by_symbol)
+        result = runner.run(_wf_policy_builder)
+        print(f"\n{'='*60}")
+        print("  WALK-FORWARD RESULTS")
+        print(f"{'='*60}")
+        for fold_result in result.folds:
+            fd = fold_result.fold_definition
+            print(f"\n  Fold {fd.fold_index}: train=[{fd.train_start},{fd.train_end}) test=[{fd.test_start},{fd.test_end})")
+            print(f"    return={fold_result.test_metrics.get('total_return', 0.0):+.4f}  "
+                  f"sharpe={fold_result.test_metrics.get('sharpe_ratio', 0.0):.3f}  "
+                  f"fills={int(fold_result.test_metrics.get('fill_count', 0))}  "
+                  f"elapsed={fold_result.elapsed_seconds:.1f}s")
+        if result.aggregate_metrics:
+            print(f"\n  --- Aggregate ---")
+            for key in ("total_return", "sharpe_ratio", "max_drawdown", "win_rate", "profit_factor"):
+                agg = result.aggregate_metrics.get(key)
+                if agg:
+                    print(f"    {key:<20}: mean={agg['mean']:+.4f}  std={agg['std']:.4f}  "
+                          f"min={agg['min']:+.4f}  max={agg['max']:+.4f}")
+        print(f"\n  Total elapsed: {result.total_elapsed_seconds:.1f}s")
+        return 0
 
     if args.compare:
         # ── Scenario 1: Baseline (no fusion, no memory) ──────────────────────

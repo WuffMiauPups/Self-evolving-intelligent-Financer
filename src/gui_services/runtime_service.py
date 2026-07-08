@@ -22,8 +22,17 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from src.gui_services.config_service import describe_config, load_app_config
-from src.gui_services.state import RuntimeState, RuntimeStatus, ServiceError
+from src.gui_services.config_service import (
+    describe_config,
+    describe_memory_caps,
+    load_app_config,
+)
+from src.gui_services.state import (
+    RuntimeOverrides,
+    RuntimeState,
+    RuntimeStatus,
+    ServiceError,
+)
 from src.monitoring.runtime_status import (
     DEFAULT_RUNTIME_STATUS_PATH,
     RuntimeStatusWriter,
@@ -31,6 +40,7 @@ from src.monitoring.runtime_status import (
 
 
 _DEFAULT_PAPER_CONFIGS = ["configs/default.yaml", "configs/paper_trade.yaml"]
+_RUNTIME_OVERRIDE_YAML = Path("runs/gui_runtime_override.yaml")
 _LOG_TIMESTAMP_RX = re.compile(r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})")
 _ANSI_RX = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -77,6 +87,12 @@ class RuntimeService:
             self._cached_config_summary = summary
             return dict(summary)
 
+    def preview_memory_caps(self) -> dict[str, int]:
+        """Return raw memory cap integers for the RuntimeOverridesPanel."""
+        with self._lock:
+            cfg = load_app_config(*self._config_paths)
+            return describe_memory_caps(cfg)
+
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------
@@ -86,11 +102,27 @@ class RuntimeService:
                 return False
             return self._proc.poll() is None
 
-    def start(self, *, checkpoint: str | None = None, use_memory: bool = False) -> RuntimeStatus:
+    def start(
+        self,
+        *,
+        overrides: RuntimeOverrides | None = None,
+        checkpoint: str | None = None,
+        use_memory: bool = False,
+    ) -> RuntimeStatus:
         with self._lock:
             if self.is_running():
                 raise ServiceError("Paper trading runtime is already running.")
             self._last_error = ""
+
+            # Back-compat: if callers still pass the old kwargs, fold them
+            # into the overrides dataclass so the emit path is uniform.
+            if overrides is None:
+                overrides = RuntimeOverrides()
+            if checkpoint and not overrides.checkpoint_path:
+                overrides.checkpoint_path = checkpoint
+            if use_memory and overrides.memory_enabled is None:
+                overrides.memory_enabled = True
+
             cmd = [
                 sys.executable,
                 "-u",  # unbuffered, so logs flush in real time
@@ -98,10 +130,15 @@ class RuntimeService:
             ]
             for path in self._config_paths:
                 cmd += ["--config", path]
-            if checkpoint:
-                cmd += ["--checkpoint", checkpoint]
-            if use_memory:
-                cmd += ["--use-memory"]
+
+            # Emit the GUI overrides YAML and layer it on top.  This is how
+            # toggles/caps/checkpoint flow into the subprocess — we exploit
+            # the existing layered-YAML deep merge instead of adding new CLI
+            # flags to run_paper.py.
+            if not overrides.is_empty():
+                override_path = self._root / _RUNTIME_OVERRIDE_YAML
+                overrides.write_yaml(override_path)
+                cmd += ["--config", str(override_path)]
 
             try:
                 # New process group on Windows so we can send a graceful stop.
@@ -160,6 +197,8 @@ class RuntimeService:
             except ServiceError as exc:
                 self._last_error = str(exc)
 
+            platt_enabled = bool(cfg_summary.get("platt_calibration_enabled", False))
+            platt_fitted = Path("runs/platt_calibration.json").exists() if platt_enabled else False
             status = RuntimeStatus(
                 state=self._compute_state(),
                 pid=self._proc.pid if self._proc and self._proc.poll() is None else None,
@@ -168,8 +207,10 @@ class RuntimeService:
                 frozen_brain=bool(cfg_summary.get("frozen_brain", True)),
                 memory_enabled=bool(cfg_summary.get("memory_enabled", False)),
                 memory_updates_enabled=bool(cfg_summary.get("memory_updates_allowed", False)),
-                fusion_enabled=bool(cfg_summary.get("fusion_enabled", False)),
-                topology_growth_enabled=bool(cfg_summary.get("topology_growth_enabled", False)),
+                ev_gate_active=bool(cfg_summary.get("separate_risk_heads", False)),
+                ev_cost_bps=float(cfg_summary.get("ev_cost_bps", 0.0)),
+                platt_calibration_enabled=platt_enabled,
+                platt_calibration_fitted=platt_fitted,
                 error_message=self._last_error,
             )
             # Prefer structured runtime status snapshot (real per-tick truth)
@@ -191,6 +232,20 @@ class RuntimeService:
                 status.last_log_timestamp = datetime.fromisoformat(str(ts))
             except ValueError:
                 pass
+        # --- Live runtime truth: prefer the per-tick snapshot for the
+        # operator-visible safety-flag badges. The config view captured at
+        # spawn time can drift from the actual runtime state (e.g. when
+        # ``allow_online_memory_updates=false`` causes the runtime to
+        # silently downgrade ``runtime_update_mode`` to ``disabled``, or when
+        # decision_fusion is enabled at the YAML layer but the runtime
+        # detected an empty bank).  ``runtime_status.jsonl`` is written
+        # per-tick by the trade engine and is the source of truth.
+        if "fusion_enabled" in snap:
+            status.fusion_enabled = bool(snap.get("fusion_enabled"))
+        if "memory_enabled" in snap:
+            status.memory_enabled = bool(snap.get("memory_enabled"))
+        if "frozen_brain" in snap:
+            status.frozen_brain = bool(snap.get("frozen_brain"))
         # Decision summary
         decision = snap.get("last_decision")
         if isinstance(decision, dict):

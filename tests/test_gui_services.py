@@ -61,10 +61,6 @@ class TestState:
             profit_factor=1.7,
             expectancy=0.0001,
             avg_return_per_trade=0.0002,
-            fusion_veto_count=3,
-            fusion_dampen_count=4,
-            fusion_support_count=5,
-            fusion_neutral_count=10,
             config_paths=["configs/default.yaml"],
             notes="x",
         )
@@ -137,8 +133,14 @@ class TestRuntimeService:
         status = svc.stop()
         assert status.state == RuntimeState.STOPPED
 
-    def test_start_invokes_run_paper_script(self) -> None:
-        svc = RuntimeService()
+    def test_start_invokes_run_paper_script(self, tmp_path: Path) -> None:
+        """Checkpoint + memory-enable flow through a layered YAML override
+        now (no more ``--checkpoint`` / ``--use-memory`` CLI flags).  Verify:
+          - the spawned command points at run_paper.py
+          - the final --config arg is the GUI override file
+          - the override file contains the expected fields
+        """
+        svc = RuntimeService(project_root=tmp_path)
         with patch("src.gui_services.runtime_service.subprocess.Popen") as popen:
             fake_proc = MagicMock()
             fake_proc.poll.return_value = None
@@ -153,9 +155,17 @@ class TestRuntimeService:
         cmd = args[0]
         assert "scripts" in str(Path(cmd[2])).replace("\\", "/")
         assert "run_paper.py" in cmd[2]
-        assert "--checkpoint" in cmd
-        assert "checkpoints/brain.pt" in cmd
-        assert "--use-memory" in cmd
+        # The last --config pair should point at the generated override file.
+        last_config_idx = max(i for i, a in enumerate(cmd) if a == "--config")
+        override_arg = cmd[last_config_idx + 1]
+        assert override_arg.endswith("gui_runtime_override.yaml")
+        override_path = Path(override_arg)
+        assert override_path.exists()
+        import yaml as _yaml
+        with open(override_path, encoding="utf-8") as f:
+            data = _yaml.safe_load(f)
+        assert data["model"]["checkpoint_path"] == "checkpoints/brain.pt"
+        assert data["memory"]["enabled"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +191,83 @@ class TestBacktestService:
         assert len(rows) == 1
         assert rows[0].label == "t1"
         assert rows[0].fill_count == 4
+
+    def test_run_backtest_drops_symbols_with_zero_bars(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """run_backtest must filter out symbols that return an empty bar list.
+
+        This reproduces the "SQ has zero bars in recent window" failure:
+        the Alpaca feed stops returning data for a ticker (delisted,
+        renamed) and the backtest engine's ``build_batch`` / ``min_length``
+        path crashes or silently no-ops when handed an empty sequence.
+        The service layer must drop those symbols up front and keep going
+        with the survivors.
+        """
+        from src.data.historical_data import generate_synthetic_bars
+        from src.gui_services import backtest_service
+
+        monkeypatch.setattr(
+            "src.gui_services.backtest_service.BACKTEST_HISTORY_DIR",
+            tmp_path / "bt",
+        )
+
+        # Fake ``_load_bars`` so we don't hit Alpaca or touch the real
+        # historical cache.  One symbol comes back empty (the bug); the
+        # other two come back healthy.
+        def fake_load_bars(config, *, use_real_data: bool, allow_mock: bool):
+            del use_real_data, allow_mock
+            return {
+                "AAPL": generate_synthetic_bars("AAPL", 220),
+                "MSFT": generate_synthetic_bars("MSFT", 220),
+                "SQ": [],  # delisted ticker — zero bars in window
+            }
+
+        monkeypatch.setattr(backtest_service, "_load_bars", fake_load_bars)
+
+        seen_progress: list[str] = []
+        row = backtest_service.run_backtest(
+            config_paths=["configs/default.yaml"],
+            use_real_data=False,
+            policy_kind="baseline",
+            label="test_empty_symbol_drop",
+            progress_callback=seen_progress.append,
+        )
+
+        # The run must complete (not raise) and produce a row.
+        assert isinstance(row, gs_state.BacktestResultRow)
+        assert row.label == "test_empty_symbol_drop"
+
+        # The progress callback must mention the drop so operators can
+        # see which symbols got filtered.
+        drop_messages = [msg for msg in seen_progress if "Dropping" in msg and "SQ" in msg]
+        assert drop_messages, f"expected a drop progress message mentioning SQ; got {seen_progress}"
+
+    def test_run_backtest_raises_when_all_symbols_empty(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If every symbol is empty we can't run anything — raise a clear
+        ServiceError instead of crashing deeper in the pipeline."""
+        from src.gui_services import backtest_service
+
+        monkeypatch.setattr(
+            "src.gui_services.backtest_service.BACKTEST_HISTORY_DIR",
+            tmp_path / "bt",
+        )
+
+        def fake_load_bars(config, *, use_real_data: bool, allow_mock: bool):
+            del use_real_data, allow_mock
+            return {"AAPL": [], "MSFT": [], "SQ": []}
+
+        monkeypatch.setattr(backtest_service, "_load_bars", fake_load_bars)
+
+        with pytest.raises(gs_state.ServiceError, match="returned zero bars"):
+            backtest_service.run_backtest(
+                config_paths=["configs/default.yaml"],
+                use_real_data=False,
+                policy_kind="baseline",
+                label="test_all_empty",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -347,15 +434,16 @@ class TestMemoryBuildPlan:
         ckpt.write_bytes(b"x")
         captured = {}
 
-        def fake_run(cmd, **kwargs):
+        def fake_popen(cmd, **kwargs):
             captured["cmd"] = cmd
-            r = MagicMock()
-            r.returncode = 0
-            r.stdout = "ok"
-            r.stderr = ""
-            return r
+            proc = MagicMock()
+            proc.returncode = 0
+            # stdout is iterated line-by-line by the streaming reader.
+            proc.stdout = iter(["ok\n"])
+            proc.wait = MagicMock(return_value=0)
+            return proc
 
-        with patch("src.gui_services.memory_service.subprocess.run", side_effect=fake_run):
+        with patch("src.gui_services.memory_service.subprocess.Popen", side_effect=fake_popen):
             build_memory(
                 config_paths=["configs/default.yaml"],
                 explicit_checkpoint=str(ckpt),

@@ -1,0 +1,7 @@
+# Sweep: minimum trade confidence = 0.70 (tighter than default 0.55).
+#
+# Companion to backtest_sweep_confidence_050.yaml — these bracket the
+# default to show the confidence threshold's impact on fill count and
+# per-trade expectancy.
+risk:
+  min_trade_confidence: 0.70

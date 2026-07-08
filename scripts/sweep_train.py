@@ -168,8 +168,6 @@ def main() -> int:
             fast.fast_months = preset["fast_months"]
         if preset.get("fast_epochs") is not None:
             fast.max_epochs = preset["fast_epochs"]
-        if preset.get("disable_path_label"):
-            fast.disable_path_label = True
         if preset.get("disable_future_return"):
             fast.disable_future_return = True
         if preset.get("disable_risk_path"):

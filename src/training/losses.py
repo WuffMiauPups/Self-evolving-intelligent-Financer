@@ -31,34 +31,6 @@ def direction_classification_loss(
     raise ValueError(f"Unsupported classification loss mode: {loss_mode}")
 
 
-def path_label_classification_loss(
-    logits: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    num_classes: int = 5,
-    loss_mode: str = "cross_entropy",
-    focal_gamma: float = 2.0,
-    label_smoothing: float = 0.0,
-) -> torch.Tensor:
-    """Classification loss for path labels (breakout_up/down, mean_reversion_up/down, chop).
-
-    Uses the same loss modes as direction classification. No class weights
-    by default since path labels have a natural distribution that should be
-    learned as-is.
-    """
-    if logits.numel() == 0 or labels.numel() == 0:
-        return logits.new_zeros(())
-    if loss_mode == "cross_entropy":
-        return F.cross_entropy(logits, labels, label_smoothing=label_smoothing)
-    if loss_mode == "focal":
-        ce_loss = F.cross_entropy(logits, labels, reduction="none", label_smoothing=label_smoothing)
-        probabilities = torch.softmax(logits, dim=-1)
-        pt = probabilities.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1).clamp_min(1.0e-8)
-        focal_factor = (1.0 - pt) ** focal_gamma
-        return (focal_factor * ce_loss).mean()
-    raise ValueError(f"Unsupported path label loss mode: {loss_mode}")
-
-
 def future_return_regression_loss(
     output: object,
     regression_targets: dict[str, torch.Tensor],
@@ -93,17 +65,21 @@ def risk_path_regression_loss(
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Regression loss for risk/path statistics: MFE, MAE, volatility, drawdown.
 
-    Uses the model's value and confidence heads as prediction outputs.
+    Uses dedicated risk heads when available, otherwise falls back to the
+    model's value and confidence heads as prediction outputs.
     """
     risk_target_names = {"mfe", "mae", "volatility", "path_drawdown"}
+    risk_preds = getattr(output, "risk_predictions", None)
     losses: list[torch.Tensor] = []
     components: dict[str, float] = {}
     for name in risk_target_names:
         if name not in regression_targets:
             continue
         target = regression_targets[name]
-        # Map risk targets to model output heads
-        if name in ("mae", "path_drawdown") and output.value is not None:
+        # Use dedicated risk heads when available
+        if risk_preds is not None:
+            prediction = risk_preds[name].reshape(-1)
+        elif name in ("mae", "path_drawdown") and output.value is not None:
             prediction = output.value.reshape(-1)
         elif name in ("mfe", "volatility"):
             prediction = output.confidence.reshape(-1)
@@ -157,53 +133,7 @@ def multitask_regression_loss(
     return total, components
 
 
-def latent_consistency_loss(
-    embeddings: torch.Tensor,
-    labels: torch.Tensor,
-    *,
-    margin: float = 0.1,
-) -> torch.Tensor:
-    if embeddings.shape[0] < 2:
-        return embeddings.new_zeros(())
-    normalized = F.normalize(embeddings, dim=-1)
-    similarity = normalized @ normalized.transpose(0, 1)
-    label_matrix = labels.unsqueeze(0) == labels.unsqueeze(1)
-    eye = torch.eye(labels.shape[0], device=labels.device, dtype=torch.bool)
-    positive_mask = label_matrix & ~eye
-    negative_mask = ~label_matrix
-    positive_loss = (
-        (1.0 - similarity[positive_mask]).mean()
-        if positive_mask.any()
-        else similarity.new_zeros(())
-    )
-    negative_loss = (
-        F.relu(similarity[negative_mask] - margin).mean()
-        if negative_mask.any()
-        else similarity.new_zeros(())
-    )
-    return positive_loss + negative_loss
-
-
-def soma_gating_confidence_loss(
-    soma_weights: torch.Tensor,
-    branch_confidences: torch.Tensor,
-) -> torch.Tensor:
-    """Penalize the soma for assigning weight to low-confidence branches.
-
-    soma_weights:       [batch, branch_count] (sums to 1 along branch_count)
-    branch_confidences: [batch, branch_count] in (0, 1)
-
-    Returns ``1 - E[confidence weighted by soma]``. Minimum 0 when the soma
-    puts all weight on a perfectly-confident branch; maximum 1 when soma
-    weights and confidences are uncorrelated. Adding this term to the loss
-    forces the gate to actually use the per-branch confidence signal instead
-    of treating it as just-another-feature in the gate input.
-    """
-    if soma_weights.dim() != 2 or branch_confidences.dim() != 2:
-        raise ValueError(
-            "soma_gating_confidence_loss expects 2D tensors "
-            f"got soma_weights={tuple(soma_weights.shape)} "
-            f"branch_confidences={tuple(branch_confidences.shape)}"
-        )
-    weighted = (soma_weights * branch_confidences).sum(dim=-1)
-    return (1.0 - weighted).mean()
+# latent_consistency_loss and soma_gating_confidence_loss were removed in
+# the Great Simplification (Phase 8). The former was a metric-learning loss
+# with no downstream consumer; the latter was a regularizer for the soma
+# aggregator which no longer exists.

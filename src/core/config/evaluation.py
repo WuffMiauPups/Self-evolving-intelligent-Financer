@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+from pydantic import BaseModel, Field, model_validator
+
+from src.core.exceptions import ConfigurationError
+
+
+class WalkForwardConfig(BaseModel):
+    """Walk-forward cross-validation configuration.
+
+    Defines how data is split into sequential train/val/test folds
+    for out-of-sample evaluation. All durations are in bars.
+    """
+
+    train_bars: int = 5000
+    val_bars: int = 1000
+    test_bars: int = 1000
+    step_bars: int = 1000
+    window_type: str = "rolling"  # "rolling" or "expanding"
+    min_train_bars: int = 2000
+    reset_model_per_fold: bool = True
+    reset_memory_per_fold: bool = True
+
+    @model_validator(mode="after")
+    def validate_walk_forward(self) -> "WalkForwardConfig":
+        if self.window_type not in {"rolling", "expanding"}:
+            raise ConfigurationError("walk_forward.window_type must be rolling or expanding")
+        if self.train_bars <= 0:
+            raise ConfigurationError("walk_forward.train_bars must be positive")
+        if self.val_bars < 0:
+            raise ConfigurationError("walk_forward.val_bars must be non-negative")
+        if self.test_bars <= 0:
+            raise ConfigurationError("walk_forward.test_bars must be positive")
+        if self.step_bars <= 0:
+            raise ConfigurationError("walk_forward.step_bars must be positive")
+        if self.min_train_bars <= 0:
+            raise ConfigurationError("walk_forward.min_train_bars must be positive")
+        return self
+
+
+class EvaluationConfig(BaseModel):
+    """Top-level evaluation / experiment configuration."""
+
+    walk_forward: WalkForwardConfig = Field(default_factory=WalkForwardConfig)
+    seed: int = 42
+    output_dir: str = "experiments"

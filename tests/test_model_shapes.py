@@ -27,7 +27,8 @@ def test_brain_model_forward_shapes() -> None:
     assert output.action_logits.shape == (1, 3)
     assert output.confidence.shape == (1, 1)
     assert output.target_fraction.shape == (1, 1)
-    assert output.memory_state is not None
+    # Post-Simplification: memory_state removed (GRU gone).
+    assert output.memory_state is None
     assert output.temporal_embedding is not None
 
 

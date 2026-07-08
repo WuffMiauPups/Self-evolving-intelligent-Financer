@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 
 from src.core.config import MemoryConfig
-from src.data.schemas import MarketBar
+from src.data.schemas import MarketBar, bars_to_tensor
 from src.features.feature_pipeline import FeaturePipeline
 from src.memory.memory_bank import MemoryBank
 from src.memory.outcomes import build_risk_summary, compute_outcome_summary
@@ -21,12 +21,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AssociativeMemoryUpdater:
+    """Observe encoded states, finalize outcomes, append to bank.
+
+    Post-Great-Simplification this is a passive scaffold: there is no
+    prototype clustering, no ESOM map, no dynamic-unit maintenance and
+    therefore no background refresher. ``finalize_ready`` just appends
+    the new items to the bank and returns them.
+    """
     bank: MemoryBank
     config: MemoryConfig
     pending_by_symbol: dict[str, list[PendingMemoryState]] = field(default_factory=lambda: defaultdict(list))
     observed_count: int = 0
     finalized_count: int = 0
-    last_refresh_report: dict[str, object] = field(default_factory=dict)
 
     def observe(self, encoded_state: EncodedState, *, action_annotation: str | None = None) -> None:
         if self.config.runtime_update_mode == "disabled":
@@ -92,13 +98,10 @@ class AssociativeMemoryUpdater:
             finalized.append(item)
             self.finalized_count += 1
         self.pending_by_symbol[symbol] = remaining
-        if finalized:
-            self.bank.rebuild_prototypes(
-                min_similarity=self.config.min_similarity,
-                min_cluster_size=self.config.min_cluster_size,
-                temperature=self.config.attention_temperature,
-            )
-            self.last_refresh_report = self.bank.refresh_organization(self.config)
+        # Post-Great-Simplification: appends are already done by
+        # ``self.bank.append(item)`` above. No prototype rebuild, no
+        # ESOM refresh, no background worker — the minimal bank has
+        # no organization layer to refresh.
         return finalized
 
     def reset(self) -> None:
@@ -111,7 +114,6 @@ class AssociativeMemoryUpdater:
             "observed_count": self.observed_count,
             "finalized_count": self.finalized_count,
             "pending_count": sum(len(items) for items in self.pending_by_symbol.values()),
-            "last_refresh_report": dict(self.last_refresh_report),
         }
 
     def save_pending(self, path: str | Path) -> int:
@@ -154,7 +156,11 @@ class AssociativeMemoryUpdater:
         if not path.exists():
             return 0
         try:
-            payload = torch.load(path, map_location="cpu", weights_only=False)
+            try:
+                payload = torch.load(path, map_location="cpu", weights_only=True)
+            except Exception:
+                logger.warning("cache_load_legacy_format path=%s", str(path))
+                payload = torch.load(path, map_location="cpu", weights_only=False)
         except Exception as exc:
             logger.warning("pending_observations_load_failed path=%s error=%s", str(path), str(exc))
             return 0
@@ -201,6 +207,7 @@ def build_memory_bank_from_bars(
     memory_config: MemoryConfig,
     warmup_bars: int,
     encode_chunk_size: int | None = None,
+    embargo_bars: int = 0,
 ) -> MemoryBank:
     """Build an associative memory bank by replaying historical bars.
 
@@ -238,29 +245,72 @@ def build_memory_bank_from_bars(
     # runs once.
     sample_snapshot = pipeline.build(sample_bars[: warmup_bars + 1], symbol=sample_symbol)
     sample_encoded = encoder.encode(sample_snapshot)
+    # Stamp the bank with the encoder's fingerprint at construction so that
+    # check_encoder_compatibility has a real reference for every appended
+    # item.  Without this stamp, banks built offline carry no fingerprint and
+    # any subsequent require_encoder_match check is silently bypassed.
     bank = MemoryBank(
         feature_contract=sample_snapshot.contract,
         latent_dim=sample_encoded.latent.shape[0],
         similarity_metric=memory_config.similarity_metric,
         max_items=memory_config.max_items,
+        encoder_fingerprint=encoder.encoder_fingerprint,
         require_encoder_match=memory_config.require_encoder_match,
-        meta={"builder": "offline"},
+        meta={
+            "builder": "offline",
+            "encoder_fingerprint": encoder.encoder_fingerprint,
+        },
     )
+
+    # Per-symbol stratified cap so every symbol gets representation in the
+    # bank instead of the last-encoded symbol filling it via FIFO eviction.
+    # With ``max_items=100_000`` and 13 symbols this caps each symbol at
+    # ~7,692 randomly-sampled bars — enough for per-symbol calibration
+    # profiles while keeping the bank small enough that ``build_dynamic_units``
+    # finishes in a few minutes instead of ~30 min on 745K items.
+    per_symbol_limit: int | None = None
+    if memory_config.max_items > 0 and len(bars_by_symbol) > 0:
+        per_symbol_limit = max(1, memory_config.max_items // len(bars_by_symbol))
+        logger.info(
+            "memory_build_per_symbol_limit=%d n_symbols=%d max_items=%d",
+            per_symbol_limit, len(bars_by_symbol), memory_config.max_items,
+        )
 
     total_samples = 0
     for symbol, bars in bars_by_symbol.items():
-        max_index = len(bars) - max(memory_config.forward_horizons)
+        max_index = len(bars) - max(memory_config.forward_horizons) - embargo_bars
         if max_index <= warmup_bars:
             continue
         # --- Phase 1: build feature snapshots + pending metadata for the symbol
-        # (lightweight, scalar feature pipeline, CPU-bound). We queue them and
-        # hand them to the encoder in chunks to amortize the forward cost.
+        # (lightweight, vectorized rolling pipeline, CPU-bound). We queue them
+        # and hand them to the encoder in chunks to amortize the forward cost.
+        #
+        # ``pipeline.build_batch`` runs every rolling feature reduction once
+        # across the full bar history via ``torch.unfold``; ``snapshot_at``
+        # then extracts per-bar snapshots in O(F) — no re-slice, no
+        # re-reduction.  Biggest offline-build cold-start win.
+        batched_snapshots = pipeline.build_batch(
+            list(bars), symbol=symbol, temporal_window=warmup_bars
+        )
+        eligible_indices = list(range(warmup_bars, max_index))
+        # Deterministic per-symbol stratified downsample.
+        if per_symbol_limit is not None and len(eligible_indices) > per_symbol_limit:
+            # Seed per-symbol so runs are reproducible but each symbol
+            # gets an independent sample. ``hash(symbol)`` is NOT
+            # deterministic across Python runs (PYTHONHASHSEED is random
+            # unless fixed), so we use a stable hash (md5 → int) instead.
+            import hashlib as _hashlib
+            _sym_digest = int(
+                _hashlib.md5(symbol.encode("utf-8")).hexdigest()[:8], 16
+            )
+            g = torch.Generator().manual_seed(42 + (_sym_digest % 1_000_000))
+            perm = torch.randperm(len(eligible_indices), generator=g)[:per_symbol_limit]
+            sampled = sorted(eligible_indices[i] for i in perm.tolist())
+            eligible_indices = sampled
         pending_snapshots = []
         pending_indices = []
-        for index in range(warmup_bars, max_index):
-            snapshot = pipeline.build(
-                bars[max(0, index + 1 - warmup_bars): index + 1], symbol=symbol
-            )
+        for index in eligible_indices:
+            snapshot = batched_snapshots.snapshot_at(index)
             pending_snapshots.append(snapshot)
             pending_indices.append(index)
             if len(pending_snapshots) >= encode_chunk_size:
@@ -288,16 +338,11 @@ def build_memory_bank_from_bars(
         logger.info(
             "memory_build_symbol_done symbol=%s samples=%d running_total=%d",
             symbol,
-            max_index - warmup_bars,
+            len(eligible_indices),
             total_samples,
         )
 
-    bank.rebuild_prototypes(
-        min_similarity=memory_config.min_similarity,
-        min_cluster_size=memory_config.min_cluster_size,
-        temperature=memory_config.attention_temperature,
-    )
-    bank.refresh_organization(memory_config)
+    logger.info("phase_timing phase=build_memory_done items=%d", len(bank))
     bank.meta["builder"] = "offline_complete"
     return bank
 

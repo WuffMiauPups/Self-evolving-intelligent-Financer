@@ -36,6 +36,12 @@ class StdlibEventLogger:
     def info(self, event: str, /, **kwargs: Any) -> None:
         self._logger.info("%s %s", event, kwargs if kwargs else "")
 
+    def debug(self, event: str, /, **kwargs: Any) -> None:
+        self._logger.debug("%s %s", event, kwargs if kwargs else "")
+
+    def warning(self, event: str, /, **kwargs: Any) -> None:
+        self._logger.warning("%s %s", event, kwargs if kwargs else "")
+
     def exception(self, event: str, /, **kwargs: Any) -> None:
         self._logger.exception("%s %s", event, kwargs if kwargs else "")
 

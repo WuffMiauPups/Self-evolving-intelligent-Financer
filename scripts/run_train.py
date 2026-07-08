@@ -23,12 +23,11 @@ PRESETS: dict[str, dict[str, object]] = {
     "state-only": {
         "description": (
             "State-only baseline: classification + regression + latent only. "
-            "Disables path-label, future-return, and risk-path auxiliary losses."
+            "Disables future-return and risk-path auxiliary losses."
         ),
         "fast": True,
         "fast_months": 6,
         "fast_epochs": 2,
-        "disable_path_label": True,
         "disable_future_return": True,
         "disable_risk_path": True,
     },
@@ -39,7 +38,6 @@ PRESETS: dict[str, dict[str, object]] = {
         "fast": True,
         "fast_months": 6,
         "fast_epochs": 2,
-        "disable_path_label": True,
         "disable_future_return": True,
         "disable_risk_path": True,
         "disable_regression": True,
@@ -51,7 +49,6 @@ PRESETS: dict[str, dict[str, object]] = {
         "fast": True,
         "fast_months": 6,
         "fast_epochs": 2,
-        "disable_path_label": True,
         "disable_future_return": True,
         "disable_risk_path": True,
         "disable_regression": True,
@@ -239,11 +236,6 @@ def main() -> int:
         help="Cap epochs at N (fast mode, takes min of this and training.epochs).",
     )
     parser.add_argument(
-        "--disable-path-label",
-        action="store_true",
-        help="Disable path-label auxiliary loss for this run (fast mode).",
-    )
-    parser.add_argument(
         "--disable-future-return",
         action="store_true",
         help="Disable future-return auxiliary loss for this run (fast mode).",
@@ -379,7 +371,6 @@ def main() -> int:
     if args.classification_only:
         config.training.disable_regression = True
         config.training.disable_latent = True
-        config.training.fast_mode.disable_path_label = True
         config.training.fast_mode.disable_future_return = True
         config.training.fast_mode.disable_risk_path = True
     if args.loss_weight_classification is not None:
@@ -411,8 +402,6 @@ def main() -> int:
     if args.fast_epochs is not None:
         config.training.fast_mode.max_epochs = args.fast_epochs
         config.training.fast_mode.enabled = True
-    if args.disable_path_label:
-        config.training.fast_mode.disable_path_label = True
     if args.disable_future_return:
         config.training.fast_mode.disable_future_return = True
     if args.disable_risk_path:

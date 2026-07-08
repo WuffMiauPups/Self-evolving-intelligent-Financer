@@ -28,7 +28,6 @@ from src.training.class_balance import compute_target_diagnostics
 from src.training.losses import (
     direction_classification_loss,
     future_return_regression_loss,
-    path_label_classification_loss,
     risk_path_regression_loss,
 )
 from src.training.metrics import BatchMetrics
@@ -245,11 +244,13 @@ class TestLossConfig:
         config = load_config("configs/default.yaml", "configs/training.yaml")
         lw = config.training.loss_weights
         assert "classification" in lw
-        assert "path_label" in lw
         assert "future_return" in lw
         assert "risk_path" in lw
         assert "regression" in lw
         assert "latent" in lw
+        # path_label was killed when the head was removed (val acc < majority,
+        # 7.7pt train→val overfit). Validator pops it silently if present.
+        assert "path_label" not in lw
 
     def test_old_3key_config_migrated(self) -> None:
         """Old configs with only {classification, regression, latent} should still work."""
@@ -260,21 +261,19 @@ class TestLossConfig:
         }
         # Trigger validation
         config.training.validate_training_config()
-        assert "path_label" in config.training.loss_weights
         assert "future_return" in config.training.loss_weights
         assert "risk_path" in config.training.loss_weights
+        assert "path_label" not in config.training.loss_weights
 
-    def test_path_label_loss_runs(self) -> None:
-        logits = torch.randn(8, 5)
-        labels = torch.randint(0, 5, (8,))
-        loss = path_label_classification_loss(logits, labels)
-        assert float(loss.item()) > 0.0
-
-    def test_path_label_focal_loss_runs(self) -> None:
-        logits = torch.randn(8, 5)
-        labels = torch.randint(0, 5, (8,))
-        loss = path_label_classification_loss(logits, labels, loss_mode="focal", focal_gamma=2.0)
-        assert float(loss.item()) > 0.0
+    def test_legacy_config_with_path_label_pops_silently(self) -> None:
+        """Old configs that still set path_label should not raise."""
+        config = load_config("configs/default.yaml")
+        config.training.loss_weights = {
+            "classification": 1.0, "regression": 0.35, "latent": 0.10,
+            "path_label": 0.30, "future_return": 0.20, "risk_path": 0.15,
+        }
+        config.training.validate_training_config()
+        assert "path_label" not in config.training.loss_weights
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +443,6 @@ class TestRunSummaryMetadata:
                 auxiliary_horizons = [30, 60]
                 all_horizons = [1, 5, 15, 30, 60]
                 effective_primary_horizon = 15
-                enable_path_label_head = True
                 enable_future_return_targets = True
                 enable_risk_path_targets = True
                 path_label_rules = {"breakout_return_threshold": 0.003}
@@ -489,7 +487,6 @@ class TestRunSummaryMetadata:
         cfg = summary["config"]
         assert cfg["primary_direction_horizon"] == 15
         assert cfg["auxiliary_horizons"] == [30, 60]
-        assert cfg["enable_path_label_head"] is True
         assert cfg["enable_future_return_targets"] is True
         assert cfg["enable_risk_path_targets"] is True
 
@@ -507,20 +504,15 @@ class TestBatchMetricsNewFields:
     def test_batch_metrics_has_path_fields(self) -> None:
         m = BatchMetrics(
             loss=0.5, accuracy=0.4,
-            path_label_loss=0.3, future_return_loss=0.1,
-            risk_path_loss=0.05, path_label_accuracy=0.25,
+            future_return_loss=0.1, risk_path_loss=0.05,
         )
-        assert m.path_label_loss == 0.3
         assert m.future_return_loss == 0.1
         assert m.risk_path_loss == 0.05
-        assert m.path_label_accuracy == 0.25
 
     def test_batch_metrics_defaults_zero(self) -> None:
         m = BatchMetrics(loss=0.5, accuracy=0.4)
-        assert m.path_label_loss == 0.0
         assert m.future_return_loss == 0.0
         assert m.risk_path_loss == 0.0
-        assert m.path_label_accuracy == 0.0
 
 
 # ---------------------------------------------------------------------------

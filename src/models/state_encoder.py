@@ -8,6 +8,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from src.core.device import maybe_autocast
 from src.features.feature_pipeline import FeatureContract, FeatureSnapshot
 from src.memory.memory_bank import feature_contract_fingerprint
 from src.models.base import TradingModelProtocol
@@ -34,6 +35,16 @@ class ModelStateEncoder:
     feature_contract: FeatureContract | None = None
     expected_latent_dim: int | None = None
     encoder_fingerprint: str | None = None
+    # FP16 autocast enable for the encoder forward. ``None`` auto-enables on
+    # CUDA and skips on CPU; ``maybe_autocast`` further guards against a
+    # non-CUDA device. Latents are explicitly cast back to fp32 below, so
+    # memory writes stay in fp32 regardless of this flag.
+    use_amp: bool | None = None
+
+    def _amp_enabled(self) -> bool:
+        if self.use_amp is None:
+            return self.device.type == "cuda"
+        return bool(self.use_amp)
 
     def encode(self, snapshot: FeatureSnapshot) -> EncodedState:
         return self.encode_batch([snapshot])[0]
@@ -85,7 +96,7 @@ class ModelStateEncoder:
             ],
             dim=0,
         )
-        with torch.no_grad():
+        with torch.no_grad(), maybe_autocast(self.device, self._amp_enabled()):
             output = self.model(
                 branch_inputs=branch_inputs,
                 regime_input=regime_input,
@@ -112,19 +123,80 @@ class ModelStateEncoder:
         # — model training is unaffected because fused_representation is still
         # used unnormalized inside the model heads.
         normalized_fused = F.normalize(output.fused_representation, p=2.0, dim=-1, eps=1.0e-8)
+
+        # --- Batched scalar extraction: collapse N*M per-bar .item() calls -----
+        # The per-sample loop below previously issued one `.item()` per branch
+        # per sample for confidences/norms plus soma/temporal, each of which
+        # forces a GPU->CPU sync. We stack everything on-device first and then
+        # transfer as a single block per logical group so the whole bar costs
+        # at most four GPU->CPU syncs (confidences, norms, soma, temporal)
+        # instead of ~2 * n_branches * batch + 2 per bar.
+        batch_size = len(snapshots)
+
+        branch_conf_names = list(output.branch_confidences.keys())
+        if branch_conf_names:
+            branch_conf_stack = torch.stack(
+                [
+                    output.branch_confidences[name].reshape(batch_size, -1)[:, 0]
+                    for name in branch_conf_names
+                ],
+                dim=0,
+            )
+            branch_conf_cpu = branch_conf_stack.detach().cpu().numpy()
+        else:
+            branch_conf_cpu = None
+
+        branch_embed_names = list(output.branch_embeddings.keys())
+        if branch_embed_names:
+            branch_norm_stack = torch.stack(
+                [
+                    output.branch_embeddings[name].reshape(batch_size, -1).norm(dim=-1)
+                    for name in branch_embed_names
+                ],
+                dim=0,
+            )
+            branch_norm_cpu = branch_norm_stack.detach().cpu().numpy()
+        else:
+            branch_norm_cpu = None
+
+        if output.soma_activation is not None:
+            soma_cpu = (
+                output.soma_activation.reshape(batch_size, -1)[:, 0]
+                .detach()
+                .cpu()
+                .numpy()
+            )
+        else:
+            soma_cpu = None
+
+        if output.temporal_embedding is not None:
+            temporal_norm_cpu = (
+                output.temporal_embedding.reshape(batch_size, -1)
+                .norm(dim=-1)
+                .detach()
+                .cpu()
+                .numpy()
+            )
+        else:
+            temporal_norm_cpu = None
+
         encoded_states: list[EncodedState] = []
         for index, snapshot in enumerate(snapshots):
-            branch_confidences = {
-                name: float(value[index].reshape(-1)[0].item())
-                for name, value in output.branch_confidences.items()
-            }
-            branch_norms = {
-                name: float(output.branch_embeddings[name][index].norm().item())
-                for name in output.branch_embeddings
-            }
+            branch_confidences: dict[str, float] = {}
+            if branch_conf_cpu is not None:
+                for j, name in enumerate(branch_conf_names):
+                    branch_confidences[name] = float(branch_conf_cpu[j, index])
+            branch_norms: dict[str, float] = {}
+            if branch_norm_cpu is not None:
+                for j, name in enumerate(branch_embed_names):
+                    branch_norms[name] = float(branch_norm_cpu[j, index])
             regime_weights = None
             if output.regime_weights is not None:
                 regime_weights = output.regime_weights[index].detach().cpu().to(dtype=torch.float32)
+            soma_value = 0.0 if soma_cpu is None else float(soma_cpu[index])
+            temporal_norm_value = (
+                0.0 if temporal_norm_cpu is None else float(temporal_norm_cpu[index])
+            )
             encoded_states.append(
                 EncodedState(
                     symbol=snapshot.symbol,
@@ -136,12 +208,10 @@ class ModelStateEncoder:
                     branch_norms=branch_norms,
                     encoder_fingerprint=self.encoder_fingerprint,
                     metadata={
-                        "soma_activation": float(output.soma_activation[index].reshape(-1)[0].item()),
+                        "soma_activation": soma_value,
                         "feature_dim": snapshot.features.numel(),
                         "temporal_feature_dim": snapshot.temporal_tensor.shape[0],
-                        "temporal_embedding_norm": 0.0
-                        if output.temporal_embedding is None
-                        else float(output.temporal_embedding[index].norm().item()),
+                        "temporal_embedding_norm": temporal_norm_value,
                     },
                 )
             )

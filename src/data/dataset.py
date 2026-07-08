@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -10,6 +10,9 @@ from torch.utils.data import Dataset
 
 from src.data.schemas import MarketBar
 from src.features.feature_pipeline import FeatureContract, FeaturePipeline, FeatureSnapshot
+
+if TYPE_CHECKING:
+    from src.training.sample_columns import ColumnarSamples
 
 
 @dataclass
@@ -147,3 +150,65 @@ def collate_training_samples(batch: list[TrainingSample]) -> dict[str, Any]:
             for target_name in target_names
         }
     return payload
+
+
+def make_columnar_collate(columns: "ColumnarSamples"):
+    """Create a collate function that slices columnar tensors directly.
+
+    Bypasses per-sample ``TrainingSample`` creation and ``torch.stack``.
+    Uses advanced indexing on pre-stacked tensors: O(1) per field instead
+    of O(batch_size).
+
+    The returned callable accepts a list of integer indices (as produced by
+    an ``IndexDataset``) and returns a dict with the same structure as
+    ``collate_training_samples``.
+    """
+
+    def collate(indices: list[int]) -> dict[str, Any]:
+        idx = torch.tensor(indices, dtype=torch.long,
+                           device=columns.features.device)
+
+        def _safe(t: torch.Tensor) -> torch.Tensor:
+            return torch.nan_to_num(t)
+
+        payload: dict[str, Any] = {
+            "features": _safe(columns.features[idx]),
+            "branch_inputs": {
+                name: _safe(tensor[idx]) for name, tensor in columns.branch_inputs.items()
+            },
+            "regime_input": _safe(columns.regime_input[idx]),
+            "temporal_tensor": _safe(columns.temporal_tensor[idx]),
+            "label": columns.label[idx],
+        }
+
+        # Metadata (lists -- cheap list comprehension)
+        idx_list = idx.tolist()
+        payload["symbol"] = [columns.symbols[i] for i in idx_list]
+        payload["timestamp"] = [columns.timestamps[i] for i in idx_list]
+        payload["direction_name"] = [columns.direction_names[i] for i in idx_list]
+        payload["path_name"] = [columns.path_names[i] for i in idx_list]
+
+        # Path label -- optional tensor column
+        if columns.path_label is not None:
+            payload["path_label"] = columns.path_label[idx]
+
+        # Regression targets -- already stored as {name: Tensor[N]}
+        if columns.regression_targets:
+            payload["regression_targets"] = {
+                name: torch.nan_to_num(tensor[idx])
+                for name, tensor in columns.regression_targets.items()
+            }
+
+        # Future returns -- match old collate format: list[dict[int, float]]
+        if columns.future_returns:
+            horizons = list(columns.future_returns.keys())
+            payload["future_returns"] = [
+                {h: float(columns.future_returns[h][i].item()) for h in horizons}
+                for i in idx_list
+            ]
+        else:
+            payload["future_returns"] = [{} for _ in idx_list]
+
+        return payload
+
+    return collate

@@ -1,0 +1,7 @@
+# Sweep: fusion veto threshold = 0.80 (tight — veto only on very strong conflict).
+#
+# Companion to backtest_sweep_fusion_veto_050.yaml — these bracket the
+# default (0.70) to show the fusion layer's sensitivity.
+memory:
+  decision_fusion:
+    conflict_veto_threshold: 0.80

@@ -1,0 +1,72 @@
+# Backtest preset: QUICK fast-iteration mode.
+#
+# Goal: complete a full brain backtest on the configured symbol universe
+# in ~5-10 minutes so you can iterate on threshold tuning, risk rules,
+# and brain quality without waiting hours for each run.
+#
+# How it achieves that: limits the backtest date range to the last
+# ~6 weeks instead of the default 4 years.  Everything else (symbols,
+# risk rules, features, brain policy) stays identical to the default
+# so the result is directly comparable to a full-range run, just on a
+# smaller sample.
+#
+# Expected arithmetic on a 40-symbol universe with ~3 cores + a mid-
+# range GPU (4070 Ti class):
+#
+#   eligible bars per symbol  ≈  30 trading days × 78 5-min bars
+#                             ≈  2,340 bars
+#   propose() calls total     ≈  2,340 × 40 ≈ 93,600
+#   @ ~5 ms per call          ≈  468 seconds ≈ 8 minutes
+#
+# The date below is hard-coded because AppConfig.data.start_date does
+# not accept relative expressions.  Bump it forward ~6 weeks at a time
+# as the session window rolls; the preset is still useful as-is until
+# the start_date falls behind "now" by more than a couple of months.
+#
+# Caveats:
+#   * The sample is small (~6 weeks) so statistical significance is
+#     limited.  Use this for "does the brain have any edge at all?"
+#     smoke tests, NOT for publication-grade performance claims.
+#   * Memory + fusion are ENABLED (full-stack backtest).  To run a
+#     brain-only comparison, select configs/backtest_memory_off.yaml.
+#   * Recent data is OUT-OF-SAMPLE if the brain was trained on an
+#     older date range.  That is actually a *good* property for this
+#     smoke test — it tells you whether the brain generalizes, not
+#     just whether it memorized the training set.
+#
+# Speed optimizations: multi_timescale_retrieval and modern_hopfield_enabled
+# are explicitly disabled here even though default.yaml also disables them,
+# to make the intent explicit and guard against default changes.  These
+# two features can triple per-bar retrieval cost when enabled.
+
+data:
+  # Last ~6 weeks of 5-minute bars.  Bump this forward periodically
+  # (or swap in a relative-date mechanism later) so the window stays
+  # recent.  Today's date: 2026-04-08 → 6 weeks back = 2026-02-25.
+  start_date: 2026-02-25
+  # end_date left at default (null → datetime.now(UTC))
+
+risk:
+  # Lower the confidence gate for evaluation.  The brain currently
+  # outputs confidence ~0.33-0.37 (barely above the random baseline
+  # for 3-class softmax).  The paper-trading config keeps 0.55 as a
+  # safety gate, but the backtest needs to LET the brain trade so we
+  # can measure its directional accuracy, win rate, and profit factor.
+  # Without this override, min_trade_confidence=0.55 from default.yaml
+  # would reject every single proposal → 0 fills → useless backtest.
+  # Set deliberately low (0.15) so the current undertrained brain's
+  # confidence (~0.20 average) can pass through.  This is a DIAGNOSTIC
+  # setting — it lets us measure the brain's actual behavior (even if
+  # degenerate) rather than showing 0 fills.  Raise this back to
+  # 0.55+ once the brain is properly trained with higher confidence.
+  min_trade_confidence: 0.15
+
+memory:
+  # Full-stack backtest: memory retrieval + decision fusion both ON
+  # (inherit enabled: true from default.yaml).
+  # Speed overrides: disable costly retrieval features that triple the
+  # per-bar retrieval cost. Quick backtest prioritizes iteration speed
+  # over absolute retrieval quality — these features add minimal value
+  # on small/weak models anyway.
+  multi_timescale_retrieval: false
+  modern_hopfield_enabled: false

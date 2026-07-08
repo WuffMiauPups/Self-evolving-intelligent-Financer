@@ -1,0 +1,8 @@
+# Sweep: fusion veto threshold = 0.50 (loose — veto rarely fires).
+#
+# Part of a 3-point sweep with backtest_sweep_fusion_veto_080.yaml and
+# the default (0.70).  Compare total_return + fusion_veto_count across
+# the three.
+memory:
+  decision_fusion:
+    conflict_veto_threshold: 0.50

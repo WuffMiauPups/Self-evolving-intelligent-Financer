@@ -3,18 +3,27 @@ broker:
   live_enabled: false
   confirm_live: false
 
+device:
+  # Disabled for paper diagnostics: inference was producing confidence=0.0
+  # exactly, consistent with FP16 sigmoid underflow under autocast. Run
+  # paper in FP32 while we diagnose the val-vs-paper output divergence.
+  use_amp: false
+
 runtime:
   # 0 = unbounded paper runtime (run until operator stops it or fatal error).
   max_runtime_steps: 0
   decision_interval_sec: 1.0
   max_data_staleness_sec: 1200
   allowed_sessions: ["regular"]
+  regime_hysteresis_enabled: true
+  market_priors_enabled: true
 
 model:
   checkpoint_path: checkpoints/brain.pt
 
 memory:
   require_strong_match_for_trade: false
+  modern_hopfield_enabled: true
   decision_fusion:
     enabled: false
     conflict_veto_threshold: 0.99
@@ -24,5 +33,9 @@ risk:
   kill_switch: false
   stale_data_sec: 180
   max_spread_bps: 200.0
-  min_trade_confidence: 0.05
-  min_trade_fraction: 0.001
+  # Trade gating is EV-based (risk_manager computes
+  # confidence * expected_gain_bps - (1-confidence) * expected_loss_bps - cost_bps).
+  # On an undertrained brain the risk head's MFE/MAE predictions are noise,
+  # so EV typically lands at 0 and the runtime correctly stays parked.
+  # This is the same "honest behaviour on an undertrained brain" that the
+  # old 0.55 min_trade_confidence achieved — just without a magic threshold.

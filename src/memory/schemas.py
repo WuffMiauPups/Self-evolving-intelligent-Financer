@@ -512,8 +512,274 @@ class MemoryDecisionSupport:
     calibrated_match_strength: float = 0.0
     retrieval_confidence: float = 0.0
     conflict_score: float = 0.0
+    retrieval_quality: float = 0.5  # adaptive: sigmoid(z-score) from RetrievalHealth
     context_vector: torch.Tensor | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RetrievalHealth:
+    """Running statistics from recent retrievals — the bank's homeostatic state.
+
+    Inspired by neural homeostasis: the system tracks its own retrieval
+    distribution and adapts gating sensitivity dynamically.  No fixed
+    thresholds — similarity quality is measured relative to the bank's
+    own observed distribution via z-score.
+
+    Updated incrementally on each retrieval via EMA (exponential moving
+    average) with rate ``adaptation_rate`` (default 0.01 = slow, stable).
+    """
+
+    similarity_ema: float = 0.5
+    similarity_sq_ema: float = 0.26  # E[sim^2], for variance = E[sim^2] - E[sim]^2
+    conflict_ema: float = 0.5
+    entropy_ema: float = 1.0
+    retrieval_count: int = 0
+    trade_rate_ema: float = 0.5
+    outcome_ema: float = 0.0
+    warmup: int = 100
+    outcome_similarity_adjustment: float = -0.1
+
+    @property
+    def similarity_var(self) -> float:
+        """Variance of observed similarities."""
+        return max(self.similarity_sq_ema - self.similarity_ema ** 2, 1e-6)
+
+    @property
+    def similarity_std(self) -> float:
+        return self.similarity_var ** 0.5
+
+    def update(self, *, similarity: float, conflict: float, entropy: float, alpha: float = 0.01) -> None:
+        """Update running statistics with a new retrieval observation."""
+        self.similarity_ema = alpha * similarity + (1 - alpha) * self.similarity_ema
+        self.similarity_sq_ema = alpha * (similarity ** 2) + (1 - alpha) * self.similarity_sq_ema
+        self.conflict_ema = alpha * conflict + (1 - alpha) * self.conflict_ema
+        self.entropy_ema = alpha * entropy + (1 - alpha) * self.entropy_ema
+        self.retrieval_count += 1
+
+    def update_trade_outcome(self, *, traded: bool, outcome: float = 0.0, alpha: float = 0.01) -> None:
+        """Update trade rate and outcome statistics after a risk decision."""
+        self.trade_rate_ema = alpha * float(traded) + (1 - alpha) * self.trade_rate_ema
+        if traded:
+            self.outcome_ema = alpha * outcome + (1 - alpha) * self.outcome_ema
+
+    def z_score(self, similarity: float) -> float:
+        """How many standard deviations above/below the running mean."""
+        z = (similarity - self.similarity_ema) / self.similarity_std
+        # Clamp to prevent extreme values when std is tiny (early session).
+        return max(-10.0, min(10.0, z))
+
+    def retrieval_quality(self, similarity: float) -> float:
+        """Sigmoid of z-score: continuous [0, 1] quality measure.
+
+        Above-average similarity → quality > 0.5 → support.
+        Below-average → quality < 0.5 → dampen.
+        Self-calibrating: adapts to whatever similarity range the bank produces.
+        """
+        import math
+        z = self.z_score(similarity)
+        if math.isnan(z) or math.isinf(z):
+            return 0.5
+        return 1.0 / (1.0 + math.exp(-z))
+
+    def adaptive_min_similarity(self, base: float = 0.75) -> float:
+        """Adjust min_similarity based on outcome history.
+
+        Positive outcomes -> lower threshold (trade more).
+        Negative outcomes -> higher threshold (be more selective).
+
+        Requires at least ``warmup`` retrievals before adjusting to avoid
+        premature adaptation during cold start.
+        """
+        if self.retrieval_count < self.warmup:
+            return base
+        adjustment = self.outcome_similarity_adjustment * self.outcome_ema
+        return max(0.5, min(0.9, base + adjustment))
+
+
+@dataclass
+class FusionHealth:
+    """Running statistics from fusion decisions — self-calibrating thresholds.
+
+    Mirrors RetrievalHealth: tracks the distribution of fusion scores and
+    dampen strengths via EMA. Thresholds are derived from z-scores of the
+    running distribution rather than fixed constants.
+
+    Updated after each fusion decision. During cold start (update_count < warmup),
+    falls back to config defaults.
+    """
+
+    # Fusion score distribution (from compute_adaptive_fusion geometric mean)
+    score_ema: float = 0.5
+    score_sq_ema: float = 0.26  # E[score^2], for variance
+    # Dampen strength distribution (from _resolve_level accumulator)
+    dampen_ema: float = 0.25
+    dampen_sq_ema: float = 0.10
+    # Trade outcome tracking
+    approved_outcome_ema: float = 0.0
+    vetoed_would_have_profited_ema: float = 0.0
+    # Counts
+    update_count: int = 0
+    warmup: int = 50
+    # Cold-start defaults (configurable via MemoryConfig)
+    cold_start_veto: float = 0.15
+    cold_start_support: float = 0.65
+    # Outcome-adjusted veto parameters
+    veto_profit_threshold: float = 0.01
+    veto_relax_factor: float = 0.9
+    veto_tighten_factor: float = 1.1
+    veto_loss_threshold: float = -0.005
+
+    @property
+    def score_var(self) -> float:
+        return max(self.score_sq_ema - self.score_ema ** 2, 1e-6)
+
+    @property
+    def score_std(self) -> float:
+        return self.score_var ** 0.5
+
+    @property
+    def dampen_var(self) -> float:
+        return max(self.dampen_sq_ema - self.dampen_ema ** 2, 1e-6)
+
+    @property
+    def dampen_std(self) -> float:
+        return self.dampen_var ** 0.5
+
+    @property
+    def warmed_up(self) -> bool:
+        return self.update_count >= self.warmup
+
+    def update(self, *, score: float, dampen_strength: float, alpha: float = 0.01) -> None:
+        """Update running statistics with a new fusion decision."""
+        self.score_ema = alpha * score + (1 - alpha) * self.score_ema
+        self.score_sq_ema = alpha * (score ** 2) + (1 - alpha) * self.score_sq_ema
+        self.dampen_ema = alpha * dampen_strength + (1 - alpha) * self.dampen_ema
+        self.dampen_sq_ema = alpha * (dampen_strength ** 2) + (1 - alpha) * self.dampen_sq_ema
+        self.update_count += 1
+
+    def update_outcome(self, *, approved: bool, outcome_pnl: float, alpha: float = 0.01) -> None:
+        """Track whether fusion decisions led to good outcomes."""
+        if approved:
+            self.approved_outcome_ema = alpha * outcome_pnl + (1 - alpha) * self.approved_outcome_ema
+        else:
+            profitable = max(outcome_pnl, 0.0)
+            self.vetoed_would_have_profited_ema = (
+                alpha * profitable + (1 - alpha) * self.vetoed_would_have_profited_ema
+            )
+
+    def score_z(self, score: float) -> float:
+        """Z-score of a fusion score relative to running distribution."""
+        z = (score - self.score_ema) / self.score_std
+        return max(-10.0, min(10.0, z))
+
+    def dampen_z(self, strength: float) -> float:
+        """Z-score of dampen strength relative to running distribution."""
+        z = (strength - self.dampen_ema) / self.dampen_std
+        return max(-10.0, min(10.0, z))
+
+    def adaptive_veto_threshold(self) -> float:
+        """Below this score -> veto. ~1 std below mean."""
+        if not self.warmed_up:
+            return self.cold_start_veto
+        return max(self.score_ema - self.score_std, 0.05)
+
+    def adaptive_dampen_threshold(self) -> float:
+        """Score between veto and this -> dampen."""
+        if not self.warmed_up:
+            return 0.40
+        return self.score_ema
+
+    def adaptive_support_threshold(self) -> float:
+        """Above this score -> support. ~1 std above mean."""
+        if not self.warmed_up:
+            return self.cold_start_support
+        return min(self.score_ema + self.score_std, 0.95)
+
+    def adaptive_dampen_strength_threshold(self) -> float:
+        """Dampen strength above this -> dampen level. ~1 std above mean."""
+        if not self.warmed_up:
+            return 0.5
+        return self.dampen_ema + self.dampen_std
+
+    def outcome_adjusted_veto_threshold(self, base: float = 0.15) -> float:
+        """Adjust veto threshold based on trade outcome history.
+
+        If vetoed trades would have been profitable -> lower threshold
+        (less vetoing).  If approved trades lost money -> raise
+        threshold (more vetoing).
+
+        Only adjusts after warmup to avoid cold-start instability.
+        """
+        if not self.warmed_up:
+            return base
+        adjusted = base
+        if self.vetoed_would_have_profited_ema > self.veto_profit_threshold:
+            adjusted *= self.veto_relax_factor
+        if self.approved_outcome_ema < self.veto_loss_threshold:
+            adjusted *= self.veto_tighten_factor
+        return max(0.05, min(adjusted, 0.40))
+
+
+@dataclass
+class TopologyHealth:
+    """Running statistics for topology growth decisions.
+
+    Tracks insertion success rate and self-tunes scoring weights
+    based on whether inserted units survive to maturity.
+    """
+
+    # Insertion outcome tracking
+    insertion_success_ema: float = 0.5  # did inserted units survive to mature?
+    insertion_count: int = 0
+    # Split outcome tracking
+    split_improved_coherence_ema: float = 0.5
+    split_count: int = 0
+    # Running weights (start at config defaults, adapt over time)
+    novelty_weight_ema: float = 0.5
+    sparsity_weight_ema: float = 0.3
+    support_weight_ema: float = 0.2
+    update_count: int = 0
+    warmup: int = 20
+
+    @property
+    def warmed_up(self) -> bool:
+        return self.update_count >= self.warmup
+
+    def update_insertion(self, *, survived_to_mature: bool, alpha: float = 0.02) -> None:
+        """Track whether an inserted candidate survived to maturity."""
+        self.insertion_success_ema = (
+            alpha * float(survived_to_mature) + (1 - alpha) * self.insertion_success_ema
+        )
+        self.insertion_count += 1
+        self.update_count += 1
+        if self.warmed_up:
+            self._adapt_weights()
+
+    def update_split(self, *, improved_coherence: bool, alpha: float = 0.02) -> None:
+        """Track whether a split improved unit coherence."""
+        self.split_improved_coherence_ema = (
+            alpha * float(improved_coherence) + (1 - alpha) * self.split_improved_coherence_ema
+        )
+        self.split_count += 1
+
+    def _adapt_weights(self) -> None:
+        """Self-tune insertion weights based on success rate.
+
+        If insertions rarely survive: shift weight from novelty toward support.
+        If insertions often survive: shift toward novelty (exploration).
+        """
+        survival = self.insertion_success_ema
+        # Linear interpolation: high survival -> more novelty, low -> more support
+        self.novelty_weight_ema = 0.3 + 0.4 * survival   # [0.3, 0.7]
+        self.sparsity_weight_ema = 0.3                     # stable
+        self.support_weight_ema = 1.0 - self.novelty_weight_ema - self.sparsity_weight_ema
+
+    def adaptive_weights(self, config_defaults: tuple[float, float, float] = (0.5, 0.3, 0.2)) -> tuple[float, float, float]:
+        """Return (novelty, sparsity, support) weights, self-tuned or config defaults."""
+        if not self.warmed_up:
+            return config_defaults
+        return (self.novelty_weight_ema, self.sparsity_weight_ema, self.support_weight_ema)
 
 
 @dataclass

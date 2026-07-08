@@ -8,6 +8,7 @@ Supports the state + future-path training design:
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from src.memory.schemas import OutcomeSummary
@@ -37,6 +38,45 @@ class TrainingTargets:
     drawdown: float
 
 
+def compute_symbol_epsilon(
+    bars: list,
+    *,
+    multiplier: float = 1.0,
+    min_epsilon: float = 1.0e-4,
+    max_epsilon: float = 5.0e-3,
+    min_bars: int = 20,
+) -> float:
+    """Compute adaptive label epsilon from per-bar log-return standard deviation.
+
+    Returns ``multiplier * std(log_returns)`` clamped to ``[min_epsilon, max_epsilon]``.
+    Falls back to ``min_epsilon`` if fewer than ``min_bars`` bars are available.
+
+    This replaces the static ``label_epsilon`` with a per-symbol threshold
+    that scales with the instrument's realized volatility.  Volatile symbols
+    (e.g. TSLA, MSTR) get a wider flat band; calm symbols (e.g. SPY, VOO)
+    get a tighter one.
+    """
+    if len(bars) < min_bars:
+        return min_epsilon
+    closes = []
+    for bar in bars:
+        c = getattr(bar, "close", None)
+        if c is not None and c > 0:
+            closes.append(float(c))
+    if len(closes) < min_bars:
+        return min_epsilon
+    log_returns = []
+    for i in range(1, len(closes)):
+        log_returns.append(math.log(closes[i] / closes[i - 1]))
+    if len(log_returns) < 10:
+        return min_epsilon
+    mean_ret = sum(log_returns) / len(log_returns)
+    variance = sum((r - mean_ret) ** 2 for r in log_returns) / len(log_returns)
+    std = variance ** 0.5
+    epsilon = multiplier * std
+    return max(min_epsilon, min(epsilon, max_epsilon))
+
+
 def build_training_targets(
     outcome: OutcomeSummary,
     *,
@@ -45,6 +85,7 @@ def build_training_targets(
     primary_horizon: int | None = None,
     enable_future_return_targets: bool = False,
     enable_risk_path_targets: bool = False,
+    transaction_cost_bps: float = 0.0,
 ) -> TrainingTargets:
     """Build training targets from an outcome summary.
 
@@ -55,16 +96,19 @@ def build_training_targets(
         primary_horizon: Primary direction horizon. If None, uses max horizon.
         enable_future_return_targets: If True, add per-horizon return regression targets.
         enable_risk_path_targets: If True, add MFE/MAE/volatility/drawdown regression targets.
+        transaction_cost_bps: Transaction cost in basis points.  Widens the
+            flat-band epsilon so moves smaller than the cost are labeled FLAT.
     """
     if primary_horizon is not None and primary_horizon in outcome.future_returns:
         effective_horizon = primary_horizon
     else:
         effective_horizon = max(outcome.future_returns)
     primary_return = float(outcome.future_returns[effective_horizon])
-    if primary_return > label_epsilon:
+    effective_epsilon = label_epsilon + (transaction_cost_bps / 10_000.0)
+    if primary_return > effective_epsilon:
         direction_label = 2
         direction_name = "long"
-    elif primary_return < -label_epsilon:
+    elif primary_return < -effective_epsilon:
         direction_label = 0
         direction_name = "short"
     else:
@@ -119,7 +163,12 @@ def _build_regression_targets(outcome: OutcomeSummary) -> dict[str, float]:
     drawdown = float(outcome.drawdown)
     realized_volatility = float(outcome.realized_volatility)
     denominator = abs(primary_return) + abs(drawdown) + realized_volatility + 1.0e-6
-    stability = abs(primary_return) / denominator
+    # Stability = how little of the total movement comes from adverse
+    # components (drawdown + volatility).  High return with low drawdown
+    # and low volatility → stability near 1.  Previously this was
+    # |return| / denom which just measured return dominance.
+    adverse = abs(drawdown) + realized_volatility
+    stability = max(1.0 - adverse / denominator, 0.0)
     return {
         "primary_return": primary_return,
         "max_favorable_excursion": float(outcome.max_favorable_excursion),

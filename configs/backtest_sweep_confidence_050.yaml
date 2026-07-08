@@ -1,0 +1,7 @@
+# Sweep: minimum trade confidence = 0.50 (looser than default 0.55).
+#
+# Part of a 3-point sweep with backtest_sweep_confidence_070.yaml and
+# the default (0.55).  Tests whether a lower confidence threshold lets
+# more profitable trades through or just adds noise.
+risk:
+  min_trade_confidence: 0.50

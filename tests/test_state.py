@@ -33,7 +33,9 @@ def test_brain_policy_resets_state_on_sequence_gap() -> None:
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
     )
     policy.propose(first_snapshot)
-    assert "AAPL" in policy.memory_state_by_symbol
+    # Post-Simplification: GRU memory gone, so memory_state_by_symbol stays
+    # empty. The timestamp-tracking path is what gates state-gap resets.
+    assert "AAPL" in policy.last_timestamp_by_symbol
     assert policy.request_seq_by_symbol["AAPL"] == 1
 
     _, diagnostics = policy.propose(second_snapshot)

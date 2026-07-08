@@ -30,6 +30,7 @@ Design rules:
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -77,14 +78,34 @@ class RuntimeStatusSnapshot:
 class RuntimeStatusWriter:
     """Best-effort append writer. Failures never raise into the trade loop."""
 
-    def __init__(self, path: Path | str = DEFAULT_RUNTIME_STATUS_PATH) -> None:
+    def __init__(
+        self,
+        path: Path | str = DEFAULT_RUNTIME_STATUS_PATH,
+        max_bytes: int = 50_000_000,
+        max_backups: int = 3,
+    ) -> None:
         self.path = Path(path)
+        self.max_bytes = max_bytes
+        self.max_backups = max_backups
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
 
+    def _maybe_rotate(self) -> None:
+        try:
+            if not self.path.exists() or self.path.stat().st_size < self.max_bytes:
+                return
+            backup = self.path.with_suffix(f".{int(time.time())}.bak")
+            self.path.rename(backup)
+            backups = sorted(self.path.parent.glob(f"{self.path.stem}.*.bak"), reverse=True)
+            for old in backups[self.max_backups:]:
+                old.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def write(self, snap: RuntimeStatusSnapshot) -> None:
+        self._maybe_rotate()
         try:
             with self.path.open("a", encoding="utf-8") as fp:
                 fp.write(snap.to_json_line() + "\n")

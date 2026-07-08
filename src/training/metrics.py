@@ -15,10 +15,8 @@ class BatchMetrics:
     classification_loss: float = 0.0
     regression_loss: float = 0.0
     latent_loss: float = 0.0
-    path_label_loss: float = 0.0
     future_return_loss: float = 0.0
     risk_path_loss: float = 0.0
-    path_label_accuracy: float = 0.0
     balanced_accuracy: float = 0.0
     macro_f1: float = 0.0
     weighted_f1: float = 0.0
@@ -29,6 +27,8 @@ class BatchMetrics:
     per_class_metrics: dict[str, dict[str, float]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     components: dict[str, float] = field(default_factory=dict)
+    grad_norm_mean: float = 0.0
+    grad_norm_max: float = 0.0
 
 
 def compute_classification_report(
@@ -170,6 +170,7 @@ def build_collapse_warnings(
     *,
     classification_report: dict[str, object],
     thresholds: dict[str, float],
+    flat_dominance_threshold: float = 0.75,
 ) -> list[str]:
     warnings: list[str] = []
     prediction_ratios = classification_report["prediction_ratios"]
@@ -187,7 +188,7 @@ def build_collapse_warnings(
         gap = abs(prediction_ratios.get(class_name, 0.0) - target_ratios.get(class_name, 0.0))
         if gap > 0.20:
             warnings.append(f"class_distribution_mismatch_warning:{class_name}={gap:.4f}")
-    if prediction_ratios.get("flat", 0.0) > 0.75:
+    if prediction_ratios.get("flat", 0.0) > flat_dominance_threshold:
         warnings.append(f"flat_dominance_warning:{prediction_ratios.get('flat', 0.0):.4f}")
     return warnings
 

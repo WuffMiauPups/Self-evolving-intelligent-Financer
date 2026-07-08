@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# STATUS: RESERVED — not wired into any active code path.
+# This module is scaffolding for future capability. It is tested but not
+# invoked by the training pipeline, runtime, or CLI entry points.
+
 from dataclasses import dataclass
 
 import torch

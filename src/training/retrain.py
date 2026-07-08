@@ -3,6 +3,10 @@
 Provides metadata tracking for retrain cycles: parent checkpoint lineage,
 retrain reasons, data ranges, and validation gates for safe retraining.
 """
+# STATUS: RESERVED — not wired into any active code path.
+# This module is scaffolding for future capability. It is tested but not
+# invoked by the training pipeline, runtime, or CLI entry points.
+
 from __future__ import annotations
 
 import json
@@ -41,7 +45,7 @@ class RetainMetadata:
 def build_retrain_id(parent_fingerprint: str | None, timestamp: datetime) -> str:
     """Generate a unique retrain cycle ID."""
     seed = f"{parent_fingerprint or 'genesis'}:{timestamp.isoformat()}"
-    return f"retrain-{sha1(seed.encode()).hexdigest()[:12]}"
+    return f"retrain-{sha1(seed.encode()).hexdigest()[:20]}"
 
 
 def build_retrain_metadata(
@@ -218,3 +222,22 @@ def validate_retrain_prerequisites(
         )
 
     return can_proceed, warnings
+
+
+def check_retrain_trigger(
+    *,
+    recent_metrics: dict[str, float],
+    baseline_metrics: dict[str, float],
+    drift_threshold: float = 0.15,
+) -> tuple[bool, str]:
+    """Check if performance has drifted enough to trigger a retrain.
+
+    Returns (should_retrain, reason).
+    """
+    sharpe_drop = baseline_metrics.get("sharpe_ratio", 0) - recent_metrics.get("sharpe_ratio", 0)
+    if sharpe_drop > drift_threshold:
+        return True, f"sharpe_drift_{sharpe_drop:.3f}"
+    win_rate_drop = baseline_metrics.get("win_rate", 0) - recent_metrics.get("win_rate", 0)
+    if win_rate_drop > drift_threshold:
+        return True, f"win_rate_drift_{win_rate_drop:.3f}"
+    return False, "no_drift"

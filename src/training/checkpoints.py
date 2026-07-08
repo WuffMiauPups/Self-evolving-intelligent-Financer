@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 def save_checkpoint(path: str | Path, *, model: torch.nn.Module, optimizer: torch.optim.Optimizer, meta: dict[str, Any]) -> None:
@@ -20,7 +23,11 @@ def save_checkpoint(path: str | Path, *, model: torch.nn.Module, optimizer: torc
 
 
 def load_checkpoint_payload(path: str | Path, *, map_location: str | torch.device = "cpu") -> dict[str, Any]:
-    return torch.load(path, map_location=map_location, weights_only=False)
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except Exception:
+        logger.warning("cache_load_legacy_format path=%s", str(path))
+        return torch.load(path, map_location=map_location, weights_only=False)
 
 
 def load_checkpoint(

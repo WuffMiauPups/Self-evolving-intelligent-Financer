@@ -1,0 +1,14 @@
+# Backtest preset: stricter decision fusion thresholds.
+#
+# Tightens the fusion gate so conflict dampens/vetoes fire more readily.
+# Expect fewer trades with higher average conviction.
+#
+# Delta vs default:
+#   conflict_veto_threshold:    0.70 -> 0.55
+#   conflict_dampen_threshold:  0.40 -> 0.30
+#   min_calibrated_match:       0.15 -> 0.25
+memory:
+  min_calibrated_match: 0.25
+  decision_fusion:
+    conflict_veto_threshold: 0.55
+    conflict_dampen_threshold: 0.30

@@ -1,0 +1,18 @@
+# Ablation sweep for the state-only baseline.
+#
+# Usage:
+#   python scripts/sweep_train.py --real-data --sweep-config configs/sweep_state_only.yaml
+#
+# This grid tests the most impactful hyperparameters for direction
+# classification quality without any auxiliary losses.
+# All runs automatically use the state-only preset (path-label,
+# future-return, risk-path disabled).
+
+# Preset applied to every run in this sweep
+preset: state-only
+
+sweep:
+  label_epsilon: [0.0003, 0.0005, 0.001]
+  classification_loss: ["focal", "cross_entropy"]
+  focal_gamma: [1.0, 1.5, 2.0]
+  class_weight_mode: ["balanced", "effective_number"]

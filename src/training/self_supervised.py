@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# STATUS: RESERVED — not wired into any active code path.
+# This module is scaffolding for future capability. It is tested but not
+# invoked by the training pipeline, runtime, or CLI entry points.
+
 from dataclasses import dataclass
 
 import torch
@@ -19,9 +23,13 @@ class SelfSupervisedSample:
 
 class NextFeatureDataset(Dataset[SelfSupervisedSample]):
     def __init__(self, samples: list[TrainingSample]) -> None:
+        # Only pair consecutive samples from the SAME symbol to avoid
+        # cross-symbol feature contamination (e.g. AAPL bar predicting
+        # MSFT features when samples are concatenated across symbols).
         self.items = [
             SelfSupervisedSample(current=samples[index], target_features=samples[index + 1].features)
             for index in range(len(samples) - 1)
+            if samples[index].symbol == samples[index + 1].symbol
         ]
 
     def __len__(self) -> int:

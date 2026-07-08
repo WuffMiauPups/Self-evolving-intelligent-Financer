@@ -23,7 +23,7 @@ from src.data.schemas import MarketBar
 from src.features.feature_pipeline import FeatureContract, FeaturePipeline
 from src.memory.outcomes import compute_outcome_summary
 from src.training.splits import SymbolSplit, build_symbol_splits
-from src.training.targets import build_training_targets
+from src.training.targets import build_training_targets, compute_symbol_epsilon
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,21 @@ def _prepare_symbol(
     feature_contract: FeatureContract | None = None
     total_samples = 0
 
+    # Adaptive epsilon: per-symbol return volatility.
+    # Use training-period bars ONLY to prevent future volatility leakage.
+    if config.training.adaptive_label_epsilon:
+        train_split_obj = next((s for s in symbol_splits if s.split == "train"), None)
+        train_end_idx = train_split_obj.end_index if train_split_obj else len(sorted_bars)
+        symbol_epsilon = compute_symbol_epsilon(
+            sorted_bars[:train_end_idx],
+            multiplier=config.training.adaptive_epsilon_multiplier,
+            min_epsilon=config.training.adaptive_epsilon_min,
+            max_epsilon=config.training.adaptive_epsilon_max,
+            min_bars=config.training.label_epsilon_min_bars,
+        )
+    else:
+        symbol_epsilon = config.training.label_epsilon
+
     cursor = 0
     for split in symbol_splits:
         split_indices = eligible_indices[cursor: cursor + split.sample_count]
@@ -98,8 +113,9 @@ def _prepare_symbol(
             )
             targets = build_training_targets(
                 outcome,
-                label_epsilon=config.training.label_epsilon,
+                label_epsilon=symbol_epsilon,
                 regression_targets=config.training.regression_targets,
+                transaction_cost_bps=config.training.transaction_cost_bps,
             )
             samples_by_split[split.split].append(
                 TrainingSample(
@@ -267,7 +283,11 @@ def load_prepared_samples(
     path = Path(path)
     if not path.exists():
         return None
-    payload = torch.load(path, map_location="cpu", weights_only=False)
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        logger.warning("cache_load_legacy_format path=%s", str(path))
+        payload = torch.load(path, map_location="cpu", weights_only=False)
     if payload.get("bars_fingerprint") != expected_fingerprint:
         logger.info(
             "prepared_samples_stale path=%s expected=%s got=%s",
