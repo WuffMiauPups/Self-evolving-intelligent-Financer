@@ -16,7 +16,9 @@ class PositionSizer:
         target_fraction: float,
         max_notional: float,
     ) -> float:
-        if price <= 0:
+        # equity <= 0 must size to zero, not flip the order direction via a
+        # negative notional.
+        if price <= 0 or equity <= 0:
             return 0.0
         target_notional = min(abs(target_fraction) * equity, max_notional)
         raw_qty = target_notional / price

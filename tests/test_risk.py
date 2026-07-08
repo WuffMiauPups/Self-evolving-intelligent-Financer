@@ -8,10 +8,10 @@ from src.risk.risk_manager import RiskManager
 
 
 def _ev_positive_proposal(**overrides) -> TradeProposal:
-    """Build a proposal whose EV easily clears fee+slippage.
+    """Build a proposal whose EV easily clears fee+slippage+spread.
 
-    With fee_bps=1.0 + slippage_bps=2.0 → cost=3.0.
-    0.9 * 30 - 0.1 * 10 - 3 = 27 - 1 - 3 = 23 bps > 0 → approved.
+    With fee_bps=1.0 + slippage_bps=2.0 + spread_bps=1.0 → cost=4.0.
+    0.9 * 30 - 0.1 * 10 - 4 = 27 - 1 - 4 = 22 bps > 0 → approved.
     """
     base = dict(
         symbol="AAPL",
@@ -92,12 +92,12 @@ def test_ev_gate_rejects_when_cost_exceeds_expected_edge() -> None:
     config = load_config("configs/default.yaml")
     # Inflate trading costs so even a high-edge trade loses money.
     config.risk.fee_bps = 50.0
-    config.risk.slippage_bps = 50.0  # total cost = 100 bps
+    config.risk.slippage_bps = 50.0  # total cost = 100 bps + 1 bps spread
     manager = RiskManager(config.risk)
     portfolio = PortfolioState(cash=100_000.0, equity=100_000.0)
     proposal = _ev_positive_proposal(
         request_id="ev-cost-dominates",
-        expected_gain_bps=20.0,  # 0.9 * 20 - 0.1 * 10 - 100 = 18 - 1 - 100 = -83
+        expected_gain_bps=20.0,  # 0.9 * 20 - 0.1 * 10 - 101 = 18 - 1 - 101 = -84
         expected_loss_bps=10.0,
     )
     decision = manager.evaluate(proposal, portfolio)
@@ -132,7 +132,7 @@ def test_ev_gate_approves_positive_ev() -> None:
         expected_gain_bps=30.0,
         expected_loss_bps=20.0,
     )
-    # 0.7 * 30 - 0.3 * 20 - 3 = 21 - 6 - 3 = 12 > 0 → approve
+    # 0.7 * 30 - 0.3 * 20 - 4 = 21 - 6 - 4 = 11 > 0 → approve
     decision = manager.evaluate(proposal, portfolio)
     assert decision.approved is True
     assert decision.quantity > 0

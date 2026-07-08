@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
+
+from src.core.time_utils import MARKET_TZ
 
 
 @dataclass
@@ -26,6 +28,7 @@ class PortfolioState:
     realized_pnl: float = 0.0
     daily_pnl: float = 0.0
     last_update: datetime | None = None
+    last_trading_date: date | None = None
     pnl_history: deque[float] = field(default_factory=lambda: deque(maxlen=10_000))
 
     @property
@@ -57,13 +60,27 @@ class PortfolioState:
         return self.positions.get(symbol)
 
     def mark_to_market(self, prices: dict[str, float], timestamp: datetime) -> None:
+        # daily_pnl resets at US/Eastern trading-day boundaries so
+        # max_daily_loss is a per-day budget, not a lifetime cumulative cap.
+        # (Broker mode re-anchors daily_pnl from broker equity each tick and
+        # simply overwrites this; the reset matters in backtest/sim mode.)
+        trading_date = timestamp.astimezone(MARKET_TZ).date()
+        if self.last_trading_date is not None and trading_date != self.last_trading_date:
+            self.daily_pnl = 0.0
+        self.last_trading_date = trading_date
         total_notional = 0.0
         for symbol, position in list(self.positions.items()):
             market_price = prices.get(symbol, position.market_price)
             position.market_price = market_price
             total_notional += position.qty * market_price
         self.equity = self.cash + total_notional
-        self.pnl_history.append(self.equity)
+        # Re-marks at the same timestamp (backtests mark twice per bar plus
+        # once per fill) revise the last sample instead of appending, so the
+        # rolling-drawdown window spans distinct bars, not duplicate marks.
+        if self.last_update is not None and timestamp == self.last_update and self.pnl_history:
+            self.pnl_history[-1] = self.equity
+        else:
+            self.pnl_history.append(self.equity)
         self.last_update = timestamp
 
     @property
