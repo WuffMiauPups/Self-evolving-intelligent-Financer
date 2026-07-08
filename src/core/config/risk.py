@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from src.core.exceptions import ConfigurationError
+from src.core.time_utils import SESSION_NAMES
 
 
 class RiskConfig(BaseModel):
@@ -25,3 +28,14 @@ class RiskConfig(BaseModel):
     rolling_drawdown_window: int = 100
     quantity_precision: float = 0.001
     max_processed_request_ids: int = 100_000
+
+    @field_validator("allowed_sessions")
+    @classmethod
+    def validate_allowed_sessions(cls, value: list[str]) -> list[str]:
+        unknown = sorted({name for name in value if name.lower() not in SESSION_NAMES})
+        if unknown:
+            raise ConfigurationError(
+                f"Unknown session name(s) {unknown} in risk.allowed_sessions; "
+                f"known sessions: {sorted(SESSION_NAMES)}"
+            )
+        return value

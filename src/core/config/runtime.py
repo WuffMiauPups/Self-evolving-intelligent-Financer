@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from src.core.exceptions import ConfigurationError
+from src.core.time_utils import SESSION_NAMES
 
 
 class RuntimeConfig(BaseModel):
@@ -43,3 +46,14 @@ class RuntimeConfig(BaseModel):
     default_target_fraction: float = 0.05
     # --- Parallelism ---
     max_parallel_workers: int = 8
+
+    @field_validator("allowed_sessions")
+    @classmethod
+    def validate_allowed_sessions(cls, value: list[str]) -> list[str]:
+        unknown = sorted({name for name in value if name.lower() not in SESSION_NAMES})
+        if unknown:
+            raise ConfigurationError(
+                f"Unknown session name(s) {unknown} in runtime.allowed_sessions; "
+                f"known sessions: {sorted(SESSION_NAMES)}"
+            )
+        return value
