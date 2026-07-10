@@ -161,8 +161,7 @@ def test_next_open_fills_use_next_bars_open() -> None:
     config.backtest.slippage_bps = 0.0
     config.backtest.fee_bps = 0.0
     bars = generate_synthetic_bars("AAPL", 240)
-    open_by_ts = {bar.timestamp: float(bar.open) for bar in bars}
-    close_by_ts = {bar.timestamp: float(bar.close) for bar in bars}
+    bar_by_ts = {bar.timestamp: bar for bar in bars}
     engine = BacktestEngine(
         config,
         FeaturePipeline(config.features, device=torch.device("cpu")),
@@ -171,11 +170,12 @@ def test_next_open_fills_use_next_bars_open() -> None:
     report = engine.run({"AAPL": bars}, BuyAndHoldPolicy())
     assert report.fills, "buy-and-hold must trade through the EV gate"
     for fill in report.fills:
-        assert fill.price == pytest.approx(open_by_ts[fill.timestamp]), (
-            "next_open fill must execute at the fill bar's OPEN"
-        )
-        assert fill.price != pytest.approx(close_by_ts[fill.timestamp]) or (
-            open_by_ts[fill.timestamp] == close_by_ts[fill.timestamp]
+        bar = bar_by_ts[fill.timestamp]
+        # Fills cross half the quoted spread each way on the fill bar's open.
+        half = float(bar.spread) / 2.0
+        expected = float(bar.open) + (half if fill.side == "buy" else -half)
+        assert fill.price == pytest.approx(expected), (
+            "next_open fill must execute at the fill bar's OPEN +/- half-spread"
         )
 
 
