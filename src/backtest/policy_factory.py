@@ -249,12 +249,16 @@ def build_brain_memory_policy(
     updater: AssociativeMemoryUpdater | None = None
     _ = AssociativeMemoryUpdater  # keep import referenced for type hints
 
-    # Platt calibrator (load from disk if available)
+    # Platt calibrator: resolve the artifact next to the loaded checkpoint
+    # and verify it was fitted for that checkpoint (fingerprint binding).
+    # Mismatch degrades to the uncalibrated passthrough, never raises.
     _platt_calibrator = None
     if config.training.platt_calibration_enabled:
-        from src.training.platt_calibration import PlattCalibrator
-        _platt_calibrator = PlattCalibrator()
-        _platt_calibrator.load(Path("runs/platt_calibration.json"))
+        from src.training.platt_calibration import load_calibrator_for_checkpoint
+        _platt_calibrator = load_calibrator_for_checkpoint(
+            config.model.checkpoint_path,
+            expected_fingerprint=artifacts.encoder_fingerprint,
+        )
 
     policy = MemoryAwarePolicy(
         base_policy=brain_policy,

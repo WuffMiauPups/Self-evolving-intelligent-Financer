@@ -485,12 +485,18 @@ def run_supervised_training(
 
     # --- Platt calibration fitting ---
     if config.training.platt_calibration_enabled:
-        from src.training.platt_calibration import PlattCalibrator
+        from src.training.checkpoints import load_checkpoint_payload
+        from src.training.platt_calibration import (
+            PlattCalibrator,
+            direction_aware_outcomes,
+            platt_calibration_path_for_checkpoint,
+        )
         import numpy as np
 
         model.eval()
         all_confidences: list[float] = []
         all_primary_returns: list[float] = []
+        all_predicted_actions: list[int] = []
         with torch.no_grad():
             for batch in bundle.val_loader:
                 batch_on_device = move_batch_to_device(batch, device_ctx.device)
@@ -502,23 +508,52 @@ def run_supervised_training(
                         temporal_tensor=batch_on_device.get("temporal_tensor"),
                     )
                 all_confidences.extend(output.confidence.cpu().numpy().flatten().tolist())
+                all_predicted_actions.extend(
+                    output.action_logits.argmax(dim=-1).cpu().numpy().flatten().tolist()
+                )
                 reg_targets = batch.get("regression_targets", {})
                 if "primary_return" in reg_targets:
                     all_primary_returns.extend(
                         reg_targets["primary_return"].cpu().numpy().flatten().tolist()
                     )
         if len(all_confidences) >= 20 and len(all_primary_returns) == len(all_confidences):
-            calibrator = PlattCalibrator()
-            calibrator.fit(np.array(all_confidences), np.array(all_primary_returns))
-            platt_path = Path(config.training.runs_dir) / "platt_calibration.json"
-            calibrator.save(platt_path)
-            logger.info(
-                "platt_calibration_fitted",
-                a=calibrator.a,
-                b=calibrator.b,
-                n=calibrator.n_samples,
-                path=str(platt_path),
+            # Direction-aware labels: fit on predicted_sign x realized return
+            # net of costs so calibrated confidence approximates P(chosen
+            # direction wins), not P(price up) — direction-agnostic labels
+            # were anti-calibrated for shorts. FLAT predictions place no
+            # trade and are excluded from the fit.
+            traded_mask, net_outcomes = direction_aware_outcomes(
+                np.array(all_predicted_actions),
+                np.array(all_primary_returns),
+                per_trade_cost=config.training.transaction_cost_bps / 10_000.0,
             )
+            calibrator = PlattCalibrator()
+            calibrator.fit(np.array(all_confidences)[traded_mask], net_outcomes[traded_mask])
+            if calibrator.is_fitted:
+                # Bind the artifact to the checkpoint it calibrates and write
+                # it next to that checkpoint — isolated runs keep it inside
+                # their run dir, so experiments never clobber the canonical
+                # calibrator the runtime loads.
+                saved_meta = load_checkpoint_payload(checkpoint_path).get("meta", {})
+                calibrator.encoder_fingerprint = saved_meta.get("encoder_fingerprint")
+                calibrator.checkpoint_filename = checkpoint_filename
+                platt_path = platt_calibration_path_for_checkpoint(checkpoint_path)
+                calibrator.save(platt_path)
+                logger.info(
+                    "platt_calibration_fitted",
+                    a=calibrator.a,
+                    b=calibrator.b,
+                    n=calibrator.n_samples,
+                    n_flat_excluded=int(len(all_confidences) - int(traded_mask.sum())),
+                    encoder_fingerprint=calibrator.encoder_fingerprint,
+                    path=str(platt_path),
+                )
+            else:
+                logger.warning(
+                    "platt_calibration_skipped",
+                    n_traded=int(traded_mask.sum()),
+                    reason="insufficient_traded_samples",
+                )
         else:
             logger.warning(
                 "platt_calibration_skipped",

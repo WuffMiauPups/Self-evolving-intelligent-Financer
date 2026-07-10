@@ -1,16 +1,126 @@
 """Platt scaling for confidence calibration.
 
 Transforms raw confidence scores into calibrated probabilities.
-P(profitable) = sigmoid(a * raw_confidence + b)
+P(chosen direction profitable) = sigmoid(a * raw_confidence + b)
 Parameters a, b fitted by gradient descent on historical predictions.
+
+The fitted artifact is bound to the checkpoint it calibrates: it is written
+next to the checkpoint file (``<checkpoint dir>/platt_calibration.json``)
+and records that checkpoint's ``encoder_fingerprint``.  Loaders resolve the
+artifact relative to the checkpoint being loaded and refuse a fingerprint
+mismatch (falling back to the uncalibrated passthrough — never crashing the
+runtime).
 """
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# Canonical artifact filename. The calibrator always sits NEXT TO the
+# checkpoint it was fitted for, so isolated experiment runs keep their
+# calibrator inside their run dir and never clobber the canonical one.
+PLATT_CALIBRATION_FILENAME = "platt_calibration.json"
+
+# Direction-label indices (mirrors src/training/targets.py).
+_DIRECTION_FLAT = 1
+_DIRECTION_LONG = 2
+
+
+def platt_calibration_path_for_checkpoint(checkpoint_path: Path | str) -> Path:
+    """Resolve the calibrator artifact path for a given checkpoint."""
+    return Path(checkpoint_path).parent / PLATT_CALIBRATION_FILENAME
+
+
+def direction_aware_outcomes(
+    predicted_actions: np.ndarray,
+    primary_returns: np.ndarray,
+    *,
+    per_trade_cost: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-trade net outcomes for direction-aware Platt labels.
+
+    Calibrated confidence must approximate P(chosen direction wins), not
+    P(price up) — a correct SHORT call is a win even though the price fell.
+    Outcome = predicted_sign x realized_return - per_trade_cost.  FLAT
+    predictions place no trade and are masked out of the fit.
+
+    Args:
+        predicted_actions: (N,) direction classes (0=short, 1=flat, 2=long).
+        primary_returns: (N,) realized primary-horizon returns.
+        per_trade_cost: fractional round-trip cost (``transaction_cost_bps / 10_000``).
+
+    Returns:
+        ``(traded_mask, net_outcomes)`` — both (N,); only entries where
+        ``traded_mask`` is True belong in the fit.
+    """
+    predicted_actions = np.asarray(predicted_actions)
+    primary_returns = np.asarray(primary_returns, dtype=np.float64)
+    traded_mask = predicted_actions != _DIRECTION_FLAT
+    predicted_sign = np.where(predicted_actions == _DIRECTION_LONG, 1.0, -1.0)
+    return traded_mask, predicted_sign * primary_returns - per_trade_cost
+
+
+def load_calibrator_for_checkpoint(
+    checkpoint_path: Path | str | None,
+    *,
+    expected_fingerprint: str | None,
+) -> PlattCalibrator:
+    """Load the calibrator bound to ``checkpoint_path``.
+
+    Resolves ``platt_calibration.json`` next to the checkpoint and verifies
+    the stored encoder fingerprint against the loaded checkpoint's.  Any
+    problem degrades to an unfitted passthrough calibrator (never raises —
+    a stale calibration artifact must not take down the runtime):
+
+    * missing file / no checkpoint path → passthrough
+    * fingerprint mismatch              → passthrough with a warning (refit required)
+    * legacy file without a fingerprint → loads, with a warning (unverifiable)
+    """
+    calibrator = PlattCalibrator()
+    if not checkpoint_path:
+        logger.warning("platt_load_skipped reason=no_checkpoint_path")
+        return calibrator
+    path = platt_calibration_path_for_checkpoint(checkpoint_path)
+    if not path.exists():
+        logger.info(
+            "platt_calibrator_missing path=%s (uncalibrated passthrough)", path
+        )
+        return calibrator
+    calibrator.load(path)
+    if not calibrator.is_fitted:
+        return calibrator
+    if calibrator.encoder_fingerprint is None:
+        logger.warning(
+            "platt_calibrator_legacy path=%s has no encoder_fingerprint; cannot "
+            "verify it matches checkpoint %s — loading anyway (refit to bind it)",
+            path,
+            checkpoint_path,
+        )
+        return calibrator
+    if expected_fingerprint is None:
+        logger.warning(
+            "platt_calibrator_unverified path=%s: checkpoint %s has no "
+            "encoder_fingerprint — loading anyway",
+            path,
+            checkpoint_path,
+        )
+        return calibrator
+    if calibrator.encoder_fingerprint != expected_fingerprint:
+        logger.warning(
+            "platt_calibrator_fingerprint_mismatch path=%s stored=%s checkpoint=%s "
+            "— refusing stale calibration, falling back to uncalibrated passthrough",
+            path,
+            calibrator.encoder_fingerprint,
+            expected_fingerprint,
+        )
+        return PlattCalibrator()
+    return calibrator
 
 
 @dataclass
@@ -21,6 +131,10 @@ class PlattCalibrator:
     b: float = 0.0
     is_fitted: bool = False
     n_samples: int = 0
+    # Provenance: the checkpoint this calibrator was fitted for. ``None`` on
+    # legacy artifacts written before fingerprint binding.
+    encoder_fingerprint: str | None = None
+    checkpoint_filename: str | None = None
 
     def calibrate(self, raw_confidence: float) -> float:
         """Apply calibration. Passthrough if not fitted."""
@@ -83,15 +197,26 @@ class PlattCalibrator:
         return float(np.mean((cal_probs - labels) ** 2))
 
     def to_dict(self) -> dict:
-        return {"a": self.a, "b": self.b, "is_fitted": self.is_fitted, "n_samples": self.n_samples}
+        return {
+            "a": self.a,
+            "b": self.b,
+            "is_fitted": self.is_fitted,
+            "n_samples": self.n_samples,
+            "encoder_fingerprint": self.encoder_fingerprint,
+            "checkpoint_filename": self.checkpoint_filename,
+        }
 
     @classmethod
     def from_dict(cls, d: dict) -> PlattCalibrator:
+        fingerprint = d.get("encoder_fingerprint")
+        checkpoint_filename = d.get("checkpoint_filename")
         return cls(
             a=float(d.get("a", 1.0)),
             b=float(d.get("b", 0.0)),
             is_fitted=bool(d.get("is_fitted", False)),
             n_samples=int(d.get("n_samples", 0)),
+            encoder_fingerprint=None if fingerprint is None else str(fingerprint),
+            checkpoint_filename=None if checkpoint_filename is None else str(checkpoint_filename),
         )
 
     def save(self, path: Path | str) -> None:
@@ -106,7 +231,10 @@ class PlattCalibrator:
             return
         with open(path) as f:
             d = json.load(f)
-        self.a = float(d.get("a", 1.0))
-        self.b = float(d.get("b", 0.0))
-        self.is_fitted = bool(d.get("is_fitted", False))
-        self.n_samples = int(d.get("n_samples", 0))
+        loaded = PlattCalibrator.from_dict(d)
+        self.a = loaded.a
+        self.b = loaded.b
+        self.is_fitted = loaded.is_fitted
+        self.n_samples = loaded.n_samples
+        self.encoder_fingerprint = loaded.encoder_fingerprint
+        self.checkpoint_filename = loaded.checkpoint_filename
