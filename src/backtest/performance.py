@@ -12,6 +12,14 @@ class BacktestReport:
     metrics: dict[str, float]
     equity_curve: list[float]
     fills: list[FillRecord]
+    # Per-proposal record (symbol, timestamp, bar_index, action,
+    # confidence) — lets the benchmark grade directional accuracy against
+    # realized forward returns without re-running the policy.
+    decision_log: list[dict[str, object]] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.decision_log is None:
+            self.decision_log = []
 
 
 def compute_backtest_metrics(
@@ -72,9 +80,20 @@ def compute_backtest_metrics(
     if bar_returns:
         mean_ret = sum(bar_returns) / len(bar_returns)
         downside_sq = [r ** 2 for r in bar_returns if r < 0]
-        downside_dev = math.sqrt(sum(downside_sq) / max(len(downside_sq), 1)) if downside_sq else 0.0
+        # Downside deviation divides by ALL observations, not just the
+        # negative ones — dividing by the loss count overstated the
+        # deviation (and understated Sortino) in proportion to how rarely
+        # the strategy lost.
+        downside_dev = math.sqrt(sum(downside_sq) / len(bar_returns)) if downside_sq else 0.0
         if downside_dev > 1e-12:
             sortino_ratio = (mean_ret / downside_dev) * math.sqrt(bars_per_year)
+
+    # --- CVaR 95 (expected shortfall of per-bar returns) ---
+    cvar_95 = 0.0
+    if bar_returns:
+        tail_count = max(1, int(math.ceil(len(bar_returns) * 0.05)))
+        worst = sorted(bar_returns)[:tail_count]
+        cvar_95 = sum(worst) / len(worst)
 
     # --- CAGR ---
     n_bars = len(equity_curve)
@@ -96,7 +115,12 @@ def compute_backtest_metrics(
 
     gross_profit = sum(pnl for pnl in realized if pnl > 0)
     gross_loss = abs(sum(pnl for pnl in realized if pnl < 0))
-    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
+    if gross_loss > 0:
+        profit_factor = gross_profit / gross_loss
+    else:
+        # No losing trades: report a large finite sentinel instead of 0.0,
+        # which ranked all-winning strategies WORST in comparisons.
+        profit_factor = 999.0 if gross_profit > 0 else 0.0
 
     avg_return_per_trade = sum(realized) / len(realized) if realized else 0.0
     avg_win = gross_profit / wins if wins > 0 else 0.0
@@ -124,14 +148,20 @@ def compute_backtest_metrics(
     round_trip_count = 0
     round_trip_wins = 0
     total_holding_bars = 0.0
+    prev_net_by_symbol: dict[str, float] = defaultdict(float)
     for fill in fills:
         tracker = position_tracker[fill.symbol]
         tracker.append(fill)
-        # Simple heuristic: a round trip closes when net position flips
         net_qty = sum(
             f.quantity if f.side == "buy" else -f.quantity for f in tracker
         )
-        if abs(net_qty) < 1e-9:
+        # A round trip closes when the net position returns to zero OR
+        # flips sign (long -> short in one fill previously never closed
+        # the long trip, undercounting trips and inflating holding times).
+        prev_net = prev_net_by_symbol[fill.symbol]
+        prev_net_by_symbol[fill.symbol] = net_qty
+        sign_flip = prev_net != 0.0 and net_qty != 0.0 and (prev_net > 0) != (net_qty > 0)
+        if abs(net_qty) < 1e-9 or sign_flip:
             round_trip_count += 1
             # Sum realized PnL across all fills that made up this round trip.
             # A winning round trip has net positive realized PnL (post-fee).
@@ -162,6 +192,7 @@ def compute_backtest_metrics(
         "max_drawdown": max_drawdown,
         "sharpe_ratio": sharpe_ratio,
         "sortino_ratio": sortino_ratio,
+        "cvar_95": cvar_95,
         "calmar_ratio": calmar_ratio,
         "win_rate": win_rate,
         "profit_factor": profit_factor,

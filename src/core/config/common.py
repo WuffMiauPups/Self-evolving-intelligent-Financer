@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from src.core.exceptions import ConfigurationError
 
 
 class LoggingConfig(BaseModel):
@@ -45,8 +47,19 @@ class BacktestConfig(BaseModel):
     initial_cash: float = 100000.0
     fee_bps: float = 1.0
     slippage_bps: float = 2.0
+    # Fill timing: a decision made on bar t cannot execute at the very
+    # close it just observed. "next_open" (default) fills at bar t+1's
+    # open; "same_close" keeps the legacy optimistic fill for comparisons.
+    fill_timing: str = "next_open"
     bars_per_year: int = 19656  # 252 trading days * 78 five-min bars
     seconds_per_bar: float = 300.0
+
+    @field_validator("fill_timing")
+    @classmethod
+    def _validate_fill_timing(cls, value: str) -> str:
+        if value not in {"next_open", "same_close"}:
+            raise ConfigurationError("backtest.fill_timing must be one of: next_open, same_close")
+        return value
 
 
 class ExecutionConfig(BaseModel):

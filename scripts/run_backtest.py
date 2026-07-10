@@ -87,21 +87,11 @@ def _make_memory_aware_policy(
     )
 
 
-def _collect_fusion_counts(policy: object, metrics: dict[str, float]) -> dict[str, float]:
-    """Merge memory-policy diagnostic snapshot into metrics.
-
-    Post-Great-Simplification the fusion layer is gone; ``vetoed_count`` /
-    ``dampened_count`` / ``supported_count`` / ``neutral_count`` no longer
-    exist on ``MemoryAwarePolicy``. The reporter still prints the labels
-    so we just leave them at zero.
-    """
+def _collect_memory_diagnostics(policy: object, metrics: dict[str, float]) -> dict[str, float]:
+    """Merge the memory policy's diagnostic snapshot into metrics."""
     if not isinstance(policy, MemoryAwarePolicy):
         return metrics
     metrics = dict(metrics)
-    metrics["fusion_veto_count"] = 0.0
-    metrics["fusion_dampen_count"] = 0.0
-    metrics["fusion_support_count"] = 0.0
-    metrics["fusion_neutral_count"] = 0.0
     snap = getattr(policy, "metrics_snapshot", lambda: {})()
     metrics.update({k: v for k, v in snap.items() if k not in metrics})
     return metrics
@@ -178,6 +168,14 @@ def main() -> int:
         action="store_true",
         help="Run walk-forward cross-validation instead of a single contiguous backtest.",
     )
+    parser.add_argument(
+        "--allow-in-sample",
+        action="store_true",
+        help=(
+            "Permit evaluation on bars inside the checkpoint's training/validation "
+            "range. Results are tagged IN-SAMPLE and must not be used for promotion."
+        ),
+    )
     args = parser.parse_args()
     # argparse action='append' appends to a non-None default instead of
     # replacing it, so the default stack is applied post-parse.
@@ -192,6 +190,17 @@ def main() -> int:
             config.memory.runtime_update_mode = "append_when_ready"
     use_real_data = args.real_data or config.training.use_real_historical_data
     bars_by_symbol = _load_bars_by_symbol(config, use_real_data=use_real_data, allow_mock=args.allow_mock)
+    # Out-of-sample by default: evaluating a checkpoint on its own
+    # training/validation window measures memorization, not edge.
+    from src.evaluation.oos import enforce_out_of_sample
+
+    bars_by_symbol, in_sample_tagged = enforce_out_of_sample(
+        bars_by_symbol,
+        checkpoint_path=config.model.checkpoint_path or None,
+        allow_in_sample=args.allow_in_sample,
+    )
+    if in_sample_tagged:
+        print("\n  *** IN-SAMPLE EVALUATION - results overlap the checkpoint's training data ***\n")
     pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
 
     if args.walk_forward:
@@ -242,108 +251,57 @@ def main() -> int:
         return 0
 
     if args.compare:
-        # ── Scenario 1: Baseline (no fusion, no memory) ──────────────────────
-        baseline_engine = BacktestEngine(config, pipeline, RiskManager(config.risk.model_copy()))
-        baseline_report = baseline_engine.run(bars_by_symbol, BaselineMomentumPolicy())
-        _print_report("1. BASELINE (no fusion, no memory)", baseline_report.metrics)
-
-        # Build shared model artifacts once
-        sample_symbol = next(iter(bars_by_symbol))
-        sample_snapshot = pipeline.build(
-            bars_by_symbol[sample_symbol][: config.runtime.warmup_bars + 1],
-            symbol=sample_symbol,
-        )
-        artifacts = resolve_inference_model(
-            model_config=config.model,
-            feature_config=config.features,
-            feature_contract=sample_snapshot.contract,
-            device=torch.device("cpu"),
-            default_model_kind="brain",
+        # Post-simplification comparison: the deleted fusion/VETO layer's
+        # scenarios and hardwired zero counts are gone. Every policy is
+        # built via the shared factory so scenarios differ by exactly one
+        # ingredient.
+        from src.backtest.policy_factory import (
+            build_baseline_policy,
+            build_brain_memory_policy,
+            build_brain_policy,
+            build_buy_and_hold_policy,
         )
 
-        # ── Scenario 2: Fusion ON, Memory OFF ────────────────────────────────
-        brain2 = BrainPolicy(
-            model=artifacts.model,
-            device=torch.device("cpu"),
-            feature_contract=artifacts.feature_contract,
-            normalization=artifacts.normalization,
-            max_state_gap_sec=config.runtime.state_reset_gap_sec,
-        )
-        policy2 = _make_memory_aware_policy(
-            brain2, config, artifacts, bars_by_symbol, pipeline,
-            enable_memory=False,
-        )
-        engine2 = BacktestEngine(config, pipeline, RiskManager(config.risk.model_copy()))
-        report2 = engine2.run(bars_by_symbol, policy2)
-        metrics2 = _collect_fusion_counts(policy2, report2.metrics)
-        _print_report("2. FUSION ON, memory off", metrics2)
+        scenarios: list[tuple[str, object]] = [
+            ("momentum baseline", build_baseline_policy()),
+            ("buy & hold", build_buy_and_hold_policy()),
+            ("brain", build_brain_policy(config, bars_by_symbol=bars_by_symbol, pipeline=pipeline)),
+        ]
+        if config.memory.enabled:
+            scenarios.append(
+                (
+                    "brain + memory diagnostics",
+                    build_brain_memory_policy(config, bars_by_symbol=bars_by_symbol, pipeline=pipeline),
+                )
+            )
+        reports: list[tuple[str, dict[str, float]]] = []
+        for label, policy in scenarios:
+            engine = BacktestEngine(config, pipeline, RiskManager(config.risk.model_copy()))
+            report = engine.run(bars_by_symbol, policy)
+            reports.append((label, report.metrics))
+            _print_report(label, report.metrics)
 
-        # ── Scenario 3: Fusion ON, Memory ON ─────────────────────────────────
-        brain3 = BrainPolicy(
-            model=artifacts.model,
-            device=torch.device("cpu"),
-            feature_contract=artifacts.feature_contract,
-            normalization=artifacts.normalization,
-            max_state_gap_sec=config.runtime.state_reset_gap_sec,
-        )
-        policy3 = _make_memory_aware_policy(
-            brain3, config, artifacts, bars_by_symbol, pipeline,
-            enable_memory=True,
-        )
-        engine3 = BacktestEngine(config, pipeline, RiskManager(config.risk.model_copy()))
-        report3 = engine3.run(bars_by_symbol, policy3)
-        metrics3 = _collect_fusion_counts(policy3, report3.metrics)
-        _print_report("3. FUSION ON + MEMORY ON", metrics3)
-
-        # ── Scenario 4: Fusion ON, Memory ON, Conservative thresholds + logging ──
-        brain4 = BrainPolicy(
-            model=artifacts.model,
-            device=torch.device("cpu"),
-            feature_contract=artifacts.feature_contract,
-            normalization=artifacts.normalization,
-            max_state_gap_sec=config.runtime.state_reset_gap_sec,
-        )
-        policy4 = _make_memory_aware_policy(
-            brain4, config, artifacts, bars_by_symbol, pipeline,
-            enable_memory=True,
-            conservative_thresholds=True,
-            verbose_fusion=True,
-        )
-        engine4 = BacktestEngine(config, pipeline, RiskManager(config.risk.model_copy()))
-        report4 = engine4.run(bars_by_symbol, policy4)
-        metrics4 = _collect_fusion_counts(policy4, report4.metrics)
-        _print_report("4. FUSION ON + MEMORY ON + CONSERVATIVE THRESHOLDS", metrics4)
-
-        # ── Side-by-side summary ──────────────────────────────────────────────
         print(f"\n{'='*60}")
         print("  COMPARISON SUMMARY")
         print(f"{'='*60}")
-        headers = ["Metric", "Baseline", "Fusion", "Fusion+Mem", "Conservative"]
-        rows = [
-            ("total_return",       "total_return"),
-            ("max_drawdown",       "max_drawdown"),
-            ("fills",              "fill_count"),
-            ("profit_factor",      "profit_factor"),
-            ("expectancy",         "expectancy"),
-            ("avg_ret/trade",      "avg_return_per_trade"),
-            ("veto_count",         "fusion_veto_count"),
-            ("dampen_count",       "fusion_dampen_count"),
-            ("support_count",      "fusion_support_count"),
-            ("neutral_count",      "fusion_neutral_count"),
-        ]
-        all_metrics = [baseline_report.metrics, metrics2, metrics3, metrics4]
-        col_w = 13
-        print(f"  {'Metric':<20}" + "".join(f"{h:>{col_w}}" for h in headers[1:]))
-        print(f"  {'-'*20}" + "-" * (col_w * 4))
-        for display, key in rows:
-            vals = [m.get(key, 0.0) for m in all_metrics]
-            if key in ("fill_count", "fusion_veto_count", "fusion_dampen_count",
-                       "fusion_support_count", "fusion_neutral_count"):
+        col_w = 15
+        print(f"  {'Metric':<20}" + "".join(f"{label[:col_w-1]:>{col_w}}" for label, _ in reports))
+        print(f"  {'-'*20}" + "-" * (col_w * len(reports)))
+        for display, key in [
+            ("total_return", "total_return"),
+            ("max_drawdown", "max_drawdown"),
+            ("sharpe_ratio", "sharpe_ratio"),
+            ("cvar_95", "cvar_95"),
+            ("fills", "fill_count"),
+            ("profit_factor", "profit_factor"),
+            ("expectancy", "expectancy"),
+        ]:
+            vals = [m.get(key, 0.0) for _, m in reports]
+            if key == "fill_count":
                 row = "".join(f"{int(v):>{col_w}}" for v in vals)
             else:
                 row = "".join(f"{v:>{col_w}.4f}" for v in vals)
             print(f"  {display:<20}{row}")
-
         return 0
 
     # ── Original single-scenario path ─────────────────────────────────────────
@@ -378,7 +336,7 @@ def main() -> int:
     brain_engine = BacktestEngine(config, pipeline, RiskManager(config.risk.model_copy()))
     brain_report = brain_engine.run(bars_by_symbol, brain_policy)
     label = f"{artifacts.model_kind}_{'checkpoint' if config.model.checkpoint_path else 'untrained'}"
-    metrics = _collect_fusion_counts(brain_policy, brain_report.metrics)
+    metrics = _collect_memory_diagnostics(brain_policy, brain_report.metrics)
     _print_report(label, metrics)
     return 0
 

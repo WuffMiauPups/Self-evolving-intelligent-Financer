@@ -290,9 +290,20 @@ def _aggregate_metrics(
     """Compute aggregate statistics across folds for each metric.
 
     Returns a dict of {metric_name: {mean, std, median, min, max, count}}.
+    Degenerate folds (zero fills — the policy never traded, typically a
+    too-short test slice) are excluded from aggregation instead of
+    contributing all-zero metrics that drag every mean toward zero; the
+    excluded count is reported under ``degenerate_folds``.
     """
     if not fold_results:
         return {}
+
+    degenerate = sum(
+        1 for fr in fold_results if fr.test_metrics.get("fill_count", 0.0) <= 0
+    )
+    active = [fr for fr in fold_results if fr.test_metrics.get("fill_count", 0.0) > 0]
+    if active:
+        fold_results = active
 
     # Collect all metric keys across folds
     all_keys: set[str] = set()
@@ -324,4 +335,14 @@ def _aggregate_metrics(
             "profitable_folds": float(sum(1 for v in values if v > 0)) if key == "total_return" else 0.0,
         }
 
+    if degenerate:
+        aggregate["degenerate_folds"] = {
+            "mean": float(degenerate),
+            "std": 0.0,
+            "median": float(degenerate),
+            "min": float(degenerate),
+            "max": float(degenerate),
+            "count": float(degenerate),
+            "profitable_folds": 0.0,
+        }
     return aggregate

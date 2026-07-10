@@ -203,6 +203,9 @@ backtest:
   initial_cash: 100000.0
   fee_bps: 1.0
   slippage_bps: 2.0
+  # Decisions on bar t fill at bar t+1's open (a decision cannot execute
+  # at the close it just observed). "same_close" = legacy optimistic mode.
+  fill_timing: next_open
   # --- Annualization / simulation timing ---
   bars_per_year: 19656                # 252 days * 78 five-min bars
   seconds_per_bar: 300.0

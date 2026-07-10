@@ -12,6 +12,23 @@ from src.features.feature_pipeline import FeatureSnapshot
 from src.risk.constraints import TradeProposal
 
 
+def heuristic_ev_bps(snapshot: FeatureSnapshot, *, floor_bps: float = 20.0) -> float:
+    """Volatility-scaled symmetric EV magnitude for rule baselines.
+
+    Baselines have no risk head, so their proposals carried
+    expected_gain/loss_bps of 0 and the EV gate rejected every trade —
+    making every benchmark number fiction.  A symmetric estimate keeps
+    them honest: EV reduces to (2·confidence − 1)·V − costs, so the gate
+    still prices conviction against costs instead of auto-rejecting.
+    """
+    try:
+        index = snapshot.feature_names.index("volatility_10")
+        per_bar_vol = abs(float(snapshot.features[index].item()))
+    except (ValueError, IndexError):
+        per_bar_vol = 0.0
+    return max(per_bar_vol * 10_000.0, floor_bps)
+
+
 @dataclass
 class BuyAndHoldPolicy:
     """Always go LONG on every symbol at every bar.
@@ -29,6 +46,7 @@ class BuyAndHoldPolicy:
         return reason
 
     def propose(self, snapshot: FeatureSnapshot) -> tuple[TradeProposal, dict[str, object]]:
+        ev_bps = heuristic_ev_bps(snapshot)
         proposal = TradeProposal(
             symbol=snapshot.symbol,
             timestamp=snapshot.timestamp,
@@ -39,6 +57,8 @@ class BuyAndHoldPolicy:
             spread_bps=snapshot.spread_bps,
             request_id=f"buyhold-{snapshot.symbol}-{int(snapshot.timestamp.timestamp())}",
             metadata={"strategy": "buy_and_hold"},
+            expected_gain_bps=ev_bps,
+            expected_loss_bps=ev_bps,
         )
         return proposal, proposal.metadata
 
@@ -78,6 +98,7 @@ class MeanReversionPolicy:
         elif volatility < self.vol_cap and momentum < -self.reversion_threshold:
             action = 1  # LONG: fade negative momentum
             target_fraction = self.max_fraction
+        ev_bps = heuristic_ev_bps(snapshot)
         proposal = TradeProposal(
             symbol=snapshot.symbol,
             timestamp=snapshot.timestamp,
@@ -88,5 +109,7 @@ class MeanReversionPolicy:
             spread_bps=snapshot.spread_bps,
             request_id=f"meanrev-{snapshot.symbol}-{int(snapshot.timestamp.timestamp())}",
             metadata={"momentum": momentum, "volatility": volatility, "strategy": "mean_reversion"},
+            expected_gain_bps=ev_bps,
+            expected_loss_bps=ev_bps,
         )
         return proposal, proposal.metadata

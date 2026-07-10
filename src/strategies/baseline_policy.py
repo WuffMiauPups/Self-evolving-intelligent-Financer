@@ -27,6 +27,9 @@ class BaselineMomentumPolicy:
         elif volatility < 0.02 and momentum < -self.momentum_threshold:
             action = -1
             target_fraction = -self.max_fraction
+        from src.strategies.baselines import heuristic_ev_bps
+
+        ev_bps = heuristic_ev_bps(snapshot)
         proposal = TradeProposal(
             symbol=snapshot.symbol,
             timestamp=snapshot.timestamp,
@@ -37,5 +40,7 @@ class BaselineMomentumPolicy:
             spread_bps=snapshot.spread_bps,
             request_id=f"baseline-{snapshot.symbol}-{int(snapshot.timestamp.timestamp())}",
             metadata={"momentum": momentum, "volatility": volatility},
+            expected_gain_bps=ev_bps,
+            expected_loss_bps=ev_bps,
         )
         return proposal, proposal.metadata

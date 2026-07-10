@@ -24,6 +24,14 @@ class BacktestEngine:
     risk_manager: RiskManager
 
     def run(self, bars_by_symbol: dict[str, list[object]], policy: object) -> BacktestReport:
+        """Run a bar-driven backtest.
+
+        Fill timing follows ``config.backtest.fill_timing``:
+        ``next_open`` (default) fills a decision made on bar t at bar
+        t+1's open — a decision cannot execute at the very close it just
+        observed.  ``same_close`` preserves the legacy optimistic fill
+        for comparisons.
+        """
         if isinstance(policy, TradingPolicy):
             policy.reset_all_state(reason="backtest_episode_start")
         self.risk_manager.reset_state()
@@ -78,9 +86,31 @@ class BacktestEngine:
         # order, but sorting is explicit and resilient to caller order).
         symbols = sorted(bars_by_symbol.keys())
         use_batch = isinstance(policy, BatchTradingPolicy)
-        for index in range(warmup_bars, min_length):
+        # The bar loop must not start before every feature family is
+        # warm: warmup_bars (48 default) < first_valid_index (long-window
+        # features) fed partially zero-filled snapshots to the policy.
+        first_valid = max(
+            (
+                getattr(batched, "first_valid_index", 0)
+                for batched in batched_by_symbol.values()
+            ),
+            default=0,
+        )
+        start_index = max(warmup_bars, first_valid)
+        next_open_fills = self.config.backtest.fill_timing == "next_open"
+        # With next-open fills the final bar has no next open to fill at:
+        # stop one bar early rather than fabricating a same-close fill.
+        end_index = min_length - 1 if next_open_fills else min_length
+        decision_log: list[dict[str, object]] = []
+        misaligned_bars = 0
+        for index in range(start_index, end_index):
             latest_prices = {symbol: bars_by_symbol[symbol][index].close for symbol in symbols}
             timestamp = bars_by_symbol[symbols[0]][index].timestamp
+            misaligned_bars += sum(
+                1
+                for symbol in symbols[1:]
+                if bars_by_symbol[symbol][index].timestamp != timestamp
+            )
             portfolio.mark_to_market(latest_prices, timestamp)
             if isinstance(policy, MemoryCapablePolicy):
                 # Set temporal cutoff to current bar timestamp so memory
@@ -116,6 +146,15 @@ class BacktestEngine:
             for sym_idx, symbol in enumerate(symbols):
                 snapshot = snapshots[sym_idx]
                 proposal, _ = results[sym_idx]
+                decision_log.append(
+                    {
+                        "symbol": symbol,
+                        "timestamp": snapshot.timestamp,
+                        "bar_index": index,
+                        "action": int(proposal.action),
+                        "confidence": float(proposal.confidence),
+                    }
+                )
                 if isinstance(policy, MemoryCapablePolicy):
                     policy.record_snapshot(symbol)
                 decision = self.risk_manager.evaluate(
@@ -132,19 +171,38 @@ class BacktestEngine:
                     f"seif-backtest-{symbol.upper()}-{(decision.side or 'buy')[0]}-"
                     f"{bucket}-{sequence_by_key[order_key]:04d}"
                 )
+                if next_open_fills:
+                    fill_bar = bars_by_symbol[symbol][index + 1]
+                    reference_price = float(fill_bar.open)
+                    # Cross half the quoted spread per leg where spread
+                    # data exists (live-recorded bars; historical bars
+                    # carry spread=0, leaving them unchanged).
+                    spread = float(getattr(fill_bar, "spread", 0.0) or 0.0)
+                    if spread > 0.0:
+                        half = spread / 2.0
+                        reference_price += half if (decision.side or "buy") == "buy" else -half
+                    fill_timestamp = fill_bar.timestamp
+                else:
+                    reference_price = snapshot.last_price
+                    fill_timestamp = snapshot.timestamp
                 intent = OrderIntent(
                     symbol=symbol,
                     side=decision.side or "buy",
                     quantity=decision.quantity,
                     client_order_id=client_order_id,
-                    reference_price=snapshot.last_price,
-                    timestamp=snapshot.timestamp,
+                    reference_price=reference_price,
+                    timestamp=fill_timestamp,
                     paper=True,
                     risk_approved=True,
                     session_id="backtest",
                     sequence=sequence_by_key[order_key],
                 )
-                simulator.execute(intent)
+                result = simulator.execute(intent)
+                if not result.accepted:
+                    # A rejected fill (e.g. insufficient cash) must not
+                    # register: it previously locked the symbol into a
+                    # phantom exit cooldown.
+                    continue
                 position = portfolio.get_position(symbol)
                 self.risk_manager.register_fill(
                     symbol,
@@ -163,10 +221,13 @@ class BacktestEngine:
             bars_per_year=self.config.backtest.bars_per_year,
             seconds_per_bar=self.config.backtest.seconds_per_bar,
         )
+        if misaligned_bars:
+            metrics["timestamp_misaligned_bars"] = float(misaligned_bars)
         if isinstance(policy, MemoryCapablePolicy):
             metrics.update(policy.metrics_snapshot())
         return BacktestReport(
             metrics=metrics,
             equity_curve=equity_curve,
             fills=ledger.fills,
+            decision_log=decision_log,
         )
