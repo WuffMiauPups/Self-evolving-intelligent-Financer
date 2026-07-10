@@ -33,7 +33,11 @@ def _load_bars_by_symbol(
 ) -> dict[str, list[MarketBar]]:
     if use_real_data:
         if credentials_available():
-            client = AlpacaClient(paper=config.broker.paper, data_feed=config.broker.data_feed)
+            client = AlpacaClient(
+                paper=config.broker.paper,
+                data_feed=config.broker.data_feed,
+                bar_adjustment=config.data.bar_adjustment,
+            )
         elif allow_mock:
             client = MockBrokerClient(paper=True, data_feed="mock")
         else:

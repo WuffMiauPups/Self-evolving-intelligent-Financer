@@ -116,6 +116,60 @@ class NormalizationStats:
         return cls.from_dict(payload)
 
 
+def normalization_stats_max_rel_diff(
+    a: NormalizationStats,
+    b: NormalizationStats,
+    *,
+    denom_floor: float = 1.0e-3,
+) -> dict[str, float]:
+    """Per-tensor max relative difference between two stats objects.
+
+    Used to detect train/serve (or train/eval) normalization skew: e.g.
+    ``evaluate_checkpoint`` re-derives stats from the *current* data range
+    while the checkpoint carries the stats it was trained with — if they
+    differ materially, evaluation metrics are not comparable across runs.
+
+    For each tensor pair the elementwise relative difference is
+    ``|a - b| / max(|a|, |b|, denom_floor)`` and the tensor's score is the
+    max over elements.  ``denom_floor`` keeps numerically-zero entries from
+    turning fp noise into false alarms.  Shape mismatches (different
+    feature contracts) and branch keys present on only one side score
+    ``inf``.  Keys: ``features_mean``, ``features_std``, ``regime_mean``,
+    ``regime_std``, ``temporal_mean``, ``temporal_std``,
+    ``branch_mean[<name>]``, ``branch_std[<name>]``.
+    """
+
+    def _rel(x: torch.Tensor, y: torch.Tensor) -> float:
+        x = x.reshape(-1).to(torch.float64)
+        y = y.reshape(-1).to(torch.float64)
+        if x.shape != y.shape:
+            return float("inf")
+        if x.numel() == 0:
+            return 0.0
+        denom = torch.maximum(x.abs(), y.abs()).clamp(min=denom_floor)
+        return float(((x - y).abs() / denom).max())
+
+    diffs: dict[str, float] = {
+        "features_mean": _rel(a.features_mean, b.features_mean),
+        "features_std": _rel(a.features_std, b.features_std),
+        "regime_mean": _rel(a.regime_mean, b.regime_mean),
+        "regime_std": _rel(a.regime_std, b.regime_std),
+        "temporal_mean": _rel(a.temporal_mean, b.temporal_mean),
+        "temporal_std": _rel(a.temporal_std, b.temporal_std),
+    }
+    for name in sorted(set(a.branch_means) | set(b.branch_means)):
+        if name in a.branch_means and name in b.branch_means:
+            diffs[f"branch_mean[{name}]"] = _rel(a.branch_means[name], b.branch_means[name])
+        else:
+            diffs[f"branch_mean[{name}]"] = float("inf")
+    for name in sorted(set(a.branch_stds) | set(b.branch_stds)):
+        if name in a.branch_stds and name in b.branch_stds:
+            diffs[f"branch_std[{name}]"] = _rel(a.branch_stds[name], b.branch_stds[name])
+        else:
+            diffs[f"branch_std[{name}]"] = float("inf")
+    return diffs
+
+
 class RunningStandardizer:
     """Exponential moving average standardizer for online feature normalization.
 

@@ -43,7 +43,6 @@ from src.evaluation.reporting import format_ranking_table, save_experiment_resul
 from src.features.feature_pipeline import FeaturePipeline
 from src.gui_services.state import ServiceError
 from src.risk.risk_manager import RiskManager
-from src.strategies.base import BatchTradingPolicy, MemoryCapablePolicy, TradingPolicy
 from src.strategies.memory_policy import MemoryAwarePolicy
 
 EXPERIMENTS_DIR = Path("configs/experiments")
@@ -116,7 +115,11 @@ def _load_bars(
             f"Fetching {len(uncached)} from API: {', '.join(uncached[:5])}..."
         )
         if credentials_available():
-            client = AlpacaClient(paper=config.broker.paper, data_feed=config.broker.data_feed)
+            client = AlpacaClient(
+                paper=config.broker.paper,
+                data_feed=config.broker.data_feed,
+                bar_adjustment=config.data.bar_adjustment,
+            )
         else:
             client = MockBrokerClient(paper=True, data_feed="mock")
         service = HistoricalDataService(
@@ -199,127 +202,53 @@ class _FeatureCache:
         return batched
 
 
-class _CachingBacktestEngine(BacktestEngine):
-    """BacktestEngine variant that uses pre-cached feature batches and
-    batched model inference for ~8x faster experiment runs.
+class _PrecomputedFeaturePipeline:
+    """FeaturePipeline facade that serves precomputed ``build_batch`` results.
 
-    Two key optimizations over the base BacktestEngine:
-      1. Uses pre-cached ``build_batch`` results (skips torch.unfold).
-      2. Uses ``policy.propose_batch(snapshots)`` to run all symbols in
-         a single model forward pass instead of N separate calls.
+    ``BacktestEngine.run`` touches the pipeline exclusively through
+    ``build_batch(bars, symbol=..., temporal_window=...)``, so this facade is
+    the surgical seam that lets experiments reuse the real engine loop while
+    skipping the expensive torch.unfold feature pass.  A cache entry is only
+    served when it matches the requested symbol AND bar count; anything else
+    falls through to the wrapped pipeline.  All other attribute access is
+    delegated unchanged.
+    """
+
+    def __init__(self, pipeline: FeaturePipeline, cached_batches: dict[str, object]) -> None:
+        self._pipeline = pipeline
+        self._cached_batches = cached_batches
+
+    def build_batch(self, bars, *, symbol: str, temporal_window: int, **kwargs):
+        cached = self._cached_batches.get(symbol)
+        if cached is not None and getattr(cached, "n_bars", -1) == len(bars):
+            return cached
+        return self._pipeline.build_batch(
+            bars, symbol=symbol, temporal_window=temporal_window, **kwargs
+        )
+
+    def __getattr__(self, name: str):
+        return getattr(self._pipeline, name)
+
+
+class _CachingBacktestEngine(BacktestEngine):
+    """BacktestEngine that reuses pre-cached feature batches.
+
+    Historical note: this used to carry a hand-copied fork of
+    ``BacktestEngine.run`` that silently diverged from the real engine —
+    unsorted symbol order, no ``fill_timing`` support (always filled at the
+    same close the decision observed), no temporal cutoff for memory
+    retrieval, and no decision log.  Experiment results were therefore not
+    comparable with ``scripts/run_backtest.py``.  It now inherits the base
+    ``run`` verbatim and injects cached features through
+    ``_PrecomputedFeaturePipeline`` — the only remaining difference is that
+    ``build_batch`` is served from the experiment suite's shared cache.
     """
 
     def __init__(self, config, feature_pipeline, risk_manager, cached_batches):
-        super().__init__(config, feature_pipeline, risk_manager)
-        self._cached_batches = cached_batches
-
-    def run(self, bars_by_symbol, policy):
-        from src.backtest.performance import BacktestReport, compute_backtest_metrics
-        from src.backtest.simulator import BacktestSimulator
-        from src.execution.paper_executor import PaperExecutor
-        from src.execution.schemas import OrderIntent
-        from src.risk.ledger import Ledger
-        from src.risk.portfolio_state import PortfolioState
-
-        if isinstance(policy, TradingPolicy):
-            policy.reset_all_state(reason="backtest_episode_start")
-        self.risk_manager.reset_state()
-        sequence_by_key: dict[tuple[str, str, str], int] = {}
-        portfolio = PortfolioState(
-            cash=self.config.backtest.initial_cash,
-            equity=self.config.backtest.initial_cash,
-        )
-        ledger = Ledger()
-        simulator = BacktestSimulator(
-            executor=PaperExecutor(
-                portfolio=portfolio,
-                ledger=ledger,
-                fee_bps=self.config.backtest.fee_bps,
-                slippage_bps=self.config.backtest.slippage_bps,
-            ),
-            fee_bps=self.config.backtest.fee_bps,
-            slippage_bps=self.config.backtest.slippage_bps,
-        )
-        min_length = min(len(bars) for bars in bars_by_symbol.values())
-        equity_curve: list[float] = []
-        exposures: list[float] = []
-        warmup_bars = self.config.runtime.warmup_bars
-        batched_by_symbol = self._cached_batches
-        symbols = list(bars_by_symbol.keys())
-        use_batch = isinstance(policy, BatchTradingPolicy)
-
-        for index in range(warmup_bars, min_length):
-            latest_prices = {sym: bars_by_symbol[sym][index].close for sym in symbols}
-            timestamp = bars_by_symbol[symbols[0]][index].timestamp
-            portfolio.mark_to_market(latest_prices, timestamp)
-
-            # Prepare memory histories if needed
-            for symbol in symbols:
-                if isinstance(policy, MemoryCapablePolicy):
-                    ws = max(0, index + 1 - warmup_bars)
-                    policy.prepare_symbol_history(symbol, bars_by_symbol[symbol][ws:index + 1])
-
-            # Batched inference: 1 forward pass for all symbols
-            snapshots = [batched_by_symbol[sym].snapshot_at(index) for sym in symbols]
-            if use_batch:
-                results = policy.propose_batch(snapshots)
-            else:
-                results = [policy.propose(snap) for snap in snapshots]
-
-            for sym_idx, symbol in enumerate(symbols):
-                proposal, _ = results[sym_idx]
-                if isinstance(policy, MemoryCapablePolicy):
-                    policy.record_snapshot(symbol)
-                decision = self.risk_manager.evaluate(
-                    proposal, portfolio, evaluation_time=snapshots[sym_idx].timestamp,
-                )
-                if not decision.approved:
-                    continue
-                bucket = snapshots[sym_idx].timestamp.strftime("%Y%m%d%H%M")
-                order_key = ("backtest", symbol, decision.side or "buy", bucket)
-                sequence_by_key[order_key] = sequence_by_key.get(order_key, 0) + 1
-                intent = OrderIntent(
-                    symbol=symbol,
-                    side=decision.side or "buy",
-                    quantity=decision.quantity,
-                    client_order_id=(
-                        f"seif-backtest-{symbol.upper()}-{(decision.side or 'buy')[0]}-"
-                        f"{bucket}-{sequence_by_key[order_key]:04d}"
-                    ),
-                    reference_price=snapshots[sym_idx].last_price,
-                    timestamp=snapshots[sym_idx].timestamp,
-                    paper=True,
-                    risk_approved=True,
-                    session_id="backtest",
-                    sequence=sequence_by_key[order_key],
-                )
-                simulator.execute(intent)
-                position = portfolio.get_position(symbol)
-                self.risk_manager.register_fill(
-                    symbol, position.qty if position else 0.0, timestamp=snapshots[sym_idx].timestamp,
-                )
-
-            portfolio.mark_to_market(latest_prices, timestamp)
-            equity_curve.append(portfolio.equity)
-            total_exposure = sum(
-                abs(pos.qty * pos.market_price) for pos in portfolio.positions.values()
-            )
-            exposures.append(total_exposure / max(portfolio.equity, 1.0))
-
-        metrics = compute_backtest_metrics(
-            initial_equity=self.config.backtest.initial_cash,
-            equity_curve=equity_curve,
-            fills=ledger.fills,
-            exposures=exposures,
-            bars_per_year=self.config.backtest.bars_per_year,
-            seconds_per_bar=self.config.backtest.seconds_per_bar,
-        )
-        if isinstance(policy, MemoryCapablePolicy):
-            metrics.update(policy.metrics_snapshot())
-        return BacktestReport(
-            metrics=metrics,
-            equity_curve=equity_curve,
-            fills=ledger.fills,
+        super().__init__(
+            config=config,
+            feature_pipeline=_PrecomputedFeaturePipeline(feature_pipeline, cached_batches),
+            risk_manager=risk_manager,
         )
 
 

@@ -135,3 +135,53 @@ def test_resolve_checkpoint_save_dir_explicit_true_forces_isolation() -> None:
     )
     assert target == Path("checkpoints") / "20260407_120000"
     assert isolated is True
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint-meta forward-compat (MASTER_PLAN 4.6.3)
+# ---------------------------------------------------------------------------
+# ModelConfig validates under extra='forbid'. A checkpoint saved by a newer
+# code version (or before a field removal) may carry model_config keys the
+# current ModelConfig no longer knows; load_model_artifacts must drop them
+# with a warning instead of bricking every old checkpoint.
+
+
+def test_load_model_artifacts_drops_unknown_model_config_keys(
+    tmp_path: Path, caplog
+) -> None:
+    import logging
+
+    config = load_config("configs/default.yaml")
+    bars = generate_synthetic_bars("AAPL", 120)
+    pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
+    snapshot = pipeline.build(bars, symbol="AAPL")
+    model = build_model_from_contract(
+        model_kind="brain",
+        model_config=config.model,
+        feature_contract=snapshot.contract,
+    )
+    model.eval()
+    meta = build_checkpoint_meta(
+        model_kind="brain",
+        model_config=config.model,
+        feature_config=config.features,
+        feature_contract=snapshot.contract,
+    )
+    # Simulate a checkpoint written by a different code version: a
+    # model_config key the current ModelConfig has no field for.
+    meta["model_config"]["retired_future_field"] = 123
+    checkpoint_path = tmp_path / "brain_future.pt"
+    save_checkpoint(
+        checkpoint_path,
+        model=model,
+        optimizer=torch.optim.AdamW(model.parameters(), lr=1.0e-3),
+        meta=meta,
+    )
+    with caplog.at_level(logging.WARNING, logger="src.models.factory"):
+        loaded = load_model_artifacts(checkpoint_path, device=torch.device("cpu"))
+    assert loaded.model_kind == "brain"
+    assert loaded.feature_contract == snapshot.contract
+    warning_text = " ".join(
+        record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING
+    )
+    assert "retired_future_field" in warning_text

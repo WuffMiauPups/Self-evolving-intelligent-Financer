@@ -503,3 +503,152 @@ class TestSafetyInvariants:
                     assert not rx.search(text), (
                         f"{name} imports PySide6 — service layer must stay GUI-free"
                     )
+
+
+# ---------------------------------------------------------------------------
+# Platt badge resolves the checkpoint-adjacent calibrator (wave-1 follow-up)
+# ---------------------------------------------------------------------------
+# The calibrator artifact is checkpoint-bound: it lives NEXT TO the
+# checkpoint it was fitted for (src/training/platt_calibration.py). The GUI
+# badge used to poll the legacy runs/platt_calibration.json location, which
+# stays stale forever under the new layout.
+
+
+class TestPlattBadgePath:
+    def _service_with_summary(self, tmp_path: Path, monkeypatch, summary: dict) -> RuntimeService:
+        svc = RuntimeService(project_root=tmp_path)
+        monkeypatch.setattr(svc, "preview_config", lambda: dict(summary))
+        return svc
+
+    def test_badge_reads_checkpoint_adjacent_artifact(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)  # keep legacy relative paths inside tmp
+        checkpoint = tmp_path / "checkpoints" / "brain.pt"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.touch()
+        svc = self._service_with_summary(
+            tmp_path,
+            monkeypatch,
+            {"platt_calibration_enabled": True, "checkpoint_path": str(checkpoint)},
+        )
+        assert svc.get_status().platt_calibration_fitted is False
+        (checkpoint.parent / "platt_calibration.json").write_text("{}", encoding="utf-8")
+        assert svc.get_status().platt_calibration_fitted is True
+
+    def test_legacy_runs_location_no_longer_satisfies_badge(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        checkpoint = tmp_path / "checkpoints" / "brain.pt"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.touch()
+        legacy = tmp_path / "runs" / "platt_calibration.json"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("{}", encoding="utf-8")
+        svc = self._service_with_summary(
+            tmp_path,
+            monkeypatch,
+            {"platt_calibration_enabled": True, "checkpoint_path": str(checkpoint)},
+        )
+        assert svc.get_status().platt_calibration_fitted is False
+
+    def test_badge_false_when_disabled_or_no_checkpoint(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        svc = self._service_with_summary(
+            tmp_path,
+            monkeypatch,
+            {"platt_calibration_enabled": True, "checkpoint_path": ""},
+        )
+        assert svc.get_status().platt_calibration_fitted is False
+        svc2 = self._service_with_summary(
+            tmp_path,
+            monkeypatch,
+            {"platt_calibration_enabled": False, "checkpoint_path": "checkpoints/brain.pt"},
+        )
+        assert svc2.get_status().platt_calibration_fitted is False
+
+
+# ---------------------------------------------------------------------------
+# _CachingBacktestEngine is the real BacktestEngine (wave-1 follow-up)
+# ---------------------------------------------------------------------------
+# The class used to carry a hand-copied fork of BacktestEngine.run that
+# silently diverged (unsorted symbols, no fill_timing, no temporal cutoff,
+# no decision log). It now reuses the base run() verbatim with a
+# precomputed-features pipeline facade; these tests pin that equivalence.
+
+
+class TestCachingBacktestEngineDedupe:
+    def _setup(self):
+        import torch
+
+        from src.backtest.policy_factory import build_baseline_policy
+        from src.data.historical_data import generate_synthetic_bars
+        from src.features.feature_pipeline import FeaturePipeline
+
+        config = load_app_config("configs/default.yaml")
+        # Insertion order deliberately unsorted: the engine must sort.
+        bars = {
+            "MSFT": generate_synthetic_bars("MSFT", 200),
+            "AAPL": generate_synthetic_bars("AAPL", 200),
+        }
+        pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
+        cached = {
+            symbol: pipeline.build_batch(
+                symbol_bars, symbol=symbol, temporal_window=config.runtime.warmup_bars
+            )
+            for symbol, symbol_bars in bars.items()
+        }
+        return config, bars, pipeline, cached, build_baseline_policy
+
+    def test_report_identical_to_base_engine(self) -> None:
+        from src.backtest.engine import BacktestEngine
+        from src.gui_services.experiment_service import _CachingBacktestEngine
+        from src.risk.risk_manager import RiskManager
+
+        config, bars, pipeline, cached, build_policy = self._setup()
+        base_report = BacktestEngine(
+            config, pipeline, RiskManager(config.risk.model_copy())
+        ).run(bars, build_policy())
+        caching_report = _CachingBacktestEngine(
+            config, pipeline, RiskManager(config.risk.model_copy()), cached
+        ).run(bars, build_policy())
+
+        assert caching_report.equity_curve == base_report.equity_curve
+        assert caching_report.metrics == base_report.metrics
+        assert len(caching_report.fills) == len(base_report.fills)
+        # The diverged copy produced no decision log at all.
+        assert caching_report.decision_log == base_report.decision_log
+        assert caching_report.decision_log, "expected a populated decision log"
+
+    def test_cached_batches_are_served_not_rebuilt(self, monkeypatch) -> None:
+        from src.gui_services.experiment_service import _CachingBacktestEngine
+        from src.risk.risk_manager import RiskManager
+
+        config, bars, pipeline, cached, build_policy = self._setup()
+        rebuilds: list[str] = []
+        original_build_batch = pipeline.build_batch
+
+        def counting_build_batch(*args, **kwargs):
+            rebuilds.append(kwargs.get("symbol", "?"))
+            return original_build_batch(*args, **kwargs)
+
+        monkeypatch.setattr(pipeline, "build_batch", counting_build_batch)
+        engine = _CachingBacktestEngine(
+            config, pipeline, RiskManager(config.risk.model_copy()), cached
+        )
+        report = engine.run(bars, build_policy())
+        assert rebuilds == [], "cached feature batches must be served, not rebuilt"
+        assert report.equity_curve
+
+    def test_symbols_processed_in_sorted_order(self) -> None:
+        from src.gui_services.experiment_service import _CachingBacktestEngine
+        from src.risk.risk_manager import RiskManager
+
+        config, bars, pipeline, cached, build_policy = self._setup()
+        report = _CachingBacktestEngine(
+            config, pipeline, RiskManager(config.risk.model_copy()), cached
+        ).run(bars, build_policy())
+        first_bar_index = report.decision_log[0]["bar_index"]
+        first_bar_symbols = [
+            entry["symbol"]
+            for entry in report.decision_log
+            if entry["bar_index"] == first_bar_index
+        ]
+        assert first_bar_symbols == sorted(first_bar_symbols)

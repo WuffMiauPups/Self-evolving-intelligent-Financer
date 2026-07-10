@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import torch
 
+from src.core.exceptions import ConfigurationError
+
 
 @dataclass(frozen=True)
 class DeviceContext:
@@ -16,8 +18,17 @@ class DeviceContext:
 
 def resolve_device(preferred: str = "auto") -> torch.device:
     preferred = preferred.lower()
-    if preferred == "cuda" and torch.cuda.is_available():
-        return torch.device("cuda")
+    if preferred == "cuda" or preferred.startswith("cuda:"):
+        # An explicit CUDA request must fail loudly when CUDA is missing.
+        # Falling through to torch.device("cuda") used to defer the error
+        # to the first tensor op (or silently run CPU-slow paths elsewhere).
+        if not torch.cuda.is_available():
+            raise ConfigurationError(
+                f"device.preferred={preferred!r} but CUDA is not available in this "
+                "environment. Install a CUDA-enabled torch build / fix the driver, "
+                "or set device.preferred to 'auto' or 'cpu'."
+            )
+        return torch.device(preferred)
     if preferred == "cpu":
         return torch.device("cpu")
     if preferred == "auto":

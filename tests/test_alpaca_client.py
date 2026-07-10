@@ -46,3 +46,35 @@ def test_client_rejects_unknown_bar_adjustment(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("ALPACA_API_SECRET", "test-secret")
     with pytest.raises(ValueError, match="bar_adjustment"):
         AlpacaClient(bar_adjustment="bogus")
+
+
+# ---------------------------------------------------------------------------
+# config.data.bar_adjustment threading (MASTER_PLAN 4.6.1)
+# ---------------------------------------------------------------------------
+# The field existed and validated but never reached the client — every
+# constructor hardcoded the default. _build_client is the runtime entry
+# point; the same pattern is threaded through gui_services and scripts/.
+
+
+def test_build_client_threads_bar_adjustment_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPACA_API_KEY", "test-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "test-secret")
+    from src.core.config import load_config
+    from src.execution.runtime_bootstrap import _build_client
+
+    config = load_config("configs/default.yaml")
+    config.data.bar_adjustment = "raw"
+    client, using_mock = _build_client(config)
+    assert using_mock is False
+    assert client.bar_adjustment == "raw"
+
+
+def test_build_client_defaults_to_fully_adjusted_bars(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALPACA_API_KEY", "test-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "test-secret")
+    from src.core.config import load_config
+    from src.execution.runtime_bootstrap import _build_client
+
+    config = load_config("configs/default.yaml")
+    client, _ = _build_client(config)
+    assert client.bar_adjustment == "all"

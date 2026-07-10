@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -44,6 +45,21 @@ from src.strategies.memory_policy import MemoryAwarePolicy
 # Performance constants — kept as fallback for call sites that run before
 # config is available. The canonical value lives in RuntimeConfig.max_parallel_workers.
 COLD_START_MAX_WORKERS = 8
+
+
+def make_runtime_session_id(started_at: datetime) -> str:
+    """Session token used in client_order_ids: ``YYYYMMDD`` + pid nonce.
+
+    A bare date token meant a same-day restart could regenerate the exact
+    client_order_ids of the previous process (same session/symbol/side/
+    minute-bucket restarts the per-key sequence at 1), tripping broker-side
+    duplicate-id rejection.  The 4-digit pid nonce makes each process a
+    distinct session.  Alphanumeric-only on purpose: the session field of
+    ``CLIENT_ORDER_ID_PARSE`` in order_router.py matches ``[A-Za-z0-9]+``
+    and the full id must stay within the broker's client_order_id length
+    budget.
+    """
+    return f"{started_at.strftime('%Y%m%d')}p{os.getpid() % 10000:04d}"
 
 
 @dataclass
@@ -128,6 +144,7 @@ def _build_client(config: AppConfig) -> tuple[BrokerDataClient, bool]:
             AlpacaClient(
                 paper=config.broker.paper,
                 data_feed=config.broker.data_feed,
+                bar_adjustment=config.data.bar_adjustment,
             ),
             False,
         )
@@ -579,7 +596,7 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
         empty_poll_warn_every=config.runtime.stream_empty_poll_warn_frequency,
     )
     metrics = MetricsLogger()
-    runtime_session_id = started_at.strftime("%Y%m%d")
+    runtime_session_id = make_runtime_session_id(started_at)
     equity_writer = EquityLogWriter(
         max_bytes=config.runtime.log_rotation_max_bytes,
         max_backups=config.runtime.log_rotation_max_backups,

@@ -200,7 +200,10 @@ class TrainingTab(QWidget):
 
         self.chk_regime_encoder = QCheckBox("Regime encoder")
         self.chk_regime_encoder.setChecked(True)
-        self.chk_regime_encoder.setToolTip("Enable regime-gated dendritic branches")
+        self.chk_regime_encoder.setToolTip(
+            "Legacy toggle — the regime encoder / dendritic branches were removed "
+            "in the Great Simplification; this flag has no effect."
+        )
         arch_grid.addWidget(self.chk_regime_encoder, 0, 0)
 
         self.chk_temporal_cnn = QCheckBox("Temporal CNN")
@@ -210,22 +213,34 @@ class TrainingTab(QWidget):
 
         self.chk_gru_memory = QCheckBox("GRU latent memory")
         self.chk_gru_memory.setChecked(True)
-        self.chk_gru_memory.setToolTip("Enable GRU cell for temporal context across bars")
+        self.chk_gru_memory.setToolTip(
+            "Legacy toggle — the GRU latent memory was removed in the Great "
+            "Simplification; this flag has no effect."
+        )
         arch_grid.addWidget(self.chk_gru_memory, 0, 2)
 
         self.chk_confidence_gating = QCheckBox("Branch confidence gating")
         self.chk_confidence_gating.setChecked(True)
-        self.chk_confidence_gating.setToolTip("Enable per-branch confidence scores")
+        self.chk_confidence_gating.setToolTip(
+            "Legacy toggle — per-branch confidence gating was removed with the "
+            "dendritic branches; this flag has no effect."
+        )
         arch_grid.addWidget(self.chk_confidence_gating, 1, 0)
 
         self.chk_soma_weighting = QCheckBox("Soma confidence weighting")
         self.chk_soma_weighting.setChecked(True)
-        self.chk_soma_weighting.setToolTip("Weight soma gate by branch confidence (softmax + log trick)")
+        self.chk_soma_weighting.setToolTip(
+            "Legacy toggle — the soma aggregator was removed in the Great "
+            "Simplification; this flag only writes an inert config field."
+        )
         arch_grid.addWidget(self.chk_soma_weighting, 1, 1)
 
         self.chk_decouple_conf = QCheckBox("Decouple confidence from soma")
         self.chk_decouple_conf.setChecked(False)
-        self.chk_decouple_conf.setToolTip("Policy confidence independent of soma activation")
+        self.chk_decouple_conf.setToolTip(
+            "Legacy toggle — confidence is always decoupled now (the soma was "
+            "removed); this flag only writes an inert config field."
+        )
         arch_grid.addWidget(self.chk_decouple_conf, 1, 2)
 
         self.chk_risk_heads = QCheckBox("Separate risk heads (MFE/MAE/vol/dd)")
@@ -252,11 +267,17 @@ class TrainingTab(QWidget):
         mem_grid.addWidget(self.chk_mem_auto_tune, 0, 1)
 
         self.chk_mem_esom_labels = QCheckBox("ESOM regime labels")
-        self.chk_mem_esom_labels.setToolTip("Learn regime labels from trade outcomes")
+        self.chk_mem_esom_labels.setToolTip(
+            "Legacy toggle — ESOM regime labeling was removed with the ESOM map; "
+            "this flag only writes an inert config field."
+        )
         mem_grid.addWidget(self.chk_mem_esom_labels, 0, 2)
 
         self.chk_mem_deep_proj = QCheckBox("Deep projections (W_Q/W_K/W_V)")
-        self.chk_mem_deep_proj.setToolTip("Train learnable Hopfield projections on the memory bank")
+        self.chk_mem_deep_proj.setToolTip(
+            "Legacy toggle — Hopfield retrieval (and its learnable projections) "
+            "was removed; this flag only writes an inert config field."
+        )
         mem_grid.addWidget(self.chk_mem_deep_proj, 1, 0)
 
         self.chk_mem_value_decay = QCheckBox("Value-aware decay")

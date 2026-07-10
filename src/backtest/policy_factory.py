@@ -10,7 +10,8 @@ implementation.
 Three builders:
     build_baseline_policy         — no model, no memory (pure momentum)
     build_brain_policy            — BrainPolicy over a loaded checkpoint
-    build_brain_memory_policy     — MemoryAwarePolicy (brain + memory + fusion)
+    build_brain_memory_policy     — MemoryAwarePolicy (brain + passive memory
+                                    diagnostics; memory never gates trades)
 
 The builders intentionally take the same signature where possible so the
 caller can switch between them by changing one string.  The memory-aware
@@ -155,15 +156,19 @@ def build_brain_memory_policy(
 ) -> MemoryAwarePolicy:
     """Construct a MemoryAwarePolicy wrapping a BrainPolicy.
 
-    This is the logic that used to live in ``scripts/run_backtest.py``'s
-    ``_make_memory_aware_policy``.  Behavior preserved exactly:
+    Memory is passive: the bank supplies kNN diagnostics only and cannot
+    gate, veto, or resize the brain's proposals.  Behavior:
       - Load the persisted memory bank if it exists and rebuild_on_startup
-        is false; otherwise start fresh.
-      - Refresh organization once if dynamic growth is enabled and the
-        bank has no units yet.
-      - Force fusion_config.enabled=True whenever the policy is invoked
-        (the callers that want fusion off should use build_brain_policy).
-      - Apply conservative fusion thresholds when requested.
+        is false (validating feature contract + encoder fingerprint);
+        otherwise start fresh.
+      - Leave the updater None so the backtest can never mutate the bank
+        (offline builds are the only legitimate writer).
+      - Load the fingerprint-bound Platt calibrator next to the checkpoint
+        when calibration is enabled.
+
+    ``conservative_thresholds`` and ``verbose_fusion`` are inert legacy
+    parameters kept for call-site compatibility; the decision-fusion layer
+    they configured was removed in the Great Simplification.
     """
     artifacts, _ = _resolve_artifacts(
         config, bars_by_symbol=bars_by_symbol, pipeline=pipeline

@@ -128,6 +128,37 @@ def test_stub_sub_keys_swallowed_through_load_config(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 2b. training <-> memory forward_horizons stay in sync (MASTER_PLAN 4.6.2)
+# ---------------------------------------------------------------------------
+# default.yaml intentionally does NOT set memory.forward_horizons: AppConfig
+# auto-syncs it from training.forward_horizons unless the memory side
+# explicitly overrides.  These tests make that contract permanent so the
+# offline memory build always labels with the horizons the brain was
+# trained against.
+
+
+def test_default_config_memory_horizons_match_training() -> None:
+    config = load_config(DEFAULT_CONFIG)
+    assert list(config.memory.forward_horizons) == list(config.training.forward_horizons)
+    assert config.memory.path_label_rules == config.training.path_label_rules
+
+
+def test_training_overlay_keeps_memory_horizons_synced() -> None:
+    """configs/training.yaml changes training.forward_horizons; the memory
+    side must follow automatically because default.yaml no longer pins it."""
+    config = load_config(DEFAULT_CONFIG, CONFIGS_DIR / "training.yaml")
+    assert list(config.training.forward_horizons) == [1, 5, 15]
+    assert list(config.memory.forward_horizons) == [1, 5, 15]
+
+
+def test_explicit_memory_horizon_override_still_wins(tmp_path: Path) -> None:
+    overlay = tmp_path / "memory_horizons.yaml"
+    overlay.write_text("memory:\n  forward_horizons: [2, 4]\n", encoding="utf-8")
+    config = load_config(DEFAULT_CONFIG, overlay)
+    assert list(config.memory.forward_horizons) == [2, 4]
+
+
+# ---------------------------------------------------------------------------
 # 3. Typo'd / dead keys raise at load
 # ---------------------------------------------------------------------------
 

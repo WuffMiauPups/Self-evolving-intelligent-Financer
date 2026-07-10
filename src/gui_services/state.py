@@ -119,7 +119,10 @@ class RuntimeStatus:
     ev_gate_active: bool = False          # True when the risk head is trained (separate_risk_heads)
     ev_cost_bps: float = 0.0              # fee_bps + slippage_bps (cost side of the EV gate)
     platt_calibration_enabled: bool = False
-    platt_calibration_fitted: bool = False  # True if runs/platt_calibration.json exists
+    # True when platt_calibration.json exists next to the configured
+    # checkpoint (platt_calibration_path_for_checkpoint) — the artifact is
+    # checkpoint-bound, not the legacy runs/platt_calibration.json.
+    platt_calibration_fitted: bool = False
     error_message: str = ""
 
 
@@ -186,19 +189,21 @@ class BacktestResultRow:
 
 @dataclass
 class MemoryStatus:
+    """Snapshot of the persisted passive memory bank.
+
+    Fields mirror ``MemoryBank.summary()`` exactly.  The old
+    cluster/unit/ESOM/fusion fields described machinery deleted in the
+    Great Simplification and were only ever filled with zeros.
+    """
+
     bank_path: str = ""
     exists: bool = False
     item_count: int = 0
-    cluster_count: int = 0
-    unit_count: int = 0
-    mature_unit_count: int = 0
-    candidate_unit_count: int = 0
-    quarantined_unit_count: int = 0
-    esom_node_count: int = 0
-    esom_edge_count: int = 0
+    latent_dim: int = 0
+    max_items: int = 0
+    similarity_metric: str = ""
     encoder_fingerprint: str = ""
     feature_contract_id: str = ""
-    fusion_enabled: bool = False
     error: str = ""
 
 

@@ -103,7 +103,11 @@ def _load_bars(config: AppConfig) -> dict[str, list[MarketBar]]:
             for symbol in config.data.symbols
         }
     if credentials_available():
-        client = AlpacaClient(paper=config.broker.paper, data_feed=config.broker.data_feed)
+        client = AlpacaClient(
+            paper=config.broker.paper,
+            data_feed=config.broker.data_feed,
+            bar_adjustment=config.data.bar_adjustment,
+        )
     else:
         client = MockBrokerClient(paper=True, data_feed="mock")
     service = HistoricalDataService(

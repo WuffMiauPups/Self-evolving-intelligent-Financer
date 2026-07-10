@@ -68,7 +68,7 @@ class BacktestTab(QWidget):
         self.policy_combo.setToolTip(
             "baseline       — BaselineMomentumPolicy (no model)\n"
             "brain          — BrainPolicy loaded from config.model.checkpoint_path\n"
-            "brain+memory   — MemoryAwarePolicy (brain + memory + fusion)"
+            "brain+memory   — MemoryAwarePolicy (brain + passive memory diagnostics)"
         )
         self.real_data = QCheckBox("Real data")
         self.walk_forward = QCheckBox("Walk-forward")

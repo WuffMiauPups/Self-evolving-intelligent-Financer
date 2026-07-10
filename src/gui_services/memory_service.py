@@ -1,4 +1,4 @@
-"""Memory bank inspection + offline build + fusion evaluation."""
+"""Memory bank inspection + offline build (passive memory — no fusion layer)."""
 from __future__ import annotations
 
 import subprocess
@@ -130,10 +130,7 @@ def get_memory_status(*, config_paths: list[str] | None = None) -> MemoryStatus:
         return MemoryStatus(error=str(exc))
 
     bank_path = config.memory.persist_path
-    status = MemoryStatus(
-        bank_path=bank_path,
-        fusion_enabled=bool(config.memory.decision_fusion.enabled),
-    )
+    status = MemoryStatus(bank_path=bank_path)
     path = Path(bank_path)
     if not path.exists():
         status.error = "Memory bank file not found."
@@ -150,13 +147,9 @@ def get_memory_status(*, config_paths: list[str] | None = None) -> MemoryStatus:
         return status
 
     status.item_count = int(summary.get("item_count", 0))
-    status.cluster_count = int(summary.get("cluster_count", 0))
-    status.unit_count = int(summary.get("unit_count", 0))
-    status.mature_unit_count = int(summary.get("mature_unit_count", 0))
-    status.candidate_unit_count = int(summary.get("candidate_unit_count", 0))
-    status.quarantined_unit_count = int(summary.get("quarantined_unit_count", 0))
-    status.esom_node_count = int(summary.get("esom_node_count", 0))
-    status.esom_edge_count = int(summary.get("esom_edge_count", 0))
+    status.latent_dim = int(summary.get("latent_dim", 0))
+    status.max_items = int(summary.get("max_items", 0))
+    status.similarity_metric = str(summary.get("similarity_metric") or "")
     status.encoder_fingerprint = str(summary.get("encoder_fingerprint") or "")
     status.feature_contract_id = str(summary.get("feature_contract_id") or "")
     return status

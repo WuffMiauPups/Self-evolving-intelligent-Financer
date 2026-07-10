@@ -164,7 +164,11 @@ def main() -> int:
 
     # --- Build client ---
     if credentials_available():
-        client = AlpacaClient(paper=config.broker.paper, data_feed=config.broker.data_feed)
+        client = AlpacaClient(
+            paper=config.broker.paper,
+            data_feed=config.broker.data_feed,
+            bar_adjustment=config.data.bar_adjustment,
+        )
     elif args.allow_mock:
         client = MockBrokerClient(paper=True, data_feed="mock")
     else:

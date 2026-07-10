@@ -1,4 +1,4 @@
-"""Memory / Fusion tab — inspect bank, trigger build/eval."""
+"""Memory tab — inspect the passive memory bank, trigger offline builds."""
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer, QThreadPool
@@ -48,52 +48,38 @@ class MemoryTab(QWidget):
 
         header = QHBoxLayout()
         self.badge_mem = StatusBadge("off")
-        self.badge_fusion = StatusBadge("off")
         header.addWidget(QLabel("Memory:"))
         header.addWidget(self.badge_mem)
-        header.addSpacing(20)
-        header.addWidget(QLabel("Fusion:"))
-        header.addWidget(self.badge_fusion)
         header.addStretch(1)
         root.addLayout(header)
 
         bank_box = QGroupBox("Memory Bank")
         grid = QGridLayout(bank_box)
         self.card_items = MetricCard("Items")
-        self.card_clusters = MetricCard("Clusters")
-        self.card_units = MetricCard("Units")
-        self.card_mature = MetricCard("Mature units")
-        self.card_candidate = MetricCard("Candidate units")
-        self.card_quarantined = MetricCard("Quarantined units")
-        self.card_esom_nodes = MetricCard("ESOM nodes")
-        self.card_esom_edges = MetricCard("ESOM edges")
+        self.card_latent_dim = MetricCard("Latent dim")
+        self.card_max_items = MetricCard("Max items")
+        self.card_similarity = MetricCard("Similarity metric")
         self.card_fp = MetricCard("Encoder fingerprint")
         self.card_contract = MetricCard("Feature contract")
         cards = [
-            self.card_items, self.card_clusters, self.card_units,
-            self.card_mature, self.card_candidate, self.card_quarantined,
-            self.card_esom_nodes, self.card_esom_edges,
-            self.card_fp, self.card_contract,
+            self.card_items, self.card_latent_dim, self.card_max_items,
+            self.card_similarity, self.card_fp, self.card_contract,
         ]
         for i, card in enumerate(cards):
             grid.addWidget(card, i // 4, i % 4)
         root.addWidget(bank_box)
 
         # ── Memory feature status (read-only, config-driven) ────────
+        # Post-Great-Simplification the memory subsystem is passive; the
+        # only runtime-relevant switches are the two below.
         feat_box = QGroupBox("Memory Feature Status")
         feat_grid = QGridLayout(feat_box)
         feat_grid.setHorizontalSpacing(10)
         feat_grid.setVerticalSpacing(4)
         self._feature_labels: dict[str, QLabel] = {}
         _FEATURE_DISPLAY = [
-            ("modern_hopfield", "Modern Hopfield"),
-            ("multi_timescale", "Multi-timescale"),
-            ("ran_merge", "RAN Merge"),
-            ("esom_regime_labels", "ESOM Labels"),
-            ("value_aware_decay", "Value Decay"),
-            ("auto_tune_temp", "Auto-tune Temp"),
-            ("deep_projections", "Deep Projections"),
-            ("counterfactual", "Counterfactual Cal."),
+            ("memory_enabled", "Memory enabled"),
+            ("memory_updates", "Online updates"),
         ]
         for i, (key, display_name) in enumerate(_FEATURE_DISPLAY):
             row, col = divmod(i, 4)
@@ -186,16 +172,10 @@ class MemoryTab(QWidget):
     def _render(self, status: MemoryStatus) -> None:
         self.badge_mem.set_state("ok" if status.exists else "off",
                                  "READY" if status.exists else "MISSING")
-        self.badge_fusion.set_state("ok" if status.fusion_enabled else "off",
-                                    "ON" if status.fusion_enabled else "OFF")
         self.card_items.set_value(str(status.item_count))
-        self.card_clusters.set_value(str(status.cluster_count))
-        self.card_units.set_value(str(status.unit_count))
-        self.card_mature.set_value(str(status.mature_unit_count))
-        self.card_candidate.set_value(str(status.candidate_unit_count))
-        self.card_quarantined.set_value(str(status.quarantined_unit_count))
-        self.card_esom_nodes.set_value(str(status.esom_node_count))
-        self.card_esom_edges.set_value(str(status.esom_edge_count))
+        self.card_latent_dim.set_value(str(status.latent_dim))
+        self.card_max_items.set_value(str(status.max_items))
+        self.card_similarity.set_value(status.similarity_metric or "—")
         self.card_fp.set_value(status.encoder_fingerprint or "—")
         self.card_contract.set_value(status.feature_contract_id or "—")
         if status.error:

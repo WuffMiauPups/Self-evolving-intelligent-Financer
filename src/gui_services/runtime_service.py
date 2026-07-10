@@ -212,7 +212,19 @@ class RuntimeService:
                 self._last_error = str(exc)
 
             platt_enabled = bool(cfg_summary.get("platt_calibration_enabled", False))
-            platt_fitted = Path("runs/platt_calibration.json").exists() if platt_enabled else False
+            # The fitted calibrator lives NEXT TO the checkpoint it was
+            # fitted for (src/training/platt_calibration.py), not at the
+            # legacy runs/platt_calibration.json location this badge used
+            # to poll.  Resolve it from the configured checkpoint path.
+            platt_fitted = False
+            if platt_enabled:
+                checkpoint_path = str(cfg_summary.get("checkpoint_path") or "")
+                if checkpoint_path:
+                    from src.training.platt_calibration import (
+                        platt_calibration_path_for_checkpoint,
+                    )
+
+                    platt_fitted = platt_calibration_path_for_checkpoint(checkpoint_path).exists()
             status = RuntimeStatus(
                 state=self._compute_state(),
                 pid=self._proc.pid if self._proc and self._proc.poll() is None else None,
@@ -250,9 +262,8 @@ class RuntimeService:
         # operator-visible safety-flag badges. The config view captured at
         # spawn time can drift from the actual runtime state (e.g. when
         # ``allow_online_memory_updates=false`` causes the runtime to
-        # silently downgrade ``runtime_update_mode`` to ``disabled``, or when
-        # decision_fusion is enabled at the YAML layer but the runtime
-        # detected an empty bank).  ``runtime_status.jsonl`` is written
+        # silently downgrade ``runtime_update_mode`` to ``disabled``).
+        # ``runtime_status.jsonl`` is written
         # per-tick by the trade engine and is the source of truth.
         if "memory_enabled" in snap:
             status.memory_enabled = bool(snap.get("memory_enabled"))

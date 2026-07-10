@@ -8,7 +8,7 @@ from src.core.exceptions import ConfigurationError
 class DecisionFusionConfig(BaseModel):
     """Inert stub — the decision-fusion layer was removed in the Great
     Simplification. Kept as a ``config.memory.decision_fusion`` attribute so
-    GUI and legacy log-filter code that read ``.enabled`` keep working.
+    legacy presets and tests that read ``.enabled`` keep working.
 
     INTENTIONAL EXCEPTION to the package-wide ``extra='forbid'`` policy:
     old YAMLs and presets still carry the deleted fusion layer's sub-keys
@@ -36,6 +36,16 @@ class TopologyGrowthConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
+    """Passive memory bank configuration.
+
+    Post-Great-Simplification only a handful of fields drive behavior
+    (enabled, persist_path, max_items, similarity_metric, forward_horizons,
+    runtime_update_mode, require_encoder_match, pending persistence).  The
+    many Hopfield/ESOM/dynamic-unit/calibration knobs below configure
+    machinery that was deleted; they are retained solely so existing YAMLs
+    keep loading under ``extra='forbid'`` and have no runtime effect.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False

@@ -1,9 +1,14 @@
 """Walk-forward cross-validation engine.
 
-Splits historical data into chronological train/val/test folds and
-evaluates a policy on each test fold using only data available up to
-that point.  Prevents data leakage by resetting all mutable state
-(model weights, memory bank, GRU hidden states) between folds.
+Splits historical data into strictly chronological train/val/test folds
+and evaluates a policy on each test fold, so every test window is
+structurally out-of-sample relative to the data that precedes it.
+Between folds a fresh pipeline and policy are built, per-symbol policy
+state is reset, and (when ``reset_memory_per_fold`` is set) the memory
+bank is rebuilt from that fold's training bars with a forward-outcome
+embargo.  Degenerate folds (zero fills — the policy never traded) are
+excluded from aggregate statistics and reported separately under
+``degenerate_folds``.
 """
 from __future__ import annotations
 

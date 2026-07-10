@@ -89,7 +89,9 @@ class MemoryUpdateEvent:
 
 @dataclass(frozen=True)
 class DecisionFusionEvent:
-    """Structured event emitted after the decision fusion layer runs."""
+    """Legacy event schema — the decision-fusion layer was removed in the
+    Great Simplification; nothing emits this anymore. Kept so old event
+    logs remain parseable."""
     timestamp: datetime
     symbol: str
     support_level: str
@@ -103,7 +105,9 @@ class DecisionFusionEvent:
 
 @dataclass(frozen=True)
 class FusionEvaluationEvent:
-    """Structured event emitted after offline fusion evaluation completes."""
+    """Legacy event schema — offline fusion evaluation was removed with the
+    decision-fusion layer; nothing emits this anymore. Kept so old event
+    logs remain parseable."""
     timestamp: datetime
     evaluated_samples: int
     support_count: int

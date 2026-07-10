@@ -46,7 +46,11 @@ def _load_bars(
     if not use_real_data:
         return {sym: generate_synthetic_bars(sym, 240) for sym in config.runtime.symbols}
     if credentials_available():
-        client = AlpacaClient(paper=config.broker.paper, data_feed=config.broker.data_feed)
+        client = AlpacaClient(
+            paper=config.broker.paper,
+            data_feed=config.broker.data_feed,
+            bar_adjustment=config.data.bar_adjustment,
+        )
     elif allow_mock:
         client = MockBrokerClient(paper=True, data_feed="mock")
     else:
@@ -88,10 +92,11 @@ def run_backtest(
     ``policy_kind`` controls which strategy is run:
       - ``"baseline"``       — BaselineMomentumPolicy (no model, no memory)
       - ``"brain"``          — BrainPolicy loaded from config.model.checkpoint_path
-      - ``"brain+memory"``   — MemoryAwarePolicy (brain + memory + fusion)
+      - ``"brain+memory"``   — MemoryAwarePolicy (brain + passive memory
+                               diagnostics; memory never gates trades)
 
     The brain/brain+memory paths go through ``src/backtest/policy_factory.py``
-    which is shared with the CLI ``scripts/run_backtest.py``.  Memory/fusion
+    which is shared with the CLI ``scripts/run_backtest.py``.  Memory
     toggles applied via layered YAML overrides (``runs/gui_backtest_override.yaml``)
     flow in through ``config_paths``.
     """

@@ -99,6 +99,35 @@ def build_checkpoint_meta(
     return meta
 
 
+def _parse_checkpoint_model_config(
+    raw_model_config: dict[str, Any],
+    checkpoint_path: str | Path,
+) -> ModelConfig:
+    """Parse a checkpoint's stored model_config with forward-compat filtering.
+
+    ``ModelConfig`` validates under ``extra='forbid'``, which is correct for
+    user-authored YAML but wrong at this ONE boundary: a checkpoint saved by
+    a newer code version (or before a field was *removed*) may carry keys the
+    current ``ModelConfig`` no longer knows. Rejecting the whole checkpoint
+    for an unused key would brick every old artifact on a field removal, so
+    unknown keys are dropped here with a warning instead.
+    """
+    known_fields = set(ModelConfig.model_fields)
+    unknown_keys = sorted(set(raw_model_config) - known_fields)
+    if unknown_keys:
+        logger.warning(
+            "checkpoint %s meta.model_config contains unknown keys %s; "
+            "dropping them for forward-compatibility (saved by a different "
+            "code version?)",
+            checkpoint_path,
+            unknown_keys,
+        )
+        raw_model_config = {
+            key: value for key, value in raw_model_config.items() if key in known_fields
+        }
+    return ModelConfig.model_validate(raw_model_config)
+
+
 def load_model_artifacts(
     checkpoint_path: str | Path,
     *,
@@ -109,7 +138,7 @@ def load_model_artifacts(
     model_kind = str(meta.get("model_kind", "brain"))
     if "model_config" not in meta or "feature_contract" not in meta:
         raise ConfigurationError(f"Checkpoint {checkpoint_path} is missing model reconstruction metadata")
-    model_config = ModelConfig.model_validate(meta["model_config"])
+    model_config = _parse_checkpoint_model_config(dict(meta["model_config"]), checkpoint_path)
     feature_contract = FeatureContract.from_dict(meta["feature_contract"])
     if model_kind == "brain" and model_config.use_cnn_encoder:
         model_state = checkpoint.get("model_state", {})

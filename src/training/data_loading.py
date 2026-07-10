@@ -38,6 +38,7 @@ def _build_training_client(config: AppConfig) -> tuple[object | None, bool]:
             AlpacaClient(
                 paper=config.broker.paper,
                 data_feed=config.broker.data_feed,
+                bar_adjustment=config.data.bar_adjustment,
             ),
             False,
         )

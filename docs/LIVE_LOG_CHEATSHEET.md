@@ -1,112 +1,52 @@
 # Live Log Cheat Sheet
 
-Quick reference for reading `logs/*.log` or the GUI log tail during a paper
-run, scoped to the fixes shipped on 2026-04-07. Tells you at a glance
-whether the brain + memory + fusion stack is actually benefiting from the
-changes or still degenerate.
+Quick reference for reading `logs/seif_runtime.log` (or the GUI log tail)
+during a paper run. These are the log events the runtime actually emits
+today (`src/execution/tick_processor.py`); anything else you may remember
+from older docs (soma_weights analysis, hopfield_top_indices,
+esom_neighbor_ids, calibrated_match_strength) belongs to deleted machinery
+and no longer appears.
 
-## What each log line means
+## Per-tick events, in loop order
 
-The paper loop emits three lines per tick per symbol:
+| Event | What to watch |
+| --- | --- |
+| `broker_sync_failed` (WARN) | Broker unreachable this tick; `consecutive_failures` climbing toward `failure_limit=30` means trading is about to be blocked, not just skipped. |
+| `tick_trading_skipped reason=broker_sync_failed` | Data lane still ran but no proposals were generated this tick; occasional is fine, constant means broker/network trouble. |
+| `order_transition` | Order lifecycle from broker sync and after each submit; watch `status` reach a terminal state and `filled_qty`/`remaining_qty` add up. |
+| `broker_fill_captured` | A broker fill was folded into the ledger/portfolio; check `realized_pnl` and that the `client_order_id` matches a prior submit. |
+| `bar_backfill` / `bar_backfill_failed` | Gap-repair after an outage or session boundary; repeated `bar_backfill_failed` for a symbol means the session guard will start blocking on data gaps. |
+| `warmup_pending` | Symbol buffer still below `runtime.warmup_bars`; logged once per symbol — normal at startup, suspicious hours in. |
+| `symbol_quarantined` | Symbol excluded with `reason_code` + `release_mode`; verify it is a symbol you expected to be blocked. |
+| `memory_update` | Passive memory finalized outcomes (`finalized_count`) and appended to the bank (`bank_items`); the bank should grow slowly during a run with memory updates enabled. |
+| `session_guard` | One per eligible symbol per tick; `allowed=False` with a `reason_code` (stale data, session window, data gap) is the most common reason nothing trades. |
+| `state_reset` | Policy state reset for a symbol (data gap / non-monotonic timestamps); frequent resets point at a data-quality problem. |
+| `model_decision` | The proposal: `action` (0=short 1=flat 2=long), `confidence`, `target_fraction`. Ignore `soma_weights`/`soma_activation`/`branch_confidences` — legacy placeholder fields, constant since the soma/branch machinery was removed. |
+| `risk_decision` | `approved` + `reasons`; watch for `resized_to_cap` (approved but capped) and halt reasons (`kill_switch`, `daily_loss_limit`, `spread_too_wide`). |
+| `order_submission_blocked` | Session guard failed between decision and submit; should be rare. |
+| `order_submit_attempt` | The intent actually sent to the router; every one should be followed by an `order_transition`. |
 
-```
-session_guard     allowed=... reason_code=...
-memory_retrieval  match_strength=... calibrated_match_strength=... ...
-model_decision    action=... confidence=... soma_weights=... branch_confidences=...
-risk_decision     approved=... reasons=[...]
-```
+Note: a `memory_retrieval` log call still exists in the code but never fires
+with the current passive memory — retrieval diagnostics are recorded as
+`memory_knn` inside `runs/decisions.jsonl` instead of the log stream.
 
-## The six signals to watch
-
-These are the fields that should demonstrably change after the
-encoder-L2 / soma-gating / ESOM-aggregation / graded-conflict fixes.
-
-### 1. `soma_weights` vs `branch_confidences` (from `model_decision`)
-The soma now bakes `log(branch_confidence)` into its softmax exponent, so
-the branch with the highest weight should be among the highest-confidence
-branches — not the lowest one.
-
-- **Bug signature (pre-fix):** `regime` had weight ~0.65 while its confidence
-  was ~0.42 (lowest of four).
-- **Expected after fix:** whichever branch has the max confidence should
-  also have the max (or near-max) soma weight. If confidences are all
-  similar, soma weights will be near-uniform (~0.25 each).
-- **Red flag:** the lowest-confidence branch still has the highest weight.
-
-### 2. `calibrated_match_strength` (from `memory_retrieval`)
-Should now *vary* per query instead of pinning at ~0.08.
-
-- **Bug signature (pre-fix):** locked at 0.082 for every tick on every
-  symbol because the calibration bucket confidence had collapsed (binary
-  conflict rule + saturated cosine).
-- **Expected after fix:** values spread across the bucket edges — typical
-  range 0.05–0.40 depending on match quality. Should correlate with
-  `average_similarity`.
-- **Red flag:** still pinned at one value across all ticks.
-
-### 3. `hopfield_top_indices` + `esom_neighbor_ids` (from `memory_retrieval`)
-Both should DIFFER across consecutive ticks and across symbols. ESOM
-neighbor slate was previously identical everywhere.
-
-- **Bug signature (pre-fix):** `esom_neighbor_ids=['unit_0323','unit_0098','unit_0082']`
-  on every single tick, regardless of symbol or time.
-- **Expected after fix:** different symbol → different slate; consecutive
-  ticks of the same symbol → mostly different slates (some overlap is fine).
-- **Red flag:** identical neighbor lists across more than 3 consecutive
-  ticks or across different symbols.
-
-### 4. `conflict_score` (from `memory_retrieval`)
-No longer locked at 1.0 on symbols with small per-symbol calibration
-buckets.
-
-- **Bug signature (pre-fix):** MSFT conflict_score = 1.0 forever (binary
-  rule killed the bucket).
-- **Expected after fix:** values in (0, 1), typically 0.3–0.7 on weak
-  matches, 0.0–0.3 on strong matches.
-- **Red flag:** still exactly 1.0 for any symbol.
-
-### 5. `reason_code` (from `memory_retrieval`)
-Previously alternated between `calibrated_weak_match` and
-`conflicting_outcomes`. After the fixes the bank should sometimes emit
-`strong_match`, `weak_match`, `aligned_with_memory`, etc.
-
-- **Expected after fix:** variety — at least some ticks should NOT be
-  `calibrated_weak_match` or `conflicting_outcomes`.
-- **Red flag:** same reason code on every tick for hours.
-
-### 6. `advisory_effect` + `memory_vetoed/dampened` (from `memory_retrieval`)
-Memory is advisory-only, but its advice should actually be useful. With
-a healthier bank, you want to see at least SOME ticks where memory
-AGREES with the brain (not just dampens every proposal).
-
-- **Expected after fix:** mix of `dampened`, `supported`, `neutral`. If
-  every tick is `dampened` → the calibration is still weak.
-- **Red flag:** 100% `dampened`, 100% `memory_vetoed=False` but every
-  trade still gets pushed to flat.
-
-## Quick grep commands
-
-Run any of these on the live log to audit a run in 10 seconds:
+## Quick greps
 
 ```bash
-# Is the soma respecting confidence? Pull branch_confidences and soma_weights
-grep model_decision logs/live.log | tail -20
+# Why is nothing trading?  Reason-code distribution of blocked ticks
+grep session_guard logs/seif_runtime.log | grep "allowed=False" | grep -oE 'reason_code=\S+' | sort | uniq -c | sort -rn
 
-# Are memory matches varying?
-grep calibrated_match_strength logs/live.log | awk -F'calibrated_match_strength=' '{print $2}' | awk '{print $1}' | sort -u | head
+# What is the risk layer doing to proposals?
+grep risk_decision logs/seif_runtime.log | grep -oE 'reasons=\[[^]]*\]' | sort | uniq -c | sort -rn
 
-# Are ESOM neighbors varying?
-grep esom_neighbor_ids logs/live.log | grep -oE "'unit_[0-9]+'" | sort -u | wc -l
+# Did submits complete?
+grep -c order_submit_attempt logs/seif_runtime.log; grep order_transition logs/seif_runtime.log | grep -c terminal=True
 
-# Reason code distribution
-grep memory_retrieval logs/live.log | grep -oE 'reason_code=\S+' | sort | uniq -c | sort -rn
+# Fills and realized PnL
+grep broker_fill_captured logs/seif_runtime.log | tail -20
 ```
 
-## If everything still looks degenerate
-
-The bank and the runtime code are only as good as the brain checkpoint.
-If after rebuilding with the fixes the logs still show pinned
-`calibrated_match_strength` or dominant `regime` soma weights, the
-next step is a full retrain with the new `gating_confidence` loss — that's
-what pushes bucket agreement above chance and fixes the "brain collapses to
-regime" problem at its source.
+For per-decision analysis (executed action, resized flag, memory kNN
+neighbors), read `runs/decisions.jsonl`; for fills, `runs/fills.jsonl`.
+The runtime status snapshot also exposes `intervention_rate` — the fraction
+of proposals the risk layer rejected or resized.

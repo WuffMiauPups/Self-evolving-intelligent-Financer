@@ -53,7 +53,7 @@ from src.gui_services.experiment_service import list_available_experiments, run_
 _EXPERIMENT_GROUPS = {
     "Core ablations": [
         ("full_model", "Full model (reference)"),
-        ("brain_only", "Brain only (no memory/fusion)"),
+        ("brain_only", "Brain only (no memory)"),
         ("brain_no_flip", "Brain + FLAT allowed"),
     ],
     "Component ablations": [
@@ -62,9 +62,9 @@ _EXPERIMENT_GROUPS = {
         ("no_latent_memory", "No GRU latent memory"),
         ("no_confidence_gating", "No confidence gating"),
     ],
-    "Memory / Fusion": [
+    "Memory": [
         ("memory_off", "Memory OFF"),
-        ("fusion_off", "Fusion OFF"),
+        ("fusion_off", "Fusion OFF (legacy no-op preset)"),
         ("no_online_memory", "No online memory updates"),
     ],
     "Risk variants": [
