@@ -4,14 +4,13 @@ from datetime import datetime
 from dataclasses import dataclass, field
 
 import torch
-import torch.nn.functional as F
 
 from src.core.constants import ACTION_TO_SIGN, Action
 from src.core.device import maybe_autocast
 from src.core.logging import get_logger
 from src.features.feature_pipeline import FeatureContract, FeatureSnapshot
 from src.features.normalization import NormalizationStats
-from src.models.base import TradingModelProtocol
+from src.models.base import ModelOutput, TradingModelProtocol
 from src.risk.constraints import TradeProposal
 from src.utils.torch_utils import ensure_batch_dimension, to_tensor
 
@@ -45,23 +44,73 @@ def _extract_ev_signals_batch(
     risk_predictions: dict[str, torch.Tensor] | None,
     batch_size: int,
 ) -> tuple[list[float], list[float]]:
-    """Batched variant of ``_extract_ev_signals_single``. Single host sync."""
+    """Batched variant of ``_extract_ev_signals_single``. Single host sync.
+
+    Each EV leg is handled independently, matching the single-sample
+    path: a missing ``mfe`` (or ``mae``) zeroes only its own leg instead
+    of zeroing both.
+    """
+    zeros = [0.0] * batch_size
     if not risk_predictions:
-        zeros = [0.0] * batch_size
         return zeros, zeros
     mfe = risk_predictions.get("mfe")
     mae = risk_predictions.get("mae")
-    if mfe is None or mae is None:
-        zeros = [0.0] * batch_size
+    if mfe is None and mae is None:
         return zeros, zeros
-    stacked = torch.stack(
-        [mfe.detach().reshape(batch_size), mae.detach().reshape(batch_size)],
-        dim=0,
-    )
-    values = stacked.cpu().tolist()
-    gain_bps = [float(v) * 10_000.0 for v in values[0]]
-    loss_bps = [abs(float(v)) * 10_000.0 for v in values[1]]
+    present = [t.detach().reshape(batch_size) for t in (mfe, mae) if t is not None]
+    values = iter(torch.stack(present, dim=0).cpu().tolist())
+    gain_fractions = next(values) if mfe is not None else zeros
+    loss_fractions = next(values) if mae is not None else zeros
+    gain_bps = [float(v) * 10_000.0 for v in gain_fractions]
+    loss_bps = [abs(float(v)) * 10_000.0 for v in loss_fractions]
     return gain_bps, loss_bps
+
+
+def _reassemble_bucketed_outputs(
+    outputs: list[ModelOutput],
+    order: list[int],
+) -> ModelOutput:
+    """Recombine per-length-bucket ``ModelOutput``s into original batch order.
+
+    Used only by ``BrainPolicy.propose_batch`` (§4.3.5).  ``order[j]``
+    is the original batch row of the j-th row of the concatenated
+    bucket outputs.  Optional fields are assumed consistently
+    present/absent across buckets — they come from the same model and
+    forward signature.
+    """
+    batch_size = len(order)
+    perm = torch.tensor(order, dtype=torch.long)
+    inverse = torch.empty_like(perm)
+    inverse[perm] = torch.arange(batch_size, dtype=torch.long)
+
+    def gather(values: list[torch.Tensor | None]) -> torch.Tensor | None:
+        if values[0] is None:
+            return None
+        combined = torch.cat(values, dim=0)
+        return combined[inverse.to(combined.device)]
+
+    def gather_dict(dicts: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+        return {key: gather([d[key] for d in dicts]) for key in dicts[0]}
+
+    return ModelOutput(
+        action_logits=gather([o.action_logits for o in outputs]),
+        confidence=gather([o.confidence for o in outputs]),
+        target_fraction=gather([o.target_fraction for o in outputs]),
+        fused_representation=gather([o.fused_representation for o in outputs]),
+        branch_embeddings=gather_dict([o.branch_embeddings for o in outputs]),
+        branch_confidences=gather_dict([o.branch_confidences for o in outputs]),
+        soma_weights=gather([o.soma_weights for o in outputs]),
+        soma_activation=gather([o.soma_activation for o in outputs]),
+        regime_weights=gather([o.regime_weights for o in outputs]),
+        value=gather([o.value for o in outputs]),
+        memory_state=gather([o.memory_state for o in outputs]),
+        temporal_embedding=gather([o.temporal_embedding for o in outputs]),
+        risk_predictions=(
+            gather_dict([o.risk_predictions for o in outputs])
+            if outputs[0].risk_predictions is not None
+            else None
+        ),
+    )
 
 
 @dataclass
@@ -388,8 +437,8 @@ class BrainPolicy:
         )
 
         # Temporal tensors may differ in time-dim when symbols haven't
-        # reached the same buffer length (rare at steady state).  Pad
-        # on the left to the max so shapes match within the batch.
+        # reached the same buffer length (rare at steady state).  They
+        # are forwarded in per-length sub-batches below — never padded.
         temporal_slices = [
             ensure_batch_dimension(
                 to_tensor(snapshot.temporal_tensor, device=device, dtype=dtype)
@@ -397,17 +446,7 @@ class BrainPolicy:
             for snapshot in snapshots
         ]
         if self.normalization is not None:
-            # Normalize each slice before padding so pad positions stay
-            # exactly zero, matching the single-sample path.
             temporal_slices = [self.normalization.apply_temporal(s) for s in temporal_slices]
-        max_time = max(slice_.shape[-1] for slice_ in temporal_slices)
-        temporal_batch = torch.stack(
-            [
-                F.pad(slice_, (max_time - slice_.shape[-1], 0))
-                for slice_ in temporal_slices
-            ],
-            dim=0,
-        )
         if self.normalization is not None:
             branch_inputs_batch = {
                 name: self.normalization.apply_branch(name, value)
@@ -445,15 +484,55 @@ class BrainPolicy:
             # cold batch.
             memory_state_batch = None
 
-        # --- Single batched forward ---------------------------------------
+        # --- Batched forward, length-bucketed (§4.3.5) ---------------------
+        # The old approach left-zero-padded shorter temporal tensors to
+        # the batch max and convolved the padding: eval-mode BatchNorm
+        # maps pad zeros to a nonzero bias that the next conv smears
+        # into real positions, and the adaptive average pool divides by
+        # the padded length — so a symbol's proposal depended on which
+        # other symbols shared its batch.  Masked pooling cannot fix
+        # this (the contamination happens inside every residual block,
+        # not just at the pool), so instead we forward one sub-batch
+        # per distinct temporal length with no padding at all: each
+        # row's computation is then identical to its single-sample
+        # ``propose`` forward regardless of batch composition
+        # (tests/test_model_input_hardening.py pins the equality).
+        lengths = [slice_.shape[-1] for slice_ in temporal_slices]
+        unique_lengths = sorted(set(lengths))
         with torch.no_grad(), maybe_autocast(self.device, self._amp_enabled()):
-            output = self.model(
-                branch_inputs=branch_inputs_batch,
-                regime_input=regime_input_batch,
-                memory_state=memory_state_batch,
-                full_features=features_batch,
-                temporal_tensor=temporal_batch,
-            )
+            if len(unique_lengths) == 1:
+                output = self.model(
+                    branch_inputs=branch_inputs_batch,
+                    regime_input=regime_input_batch,
+                    memory_state=memory_state_batch,
+                    full_features=features_batch,
+                    temporal_tensor=torch.stack(temporal_slices, dim=0),
+                )
+            else:
+                order: list[int] = []
+                bucket_outputs: list[ModelOutput] = []
+                for length in unique_lengths:
+                    rows = [i for i, l in enumerate(lengths) if l == length]
+                    order.extend(rows)
+                    bucket_outputs.append(
+                        self.model(
+                            branch_inputs={
+                                name: value[rows]
+                                for name, value in branch_inputs_batch.items()
+                            },
+                            regime_input=regime_input_batch[rows],
+                            memory_state=(
+                                memory_state_batch[rows]
+                                if memory_state_batch is not None
+                                else None
+                            ),
+                            full_features=features_batch[rows],
+                            temporal_tensor=torch.stack(
+                                [temporal_slices[i] for i in rows], dim=0
+                            ),
+                        )
+                    )
+                output = _reassemble_bucketed_outputs(bucket_outputs, order)
 
         # --- Update per-symbol memory state -------------------------------
         if output.memory_state is None:

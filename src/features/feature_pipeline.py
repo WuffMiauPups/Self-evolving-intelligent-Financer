@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Mapping, Sequence
@@ -193,9 +194,10 @@ class BatchedFeatureSnapshots:
         pipeline would return for a ``warmup_bars``-long window ending
         at this bar — we slice the precomputed temporal columns and
         then apply the same "first-bar reset" the scalar path applies
-        to ``close_return`` / ``log_return`` / ``volume_change`` so the
-        outputs are bit-compatible up to floating-point reduction
-        order.
+        to ``close_return`` / ``log_return`` / ``volume_change`` /
+        ``volatility_proxy``.  Equivalence with the scalar path is
+        within fp32 reduction-order noise (observed <= ~2.6e-5, pinned
+        at rtol=1e-4 / atol=5e-5 by tests/test_feature_parity.py).
         """
         if not 0 <= index < self.n_bars:
             raise IndexError(f"snapshot_at index out of range: {index} (n={self.n_bars})")
@@ -212,8 +214,17 @@ class BatchedFeatureSnapshots:
         # values from the full history, so we need to override them
         # here to match.  Indices come from the temporal_feature_names
         # ordering produced by ``_build_temporal_tensor``.
+        # ``volatility_proxy_t`` is ``close_return.abs()`` and inherits
+        # the same first-row reset in the scalar path (§4.3.1 fix —
+        # omitting it leaked the prior bar's return into column 0 of
+        # every full window).
         if temporal_tensor.shape[1] > 0:
-            for reset_name in ("close_return_t", "log_return_t", "volume_change_t"):
+            for reset_name in (
+                "close_return_t",
+                "log_return_t",
+                "volume_change_t",
+                "volatility_proxy_t",
+            ):
                 row_idx = self._temporal_name_to_idx.get(reset_name)
                 if row_idx is None:
                     continue
@@ -341,9 +352,19 @@ class FeaturePipeline:
         else:
             branch_feature_names, regime_names = cached
         stacked = torch.stack([values[name] for name in feature_names], dim=0)
+        # Live-path input sanitation (§4.3.3): a pathological bar (e.g.
+        # zero close) can still push a non-finite value through a
+        # feature formula (log of a zero-close ratio inside a rolling
+        # std, ...).  The model must never see NaN/inf, so replace them
+        # with 0 at the snapshot boundary.  This is a no-op on finite
+        # features, which keeps scalar/batch parity intact
+        # (tests/test_feature_parity.py).
+        stacked = torch.nan_to_num(stacked, nan=0.0, posinf=0.0, neginf=0.0)
         branch_inputs = self._assign_branch_inputs(feature_names, stacked, branch_feature_names)
         regime_input = torch.stack([values[name] for name in regime_names], dim=0)
+        regime_input = torch.nan_to_num(regime_input, nan=0.0, posinf=0.0, neginf=0.0)
         temporal_names, temporal_tensor = self._build_temporal_tensor(bars_tensor)
+        temporal_tensor = torch.nan_to_num(temporal_tensor, nan=0.0, posinf=0.0, neginf=0.0)
         return FeatureSnapshot(
             symbol=symbol,
             timestamp=resolved_timestamp,
@@ -378,12 +399,16 @@ class FeaturePipeline:
         ``FeatureSnapshot`` without paying for per-bar feature
         computation.
 
-        Invariant: for bar indices ``i >= max(windows) - 1`` the
-        returned snapshot is bit-equivalent to what
-        ``FeaturePipeline.build`` would return if called with
-        ``bars[max(0, i + 1 - temporal_window): i + 1]``.  Earlier
-        bars are zero-filled — callers must never read from them
-        (use ``first_valid_index`` to guard).
+        Invariant: for bar indices ``i >= first_valid_index`` (derived
+        from ALL feature-family warmups — see
+        ``_derive_first_valid_index``) the returned snapshot matches
+        what ``FeaturePipeline.build`` would return if called with
+        ``bars[max(0, i + 1 - temporal_window): i + 1]``, within fp32
+        reduction-order noise (pinned at rtol=1e-4 / atol=5e-5 by
+        tests/test_feature_parity.py; the live path additionally
+        sanitizes non-finite values, a no-op on well-formed bars).
+        Earlier bars are zero-filled — callers must never read from
+        them (use ``first_valid_index`` to guard).
 
         ``temporal_window`` matches the per-bar temporal tensor size
         used by the scalar path (typically ``config.runtime.warmup_bars``).
@@ -427,17 +452,32 @@ class FeaturePipeline:
         return result
 
     def _compute_bars_signature(self, bars: Sequence[MarketBar]) -> dict[str, Any]:
-        """Minimal signature for cache keying — no floating-point sensitivity."""
+        """Signature for cache keying: endpoints + a cheap content hash.
+
+        Endpoint fields alone (count / first / last) collide when only
+        interior bars change — e.g. a re-fetch with corrected adjusted
+        prices for the same date range would silently keep serving the
+        stale cached features.  The close/volume sums plus a handful of
+        sampled interior closes make any single-bar edit change the
+        fingerprint without hashing the full history.
+        """
         bars_list = list(bars)
         if not bars_list:
             return {"count": 0}
         first, last = bars_list[0], bars_list[-1]
+        n = len(bars_list)
+        sample_indices = sorted({0, n // 4, n // 2, (3 * n) // 4, n - 1})
         return {
-            "count": len(bars_list),
+            "count": n,
             "first_ts": first.timestamp.isoformat(),
             "last_ts": last.timestamp.isoformat(),
             "first_close": float(first.close),
             "last_close": float(last.close),
+            # math.fsum: exact float summation, so any value edit shifts
+            # the sum deterministically (no fp-rounding near-misses).
+            "close_sum": float(math.fsum(bar.close for bar in bars_list)),
+            "volume_sum": float(math.fsum(bar.volume for bar in bars_list)),
+            "sampled_closes": [float(bars_list[i].close) for i in sample_indices],
         }
 
     def _feature_config_snapshot(self) -> dict[str, Any]:
@@ -634,7 +674,7 @@ class FeaturePipeline:
         # --- Pointwise temporal columns on the full history ----------------
         temporal_names, temporal_columns = self._build_temporal_columns(bars_tensor)
 
-        first_valid_index = max(self.config.windows.get("long", 0), 0)
+        first_valid_index = self._derive_first_valid_index(temporal_window)
         return BatchedFeatureSnapshots(
             symbol=symbol,
             feature_names=feature_names,
@@ -651,6 +691,46 @@ class FeaturePipeline:
             timestamps=[bar.timestamp for bar in bars],
             first_valid_index=first_valid_index,
         )
+
+    def _derive_first_valid_index(self, temporal_window: int) -> int:
+        """First bar index at which every feature family is fully warmed.
+
+        Previously this was ``windows['long']`` alone, but family
+        warmups can exceed it for small-window configs: MACD needs 35
+        bars (slow-SMA seed + signal seed), RSI/ATR need 14, and each
+        ``return_{W}`` needs ``W + 1`` bars.  Per family, the first
+        valid index mirrors the scalar path's insufficient-history
+        guard; windows large enough to be zeroed everywhere by the
+        ``temporal_window`` post-step are trivially consistent at every
+        index and therefore excluded.  ``windows['long']`` is kept as a
+        floor so existing consumers of ``first_valid_index`` never see
+        it shrink.
+        """
+        from src.features.price_features import (
+            _ATR_PERIOD,
+            _MACD_MIN_BARS,
+            _RSI_PERIOD,
+        )
+
+        candidates = [max(int(self.config.windows.get("long", 0)), 0)]
+        # return_/log_return_/momentum_{W}: scalar guard ``numel > W``.
+        candidates.extend(w for w in self.config.momentum_windows if w < temporal_window)
+        # momentum_slope_{W}: scalar guard ``numel >= W``.
+        candidates.extend(w - 1 for w in self.config.momentum_windows if w <= temporal_window)
+        # volatility_{W}: scalar guard ``numel - 1 >= W`` (log returns).
+        candidates.extend(w for w in self.config.volatility_windows if w <= temporal_window - 1)
+        # volume_z_/volume_change_{W}: scalar guard ``numel >= W``.
+        candidates.extend(w - 1 for w in self.config.volume_windows if w <= temporal_window)
+        # regime_close_to_ma_/regime_price_z_{label}: scalar guard ``numel >= W``.
+        candidates.extend(w - 1 for w in self.config.windows.values() if w <= temporal_window)
+        # Technical indicators: scalar guard ``numel > period``.
+        if temporal_window > _RSI_PERIOD:
+            candidates.append(_RSI_PERIOD)
+        if temporal_window > _ATR_PERIOD:
+            candidates.append(_ATR_PERIOD)
+        if temporal_window > _MACD_MIN_BARS:
+            candidates.append(_MACD_MIN_BARS)
+        return max(candidates)
 
     def _build_temporal_columns(
         self, bars_tensor: torch.Tensor

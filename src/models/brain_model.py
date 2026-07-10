@@ -114,18 +114,18 @@ class BrainTradingModel(nn.Module):
         del memory_state
 
         if full_features is None:
-            # Reconstruct flat features from branches if the caller didn't
-            # pass ``full_features`` (keeps the factory pipeline backward compat).
-            ordered = [
-                ensure_batch_dimension(branch_inputs[name])
-                for name in self.branch_names
-                if name in branch_inputs
-            ]
-            if not ordered:
-                raise ValueError("BrainTradingModel requires full_features or branch_inputs")
-            full_features = torch.cat(ordered, dim=-1)
-        else:
-            full_features = ensure_batch_dimension(full_features)
+            # §4.3.4: the old fallback rebuilt the flat vector by
+            # concatenating ``branch_inputs`` in branch order, which is a
+            # silent permutation of the contract's global (sorted) feature
+            # ordering — the model would train/serve on scrambled inputs
+            # without any error.  Every real caller passes the
+            # contract-ordered ``full_features``; refuse anything else.
+            raise ValueError(
+                "BrainTradingModel requires full_features (contract-ordered flat "
+                "feature vector); reconstructing it from branch_inputs would "
+                "silently permute features against the feature contract"
+            )
+        full_features = ensure_batch_dimension(full_features)
 
         batch_size = full_features.shape[0]
         if full_features.shape[-1] != self.flat_feature_dim:

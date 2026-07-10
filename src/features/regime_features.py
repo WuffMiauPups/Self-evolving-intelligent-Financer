@@ -59,13 +59,17 @@ def compute_regime_features_rolling(
     ``short_window = min(short_window, close.numel())``) and computes
     the reduction on the clipped slice.  The clipped rolling helpers
     (``rolling_*_clipped`` in ``src/features/rolling.py``) mirror that
-    behaviour, so the vectorized output is bit-equivalent to the
-    scalar path at every bar index — including the partial prefix.
+    behaviour, so the vectorized output matches the scalar path at
+    every bar index — including the partial prefix.
 
     The only observable difference is floating-point reduction order
-    (``torch.unfold`` sums vs per-window ``.std()`` sums), which is
-    bounded below ``5e-3`` on ``regime_price_z_*`` features in
-    practice — well within FP32 reduction noise.
+    (``torch.unfold`` sums vs per-window ``.std()`` sums): observed
+    <= ~2.6e-5 for full windows (pinned at rtol=1e-4 / atol=5e-5 by
+    tests/test_feature_parity.py).  In the clipped-prefix region
+    (bar index < window - 1) the cumsum-based running std is less
+    stable and the drift can reach ~5e-3 on ``regime_price_z_*`` /
+    near-constant prices — still fp32 reduction noise, not a semantic
+    divergence.
     """
     close = bars[:, 3]
     volume = bars[:, 4]

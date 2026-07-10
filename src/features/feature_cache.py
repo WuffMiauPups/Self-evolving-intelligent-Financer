@@ -7,7 +7,9 @@ For repeat backtests (ablation studies), this is pure overhead.
 Cache structure:
   artifacts/features_cache/<fingerprint>.pt
 where <fingerprint> = sha256 of:
-  - bars_signature (first_ts, last_ts, count, first_close, last_close)
+  - FEATURE_SCHEMA_VERSION (code/formula version salt)
+  - bars_signature (endpoints + content hash: close/volume sums,
+    sampled interior closes)
   - symbol
   - FeatureConfig fields (windows, epsilon, branch_feature_prefixes)
   - temporal_window
@@ -25,6 +27,19 @@ from typing import Any
 
 import torch
 
+# Contract: bump this constant whenever a feature FORMULA changes — any
+# edit to src/features/* that alters computed values for the same bars
+# and config (new/removed features, changed math, changed zero-fill or
+# window semantics, changed epsilon handling).  The version is part of
+# the cache fingerprint, so a bump makes every previously cached entry
+# miss and forces a rebuild; forgetting to bump silently serves feature
+# tensors computed by the OLD code to training/backtest.
+# History:
+#   1 — implicit pre-versioning behavior (no salt in the fingerprint).
+#   2 — §4.3 parity fixes: RSI/momentum warmup zeroing, epsilon-guarded
+#       return denominators, volatility_proxy_t window reset.
+FEATURE_SCHEMA_VERSION = 2
+
 DEFAULT_CACHE_DIR = Path("artifacts/features_cache")
 ENV_DISABLE = "SETAI_DISABLE_FEATURE_CACHE"
 
@@ -41,6 +56,10 @@ def compute_fingerprint(
     temporal_window: int,
 ) -> str:
     payload = {
+        # Read at call time (not bound at import) so a version bump —
+        # including a monkeypatched one in tests — always changes the
+        # fingerprint of subsequent computations.
+        "schema_version": int(FEATURE_SCHEMA_VERSION),
         "bars": bars_signature,
         "symbol": symbol,
         "features": feature_config_snapshot,

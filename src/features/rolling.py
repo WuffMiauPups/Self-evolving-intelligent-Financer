@@ -97,9 +97,10 @@ def rolling_first_last_return(
 def rolling_log_return(
     x: torch.Tensor, window: int, *, epsilon: float
 ) -> torch.Tensor:
-    """``log(x[i] / x[i - window + 1])`` rolling, with ``clamp_min(epsilon)``.
+    """``log(x[i] / (x[i - window + 1] + eps))`` rolling, with ``clamp_min(epsilon)``.
 
-    Matches the scalar path's per-window ``log_return_{window}`` feature.
+    Matches the scalar path's per-window ``log_return_{window}`` feature
+    (epsilon-guarded denominator, then clamp before the log).
     """
     n = x.numel()
     if n == 0:
@@ -110,7 +111,7 @@ def rolling_log_return(
         return torch.zeros(n, dtype=x.dtype, device=x.device)
     first = x[: n - window + 1]
     last = x[window - 1 :]
-    rolled = torch.log((last / first).clamp_min(epsilon))
+    rolled = torch.log((last / (first + epsilon)).clamp_min(epsilon))
     return _pad_left(rolled, window - 1)
 
 

@@ -18,9 +18,12 @@ def compute_price_features(bars: torch.Tensor, momentum_windows: list[int], epsi
     features: dict[str, torch.Tensor] = {}
 
     if close.numel() > 1:
-        one_step_return = (last_close / close[-2]) - 1.0
+        # ``+ epsilon`` guards a zero-close prior bar (raw division gave
+        # inf) and matches the rolling helpers' denominators exactly —
+        # tests/test_feature_parity.py pins the equivalence.
+        one_step_return = (last_close / (close[-2] + epsilon)) - 1.0
         features["return_1"] = one_step_return
-        features["log_return_1"] = torch.log((last_close / close[-2]).clamp_min(epsilon))
+        features["log_return_1"] = torch.log((last_close / (close[-2] + epsilon)).clamp_min(epsilon))
     else:
         zero = torch.zeros((), dtype=bars.dtype, device=bars.device)
         features["return_1"] = zero
@@ -39,8 +42,8 @@ def compute_price_features(bars: torch.Tensor, momentum_windows: list[int], epsi
         if close.numel() > window:
             past_close = close[-(window + 1)]
             window_mean = close[-window:].mean()
-            features[f"return_{window}"] = (last_close / past_close) - 1.0
-            features[f"log_return_{window}"] = torch.log((last_close / past_close).clamp_min(epsilon))
+            features[f"return_{window}"] = (last_close / (past_close + epsilon)) - 1.0
+            features[f"log_return_{window}"] = torch.log((last_close / (past_close + epsilon)).clamp_min(epsilon))
             features[f"momentum_{window}"] = (last_close / (window_mean + epsilon)) - 1.0
         else:
             zero = torch.zeros((), dtype=bars.dtype, device=bars.device)
@@ -79,10 +82,11 @@ def compute_price_features_rolling(
     # --- one-step return / log-return ---
     if n > 1:
         prev = torch.cat([close[:1], close[:-1]], dim=0)
-        # Match scalar path: element 0 is 0 (no prior bar).
-        step_return = (close / prev) - 1.0
+        # Match scalar path: element 0 is 0 (no prior bar); ``+ epsilon``
+        # guards a zero-close prior bar, same as the scalar path.
+        step_return = (close / (prev + epsilon)) - 1.0
         step_return[0] = 0.0
-        step_log_return = torch.log((close / prev).clamp_min(epsilon))
+        step_log_return = torch.log((close / (prev + epsilon)).clamp_min(epsilon))
         step_log_return[0] = 0.0
         features["return_1"] = step_return
         features["log_return_1"] = step_log_return
@@ -112,9 +116,14 @@ def compute_price_features_rolling(
             features[f"log_return_{window}"] = rolling_log_return(
                 close, anchor_span, epsilon=epsilon
             )
-            features[f"momentum_{window}"] = rolling_close_over_mean(
-                close, window, epsilon=epsilon
-            )
+            momentum = rolling_close_over_mean(close, window, epsilon=epsilon)
+            # Off-by-one fix (§4.3.1): the scalar path computes
+            # ``momentum_{W}`` under the same ``numel > W`` guard as
+            # ``return_{W}`` (W+1 bars required), so bar W-1 must be
+            # zero even though the W-bar mean already exists there.
+            # ``rolling_close_over_mean`` only zeroes ``[: W - 1]``.
+            momentum[:window] = 0.0
+            features[f"momentum_{window}"] = momentum
         else:
             features[f"return_{window}"] = zero_full
             features[f"log_return_{window}"] = zero_full
@@ -260,8 +269,11 @@ def compute_technical_indicators_rolling(
         rsi_vals = 1.0 - 1.0 / (1.0 + rs)     # (n-1,)
         rsi_out = torch.zeros(n, dtype=dtype, device=device)
         rsi_out[1:] = rsi_vals
-        # Zero out positions without enough history
-        rsi_out[: _RSI_PERIOD + 1] = 0.0
+        # Zero out positions without enough history.  Off-by-one fix
+        # (§4.3.1): the scalar guard is ``n > _RSI_PERIOD``, so bar
+        # index ``_RSI_PERIOD`` (period+1 bars → period deltas) is the
+        # FIRST valid bar — zeroing ``[: _RSI_PERIOD + 1]`` wiped it.
+        rsi_out[: _RSI_PERIOD] = 0.0
     else:
         rsi_out = zero_full
 
