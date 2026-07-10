@@ -308,6 +308,48 @@ def _backfill_gap(
         )
 
 
+def _write_decision_event(
+    ctx: RuntimeContext,
+    *,
+    proposal: object,
+    decision: object,
+    result: object | None,
+) -> None:
+    """Record what the model proposed vs what actually executed.
+
+    The self-evolution loop must learn from executed (risk-clamped)
+    actions, never raw intent — this event stream is where that record
+    lives.  Best-effort: never raises into the trade loop.
+    """
+    if ctx.decision_writer is None:
+        return
+    try:
+        from src.monitoring.decision_log import DecisionEvent
+
+        reasons = [str(r) for r in getattr(decision, "reasons", [])]
+        ctx.decision_writer.write(
+            DecisionEvent(
+                ts=proposal.timestamp,
+                symbol=proposal.symbol,
+                request_id=proposal.request_id,
+                proposed_action=int(proposal.action),
+                confidence=float(proposal.confidence),
+                target_fraction=float(proposal.target_fraction),
+                approved=bool(decision.approved),
+                reasons=reasons,
+                executed_side=(decision.side if decision.approved else None),
+                executed_qty=(float(decision.quantity) if decision.approved else 0.0),
+                resized="resized_to_cap" in reasons,
+                order_status=(None if result is None else str(getattr(result, "status", None))),
+                client_order_id=(
+                    None if result is None else getattr(result, "client_order_id", None)
+                ),
+            )
+        )
+    except Exception:  # noqa: BLE001 - observability must never block trading
+        pass
+
+
 def _write_positions_snapshot(
     *,
     writer: PositionsStatusWriter,
@@ -667,6 +709,7 @@ def process_tick(
             "quantity": float(decision.quantity),
         }
         if not decision.approved:
+            _write_decision_event(ctx, proposal=proposal, decision=decision, result=None)
             ctx.metrics.increment("risk_rejections")
             for reason in decision.reasons:
                 ctx.metrics.increment_reason("risk_rejection", str(reason))
@@ -736,6 +779,7 @@ def process_tick(
             sequence=sequence,
         )
         result = ctx.router.route(intent)
+        _write_decision_event(ctx, proposal=proposal, decision=decision, result=result)
         logger.info(
             "order_transition",
             symbol=result.symbol,

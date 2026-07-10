@@ -351,6 +351,11 @@ execution:
   # --- Journal rotation ---
   order_journal_max_bytes: 50000000   # 50 MB
   order_journal_max_backups: 3
+  # --- Durable outcome dataset (the self-evolution loop's raw material) ---
+  ledger_persist_enabled: true
+  ledger_persist_path: "runs/fills.jsonl"
+  decision_log_enabled: true
+  decision_log_path: "runs/decisions.jsonl"
 
 memory:
   enabled: true

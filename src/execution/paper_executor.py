@@ -46,9 +46,13 @@ class PaperExecutor:
             fee=fee,
             timestamp=intent.timestamp,
         )
+        # Realized PnL is reported NET of the fill's fee — gross figures
+        # made every per-trade statistic (win rate, expectancy) optimistic
+        # by exactly the costs. Cash already carries the fee via ``cost``.
+        realized_net = realized_pnl - fee
         self.portfolio.cash -= cost
-        self.portfolio.realized_pnl += realized_pnl
-        self.portfolio.daily_pnl += realized_pnl
+        self.portfolio.realized_pnl += realized_net
+        self.portfolio.daily_pnl += realized_net
         self.portfolio.mark_to_market({intent.symbol: fill_price}, intent.timestamp)
         self.ledger.record(
             FillRecord(
@@ -58,7 +62,7 @@ class PaperExecutor:
                 quantity=intent.quantity,
                 price=fill_price,
                 fee=fee,
-                realized_pnl=realized_pnl,
+                realized_pnl=realized_net,
                 client_order_id=intent.client_order_id,
             )
         )

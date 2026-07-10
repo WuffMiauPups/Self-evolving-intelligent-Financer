@@ -72,6 +72,7 @@ class RuntimeContext:
     started_at: datetime
     order_journal: object | None = None  # OrderJournal
     alerter: object | None = None  # WebhookAlerter
+    decision_writer: object | None = None  # DecisionLogWriter
     # --- per-tick mutable runtime state (owned by tick_processor) ---
     bar_aggregator: TimeframeAggregator | None = None
     sync_failure_count: int = 0
@@ -334,7 +335,11 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
         raise
 
     portfolio = _initialize_portfolio(config, startup_report)
-    ledger = Ledger()
+    ledger = Ledger(
+        persist_path=config.execution.ledger_persist_path
+        if config.execution.ledger_persist_enabled
+        else None
+    )
     risk_manager = RiskManager(config.risk)
     risk_manager.reset_state()
     # Route orders through the real broker client whenever we have one.
@@ -536,12 +541,17 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
         # organization layer (no prototypes, no ESOM map, no dynamic
         # units), so there is nothing for a background refresher to
         # do. ``async_memory_refresh`` is now a no-op even when True.
-        # Platt calibrator (load from disk if available)
+        # Platt calibrator: resolve the artifact next to the loaded
+        # checkpoint and verify it was fitted for that checkpoint
+        # (fingerprint binding). Mismatch degrades to the uncalibrated
+        # passthrough, never raises.
         _platt_calibrator = None
         if config.training.platt_calibration_enabled:
-            from src.training.platt_calibration import PlattCalibrator
-            _platt_calibrator = PlattCalibrator()
-            _platt_calibrator.load(Path("runs/platt_calibration.json"))
+            from src.training.platt_calibration import load_calibrator_for_checkpoint
+            _platt_calibrator = load_calibrator_for_checkpoint(
+                config.model.checkpoint_path,
+                expected_fingerprint=artifacts.encoder_fingerprint,
+            )
 
         policy = MemoryAwarePolicy(
             base_policy=base_policy,
@@ -590,6 +600,11 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
             max_backups=config.execution.order_journal_max_backups,
         )
 
+    decision_writer = None
+    if config.execution.decision_log_enabled:
+        from src.monitoring.decision_log import DecisionLogWriter
+        decision_writer = DecisionLogWriter(config.execution.decision_log_path)
+
     # Webhook alerting
     alerter = None
     if config.runtime.alert_webhook_url:
@@ -624,5 +639,6 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
         started_at=started_at,
         order_journal=order_journal,
         alerter=alerter,
+        decision_writer=decision_writer,
         bar_aggregator=TimeframeAggregator(config.runtime.timeframe),
     )

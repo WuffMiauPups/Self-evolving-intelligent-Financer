@@ -71,3 +71,9 @@ class ExecutionConfig(BaseModel):
     order_journal_path: str = "runs/order_journal.jsonl"
     order_journal_max_bytes: int = 50_000_000
     order_journal_max_backups: int = 3
+    # Durable outcome dataset (self-evolution raw material): realized
+    # fills and per-decision events persist as append-only JSONL.
+    ledger_persist_enabled: bool = True
+    ledger_persist_path: str = "runs/fills.jsonl"
+    decision_log_enabled: bool = True
+    decision_log_path: str = "runs/decisions.jsonl"
