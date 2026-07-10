@@ -77,6 +77,10 @@ class Trainer:
         augmentation_enabled: bool = True,
         noise_std: float = 0.01,
         temporal_jitter_prob: float = 0.0,
+        # Forgetting-safe retraining (§4.5.6): anchor to the incumbent.
+        anchor_state_dict: dict[str, torch.Tensor] | None = None,
+        distill_lambda_kd: float = 0.0,
+        proximal_lambda_l2: float = 0.0,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
@@ -120,6 +124,29 @@ class Trainer:
             temporal_jitter_prob=temporal_jitter_prob,
         )
         self.scaler = torch.amp.GradScaler("cuda", enabled=use_amp and device.type == "cuda")
+        # --- Incumbent anchor (forgetting-safe retraining, §4.5.6) ---
+        # KD: KL(incumbent || student) on each training batch, incumbent
+        # frozen/no-grad.  L2: proximal penalty pulling student params
+        # toward the anchor.  Both off (0.0) unless configured.
+        self.distill_lambda_kd = float(distill_lambda_kd)
+        self.proximal_lambda_l2 = float(proximal_lambda_l2)
+        self._anchor_model: torch.nn.Module | None = None
+        self._anchor_params: dict[str, torch.Tensor] = {}
+        if anchor_state_dict is not None and (self.distill_lambda_kd > 0.0 or self.proximal_lambda_l2 > 0.0):
+            if self.proximal_lambda_l2 > 0.0:
+                self._anchor_params = {
+                    name: tensor.detach().clone().to(device)
+                    for name, tensor in anchor_state_dict.items()
+                    if isinstance(tensor, torch.Tensor) and tensor.is_floating_point()
+                }
+            if self.distill_lambda_kd > 0.0:
+                anchor_model = copy.deepcopy(model)
+                anchor_model.load_state_dict(anchor_state_dict)
+                anchor_model.to(device)
+                anchor_model.eval()
+                for parameter in anchor_model.parameters():
+                    parameter.requires_grad_(False)
+                self._anchor_model = anchor_model
         self.logger = get_logger("trainer")
 
     def _update_focal_gamma(self, val_metrics) -> None:
@@ -341,6 +368,32 @@ class Trainer:
                     + self.loss_weights.get("future_return", 0.0) * future_return_loss
                     + self.loss_weights.get("risk_path", 0.0) * risk_path_loss
                 )
+
+                # --- Incumbent anchor terms (training only, §4.5.6) ---
+                if training and self._anchor_model is not None:
+                    with torch.no_grad():
+                        anchor_output = self._anchor_model(
+                            branch_inputs=batch["branch_inputs"],
+                            regime_input=batch["regime_input"],
+                            full_features=batch["features"],
+                            temporal_tensor=batch.get("temporal_tensor"),
+                        )
+                    # KL(incumbent || student): standard distillation direction.
+                    kd_loss = torch.nn.functional.kl_div(
+                        torch.log_softmax(output.action_logits, dim=-1),
+                        torch.softmax(anchor_output.action_logits.detach(), dim=-1),
+                        reduction="batchmean",
+                    )
+                    loss = loss + self.distill_lambda_kd * kd_loss
+                    regression_components["anchor_kd"] = kd_loss.detach()
+                if training and self._anchor_params:
+                    l2_sum = output.action_logits.new_zeros(())
+                    for name, parameter in self.model.named_parameters():
+                        anchor_parameter = self._anchor_params.get(name)
+                        if anchor_parameter is not None and anchor_parameter.shape == parameter.shape:
+                            l2_sum = l2_sum + (parameter - anchor_parameter).pow(2).sum()
+                    loss = loss + self.proximal_lambda_l2 * l2_sum
+                    regression_components["anchor_l2"] = l2_sum.detach()
 
             if training:
                 if torch.isnan(loss):

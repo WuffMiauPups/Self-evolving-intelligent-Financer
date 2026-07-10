@@ -40,11 +40,34 @@ class WalkForwardConfig(BaseModel):
         return self
 
 
+class PromotionConfig(BaseModel):
+    """Scorecard-judged promotion criteria (MASTER_PLAN §4.5.5/§4.5.7).
+
+    A candidate must beat the incumbent's benchmark row by more than the
+    configured deltas AND beat buy-and-hold, and may not degrade any
+    frozen held-out slice by more than ``backward_transfer_floor``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    min_balanced_accuracy_delta: float = 0.0  # candidate must exceed incumbent by more than this
+    min_expectancy_delta: float = 0.0
+    min_excess_vs_buy_hold: float = 0.0  # candidate return must exceed buy&hold by more than this
+    backward_transfer_floor: float = 0.05  # max per-slice balanced-accuracy degradation
+
+    @model_validator(mode="after")
+    def validate_promotion(self) -> "PromotionConfig":
+        if self.backward_transfer_floor < 0.0:
+            raise ConfigurationError("evaluation.promotion.backward_transfer_floor must be non-negative")
+        return self
+
+
 class EvaluationConfig(BaseModel):
     """Top-level evaluation / experiment configuration."""
 
     model_config = ConfigDict(extra="forbid")
 
     walk_forward: WalkForwardConfig = Field(default_factory=WalkForwardConfig)
+    promotion: PromotionConfig = Field(default_factory=PromotionConfig)
     seed: int = 42
     output_dir: str = "experiments"

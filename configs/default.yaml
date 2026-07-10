@@ -323,6 +323,19 @@ training:
   pretrain_enabled: false
   pretrain_epochs: 5
   pretrain_learning_rate: 0.0005
+  # --- Retrain trigger (self-evolution loop, MASTER_PLAN 4.5.3) ---
+  # Per-metric drift thresholds evaluated against the persisted outcome
+  # stream (scripts/run_train.py --check-retrain-trigger). A 0.5 Sharpe
+  # drop and a 5pt win-rate drop are comparable alarms; a shared
+  # threshold conflates noise (Sharpe) with catastrophe (win rate).
+  retrain_triggers:
+    sharpe_drop: 0.5
+    win_rate_drop: 0.05
+    min_observations: 200
+  # --- Forgetting-safe retraining (4.5.6): anchor to the incumbent ---
+  anchor_checkpoint_path: null   # incumbent checkpoint to anchor against
+  distill_lambda_kd: 0.0         # KL(incumbent || student) weight; 0 = off
+  proximal_lambda_l2: 0.0        # L2(student - anchor) weight; 0 = off
   # --- Fast experiment mode (disabled by default) ---
   # Enable with --fast CLI flag or by setting enabled: true here.
   # Fast runs are explicitly marked in logs and run summaries.
@@ -369,7 +382,11 @@ memory:
   max_items: 20000     # stratified per-symbol: 13 symbols * ~1.5K items each — small for fast retrieval at backtest time
   rebuild_on_startup: false
   persist_path: artifacts/market_memory.pt
-  forward_horizons: [1, 3, 6, 12]
+  # forward_horizons intentionally NOT set here: AppConfig auto-syncs
+  # memory.forward_horizons from training.forward_horizons unless the
+  # memory side explicitly overrides it (see src/core/config/app.py).
+  # An explicit list here would silently break training<->memory label
+  # parity whenever training.forward_horizons changes.
   path_label_rules:
     breakout_return_threshold: 0.003
     mean_reversion_return_threshold: 0.0015
@@ -584,3 +601,13 @@ evaluation:
     min_train_bars: 2000
     reset_model_per_fold: true
     reset_memory_per_fold: true
+  # --- Scorecard-judged promotion (MASTER_PLAN 4.5.5 / 4.5.7) ---
+  # A candidate must beat the incumbent's benchmark row (balanced
+  # accuracy AND expectancy) by more than these deltas AND beat
+  # buy-and-hold; no frozen held-out slice may degrade by more than
+  # backward_transfer_floor.
+  promotion:
+    min_balanced_accuracy_delta: 0.0
+    min_expectancy_delta: 0.0
+    min_excess_vs_buy_hold: 0.0
+    backward_transfer_floor: 0.05

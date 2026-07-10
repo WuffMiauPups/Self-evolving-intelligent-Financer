@@ -169,6 +169,21 @@ class TrainingConfig(BaseModel):
     save_memory_after_training: bool = False
     memory_build_split: str = "train"
     runs_dir: str = "runs"
+    # --- Retrain trigger (self-evolution loop, MASTER_PLAN §4.5.3) ---
+    # Per-metric drift thresholds: a 0.5 Sharpe drop and a 5pt win-rate
+    # drop are comparable alarms; a shared threshold conflates noise
+    # (Sharpe) with catastrophe (win rate).
+    retrain_triggers: dict[str, float] = Field(
+        default_factory=lambda: {
+            "sharpe_drop": 0.5,
+            "win_rate_drop": 0.05,
+            "min_observations": 200,
+        }
+    )
+    # --- Forgetting-safe retraining (§4.5.6): anchor to the incumbent ---
+    anchor_checkpoint_path: str | None = None
+    distill_lambda_kd: float = 0.0  # KL(incumbent || student) weight; 0 = off
+    proximal_lambda_l2: float = 0.0  # L2(student - anchor) weight; 0 = off
     # --- RL fine-tuning (reserved scaffold) ---
     rl_finetune_enabled: bool = False
     rl_finetune_episodes: int = 100
@@ -253,6 +268,19 @@ class TrainingConfig(BaseModel):
             raise ConfigurationError("training.collapse_warning_thresholds.minority_recall_floor must be within [0, 1]")
         if self.memory_build_split not in {"train", "val", "test", "all"}:
             raise ConfigurationError("training.memory_build_split must be one of: train, val, test, all")
+        allowed_trigger_keys = {"sharpe_drop", "win_rate_drop", "min_observations"}
+        unknown_triggers = set(self.retrain_triggers) - allowed_trigger_keys
+        if unknown_triggers:
+            raise ConfigurationError(
+                f"training.retrain_triggers has unknown keys: {sorted(unknown_triggers)} "
+                f"(allowed: {sorted(allowed_trigger_keys)})"
+            )
+        if any(value < 0.0 for value in self.retrain_triggers.values()):
+            raise ConfigurationError("training.retrain_triggers values must be non-negative")
+        if self.distill_lambda_kd < 0.0:
+            raise ConfigurationError("training.distill_lambda_kd must be non-negative")
+        if self.proximal_lambda_l2 < 0.0:
+            raise ConfigurationError("training.proximal_lambda_l2 must be non-negative")
         return self
 
     @property

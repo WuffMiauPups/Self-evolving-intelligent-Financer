@@ -8,13 +8,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.core.config import load_config
+from src.core.config import AppConfig, load_config
 from src.training.supervised import (
     evaluate_checkpoint,
     inspect_label_sensitivity,
     inspect_training_data,
     run_supervised_training,
 )
+
+CANONICAL_CHECKPOINT_FILENAME = "brain.pt"
 
 # ---------------------------------------------------------------------------
 # Experiment presets: named configurations for reproducible baselines
@@ -75,6 +77,253 @@ def _apply_preset(args: argparse.Namespace, preset_name: str) -> None:
             # For optional values: only apply if user left it at default (None)
             if current is None:
                 setattr(args, attr, value)
+
+
+def _check_retrain_trigger_cli(config: AppConfig, observations_path: str) -> int:
+    """Evaluate the retrain trigger from the persisted outcome stream.
+
+    Exit code 0 = trigger fired (retrain recommended), 1 = no trigger.
+    """
+    from src.core.logging import configure_logging, get_logger
+    from src.training.replay_buffer import load_observations
+    from src.training.retrain import check_retrain_trigger_from_observations
+
+    configure_logging(
+        config.logging.level,
+        config.logging.json_logs,
+        file_enabled=config.logging.file_enabled,
+        file_path=config.logging.file_path,
+    )
+    logger = get_logger("run_train")
+    observations = load_observations(observations_path)
+    should_retrain, reason = check_retrain_trigger_from_observations(
+        observations,
+        thresholds=config.training.retrain_triggers,
+    )
+    logger.info(
+        "retrain_trigger_check",
+        observations_path=str(observations_path),
+        observation_count=len(observations),
+        thresholds=dict(config.training.retrain_triggers),
+        should_retrain=should_retrain,
+        reason=reason,
+    )
+    return 0 if should_retrain else 1
+
+
+def _checkpoint_meta_extra(checkpoint_path: Path) -> dict[str, object]:
+    """Best-effort read of a checkpoint's meta (fingerprint + flat metrics)."""
+    from src.training.checkpoints import load_checkpoint_payload
+
+    try:
+        meta = load_checkpoint_payload(checkpoint_path).get("meta", {})
+    except Exception:  # noqa: BLE001
+        return {}
+    extra = meta.get("extra", {}) if isinstance(meta, dict) else {}
+    return {
+        "encoder_fingerprint": meta.get("encoder_fingerprint") if isinstance(meta, dict) else None,
+        "extra": extra if isinstance(extra, dict) else {},
+    }
+
+
+def _candidate_metrics_from_result(result: dict[str, object]) -> dict[str, float]:
+    """Dotted gate metrics from a run_supervised_training result."""
+    val_report = result.get("evaluation_reports", {}).get("val", {})  # type: ignore[union-attr]
+    per_class = val_report.get("per_class_metrics", {})
+    history = result.get("history")
+    val_history = getattr(history, "val", None) or []
+    return {
+        "val_report.balanced_accuracy": float(val_report.get("balanced_accuracy", 0.0)),
+        "val_report.macro_f1": float(val_report.get("macro_f1", 0.0)),
+        "val_report.per_class_metrics.long.recall": float(
+            per_class.get("long", {}).get("recall", 0.0)
+        ),
+        "val_report.per_class_metrics.short.recall": float(
+            per_class.get("short", {}).get("recall", 0.0)
+        ),
+        "val.loss": float(val_history[-1].loss) if val_history else 0.0,
+    }
+
+
+def _benchmark_candidate_vs_incumbent(
+    config: AppConfig,
+    candidate_path: Path,
+    incumbent_path: Path,
+    logger,
+):
+    """Scorecard rows for candidate (and incumbent, if any) on real OOS bars.
+
+    Returns (candidate_row, incumbent_row); (None, None) with a loud
+    warning when no real OOS data exists (synthetic/test runs) or the
+    benchmark fails — the classification gates still apply then.
+    """
+    if not config.training.use_real_historical_data:
+        logger.warning(
+            "scorecard_gate_skipped",
+            reason="no real OOS data (synthetic run) — classification gates still apply",
+        )
+        return None, None
+    try:
+        from src.evaluation.benchmark import run_benchmark
+        from src.training.data_loading import _resolve_bars_by_symbol
+
+        bars_by_symbol, _ = _resolve_bars_by_symbol(config)
+        candidate_config = config.model_copy(deep=True)
+        candidate_config.model.checkpoint_path = str(candidate_path)
+        candidate_row = run_benchmark(candidate_config, bars_by_symbol)
+        incumbent_row = None
+        if incumbent_path.exists():
+            incumbent_config = config.model_copy(deep=True)
+            incumbent_config.model.checkpoint_path = str(incumbent_path)
+            incumbent_row = run_benchmark(incumbent_config, bars_by_symbol)
+        return candidate_row, incumbent_row
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "scorecard_gate_skipped",
+            reason=f"benchmark unavailable: {exc}",
+            note="classification gates still apply",
+        )
+        return None, None
+
+
+def _promote_platt_sidecar(candidate_path: Path, target_path: Path, logger) -> None:
+    """Carry the candidate's Platt calibrator to the canonical location."""
+    import os
+    import shutil
+
+    from src.training.platt_calibration import platt_calibration_path_for_checkpoint
+
+    source = platt_calibration_path_for_checkpoint(candidate_path)
+    if not source.exists():
+        return
+    target = platt_calibration_path_for_checkpoint(target_path)
+    tmp = target.with_suffix(target.suffix + f".tmp{os.getpid()}")
+    shutil.copy2(source, tmp)
+    os.replace(tmp, target)
+    logger.info("platt_calibrator_promoted", source=str(source), target=str(target))
+
+
+def run_canonical_training_with_gate(config: AppConfig, *, force_promote: bool = False) -> int:
+    """Canonical (non-isolated) brain training: stage a candidate, gate, promote.
+
+    The freshly trained checkpoint is staged under a per-run directory (a
+    CANDIDATE); the canonical ``brain.pt`` is only touched by
+    ``promote_checkpoint`` after the gate passes (or ``--force-promote``
+    bypasses it with a loud log).  An ungated/refused run leaves the
+    canonical checkpoint byte-identical.
+    """
+    from datetime import UTC, datetime
+
+    from src.core.logging import get_logger
+    from src.training.checkpoint_promotion import (
+        CheckpointVersion,
+        PromotionGate,
+        evaluate_promotion,
+        promote_checkpoint,
+    )
+
+    result = run_supervised_training(config, use_baseline=False, run_id=None, isolate_checkpoint=True)
+    logger = get_logger("run_train")
+    candidate_path = Path(str(result["checkpoint"]))
+    base_dir = Path(config.training.checkpoint_dir)
+    canonical_path = base_dir / CANONICAL_CHECKPOINT_FILENAME
+    registry_path = base_dir / "registry.json"
+
+    candidate_meta = _checkpoint_meta_extra(candidate_path)
+    incumbent_meta = _checkpoint_meta_extra(canonical_path) if canonical_path.exists() else {}
+    candidate_metrics = _candidate_metrics_from_result(result)
+    # Incumbent metrics come flat from the checkpoint meta; the gate's
+    # key adapter maps them onto the dotted schema.
+    parent_metrics = None
+    incumbent_extra = incumbent_meta.get("extra") or {}
+    if incumbent_extra:
+        parent_metrics = {
+            key: float(value)
+            for key, value in incumbent_extra.items()
+            if isinstance(value, (int, float))
+        }
+
+    candidate_row, incumbent_row = _benchmark_candidate_vs_incumbent(
+        config, candidate_path, canonical_path, logger
+    )
+
+    promotion_config = config.evaluation.promotion
+    gate = PromotionGate(
+        min_benchmark_balanced_accuracy_delta=promotion_config.min_balanced_accuracy_delta,
+        min_benchmark_expectancy_delta=promotion_config.min_expectancy_delta,
+        min_excess_vs_buy_hold=promotion_config.min_excess_vs_buy_hold,
+        backward_transfer_floor=promotion_config.backward_transfer_floor,
+    )
+    decision = evaluate_promotion(
+        candidate_metrics=candidate_metrics,
+        parent_metrics=parent_metrics,
+        gate=gate,
+        candidate_benchmark=candidate_row,
+        incumbent_benchmark=incumbent_row,
+    )
+
+    if not decision.eligible and not force_promote:
+        logger.warning(
+            "promotion_refused",
+            candidate=str(candidate_path),
+            canonical_untouched=str(canonical_path),
+            reasons=decision.reasons,
+            note=(
+                "The candidate remains staged at its run directory. Re-run with "
+                "--force-promote to bypass the gate (not recommended)."
+            ),
+        )
+        return 0
+    if not decision.eligible and force_promote:
+        logger.warning(
+            "FORCE_PROMOTE_OVERRIDE",
+            note=(
+                "PROMOTION GATE BYPASSED with --force-promote. The candidate FAILED "
+                "the gate and is being promoted anyway."
+            ),
+            reasons=decision.reasons,
+            candidate=str(candidate_path),
+        )
+
+    metrics_for_registry = dict(candidate_metrics)
+    if candidate_row is not None:
+        metrics_for_registry.update(
+            {
+                "benchmark.balanced_accuracy": float(candidate_row.balanced_accuracy),
+                "benchmark.expectancy": float(candidate_row.expectancy),
+                "benchmark.excess_vs_buy_hold": float(candidate_row.excess_vs_buy_hold),
+            }
+        )
+    version = CheckpointVersion(
+        version_id=str(result.get("run_id", "unknown")),
+        checkpoint_path=str(candidate_path),
+        fingerprint=str(candidate_meta.get("encoder_fingerprint") or "unknown"),
+        parent_fingerprint=(
+            str(incumbent_meta["encoder_fingerprint"])
+            if incumbent_meta.get("encoder_fingerprint")
+            else None
+        ),
+        created_at=datetime.now(UTC).isoformat(),
+        retrain_id=None,
+        metrics=metrics_for_registry,
+        status="candidate",
+        notes="run_train canonical promotion" + (" (FORCED past gate)" if not decision.eligible else ""),
+    )
+    promote_checkpoint(
+        source_path=candidate_path,
+        target_path=canonical_path,
+        version=version,
+        registry_path=registry_path,
+    )
+    _promote_platt_sidecar(candidate_path, canonical_path, logger)
+    logger.info(
+        "canonical_checkpoint_promoted",
+        candidate=str(candidate_path),
+        canonical=str(canonical_path),
+        forced=not decision.eligible,
+        reasons=decision.reasons,
+    )
+    return 0
 
 
 def main() -> int:
@@ -291,6 +540,38 @@ def main() -> int:
             "Passing --config REPLACES the default stack (it does not append to it)."
         ),
     )
+    parser.add_argument(
+        "--check-retrain-trigger",
+        action="store_true",
+        help=(
+            "Evaluate the retrain drift trigger against the persisted per-decision "
+            "outcome stream and exit: 0 = trigger fired (retrain recommended), "
+            "1 = no trigger. Thresholds come from training.retrain_triggers."
+        ),
+    )
+    parser.add_argument(
+        "--observations-path",
+        default="runs/observations.jsonl",
+        help="JSONL outcome stream for --check-retrain-trigger (DecisionObservation records).",
+    )
+    parser.add_argument(
+        "--force-promote",
+        action="store_true",
+        help=(
+            "Bypass the promotion gate after a canonical training run and promote "
+            "the candidate to the canonical checkpoint regardless of the decision. "
+            "Logged loudly; use only when you understand why the gate refused."
+        ),
+    )
+    parser.add_argument(
+        "--anchor-checkpoint",
+        default=None,
+        help=(
+            "Incumbent checkpoint to anchor retraining against (forgetting-safe "
+            "retraining). Sets training.anchor_checkpoint_path; pair with "
+            "training.distill_lambda_kd / training.proximal_lambda_l2."
+        ),
+    )
     args = parser.parse_args()
     # argparse action='append' appends to a non-None default instead of
     # replacing it, so the default stack is applied post-parse.
@@ -356,6 +637,10 @@ def main() -> int:
         return 0
 
     config = load_config(*args.config)
+    if args.anchor_checkpoint is not None:
+        config.training.anchor_checkpoint_path = args.anchor_checkpoint
+    if args.check_retrain_trigger:
+        return _check_retrain_trigger_cli(config, args.observations_path)
     if args.real_data:
         config.training.use_real_historical_data = True
     if args.save_memory:
@@ -425,6 +710,18 @@ def main() -> int:
     elif args.inspect_only:
         inspect_training_data(config)
     else:
+        # Canonical brain runs (no explicit run_id, no fast mode) go through
+        # the promotion gate: the checkpoint is staged as a candidate and the
+        # canonical brain.pt is only replaced by promote_checkpoint (§4.5.4).
+        # Isolated/fast/baseline runs keep the previous direct behavior — they
+        # never touch the canonical checkpoint.
+        canonical = (
+            not args.baseline
+            and args.run_id is None
+            and not config.training.fast_mode.enabled
+        )
+        if canonical:
+            return run_canonical_training_with_gate(config, force_promote=args.force_promote)
         run_supervised_training(config, use_baseline=args.baseline, run_id=args.run_id)
     return 0
 

@@ -14,7 +14,7 @@ from src.core.config.common import (
     LoggingConfig,
 )
 from src.core.config.data import DataConfig, PipelineConfig
-from src.core.config.evaluation import EvaluationConfig, WalkForwardConfig
+from src.core.config.evaluation import EvaluationConfig, PromotionConfig, WalkForwardConfig
 from src.core.config.memory import DecisionFusionConfig, MemoryConfig, TopologyGrowthConfig
 from src.core.config.model import ModelConfig
 from src.core.config.risk import RiskConfig
@@ -37,6 +37,7 @@ __all__ = [
     "MemoryConfig",
     "ModelConfig",
     "PipelineConfig",
+    "PromotionConfig",
     "RiskConfig",
     "RuntimeConfig",
     "TopologyGrowthConfig",

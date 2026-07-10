@@ -1,16 +1,18 @@
-"""Offline retrain cycle scaffolding.
+"""Offline retrain cycle: trigger evaluation + lineage metadata.
 
-Provides metadata tracking for retrain cycles: parent checkpoint lineage,
-retrain reasons, data ranges, and validation gates for safe retraining.
+Provides metadata tracking for retrain cycles (parent checkpoint lineage,
+retrain reasons, data ranges) plus the drift trigger that decides WHEN a
+retrain is due (MASTER_PLAN §4.5.3).  Wired into
+``scripts/run_train.py --check-retrain-trigger``, which evaluates the
+trigger against the persisted per-decision outcome stream
+(``src.training.replay_buffer``).
 """
-# STATUS: RESERVED — not wired into any active code path.
-# This module is scaffolding for future capability. It is tested but not
-# invoked by the training pipeline, runtime, or CLI entry points.
-
 from __future__ import annotations
 
 import json
 import logging
+import math
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha1
@@ -224,20 +226,157 @@ def validate_retrain_prerequisites(
     return can_proceed, warnings
 
 
+# Per-metric drift thresholds. The old shared 0.15 conflated two very
+# different alarms: a 0.15 Sharpe drop is noise while a 0.15 win-rate
+# drop is catastrophe. min_observations gates the check on sample size.
+DEFAULT_RETRAIN_TRIGGERS: dict[str, float] = {
+    "sharpe_drop": 0.5,
+    "win_rate_drop": 0.05,
+    "min_observations": 200,
+}
+
+
 def check_retrain_trigger(
     *,
     recent_metrics: dict[str, float],
     baseline_metrics: dict[str, float],
-    drift_threshold: float = 0.15,
+    thresholds: Mapping[str, float] | None = None,
+    observation_count: int | None = None,
 ) -> tuple[bool, str]:
     """Check if performance has drifted enough to trigger a retrain.
 
+    ``thresholds`` carries per-metric drops (``training.retrain_triggers``);
+    missing keys fall back to ``DEFAULT_RETRAIN_TRIGGERS``.  When
+    ``observation_count`` is provided, the check refuses to fire below
+    ``min_observations`` — drift measured on a handful of trades is noise.
+
     Returns (should_retrain, reason).
     """
-    sharpe_drop = baseline_metrics.get("sharpe_ratio", 0) - recent_metrics.get("sharpe_ratio", 0)
-    if sharpe_drop > drift_threshold:
+    merged = {**DEFAULT_RETRAIN_TRIGGERS, **dict(thresholds or {})}
+    min_observations = int(merged["min_observations"])
+    if observation_count is not None and observation_count < min_observations:
+        return False, f"insufficient_observations_{observation_count}<{min_observations}"
+    sharpe_drop = baseline_metrics.get("sharpe_ratio", 0.0) - recent_metrics.get("sharpe_ratio", 0.0)
+    if sharpe_drop > merged["sharpe_drop"]:
         return True, f"sharpe_drift_{sharpe_drop:.3f}"
-    win_rate_drop = baseline_metrics.get("win_rate", 0) - recent_metrics.get("win_rate", 0)
-    if win_rate_drop > drift_threshold:
+    win_rate_drop = baseline_metrics.get("win_rate", 0.0) - recent_metrics.get("win_rate", 0.0)
+    if win_rate_drop > merged["win_rate_drop"]:
         return True, f"win_rate_drift_{win_rate_drop:.3f}"
     return False, "no_drift"
+
+
+def compute_outcome_metrics(observations: Sequence[Any]) -> dict[str, float]:
+    """Trigger metrics from a slice of the per-decision outcome stream.
+
+    ``observations`` are ``DecisionObservation``-shaped records (duck-typed:
+    ``executed_action`` / ``realized_pnl``).  FLAT decisions place no trade
+    and are excluded.  ``sharpe_ratio`` is per-trade mean/std with no
+    annualization — the trigger only compares it against its own baseline,
+    so the scale cancels.
+    """
+    pnls = [float(obs.realized_pnl) for obs in observations if int(obs.executed_action) != 0]
+    if not pnls:
+        return {"sharpe_ratio": 0.0, "win_rate": 0.0, "trade_count": 0.0}
+    mean = sum(pnls) / len(pnls)
+    if len(pnls) > 1:
+        variance = sum((pnl - mean) ** 2 for pnl in pnls) / (len(pnls) - 1)
+        std = math.sqrt(variance)
+    else:
+        std = 0.0
+    return {
+        "sharpe_ratio": mean / std if std > 0 else 0.0,
+        "win_rate": sum(1 for pnl in pnls if pnl > 0) / len(pnls),
+        "trade_count": float(len(pnls)),
+    }
+
+
+def check_retrain_trigger_from_observations(
+    observations: Sequence[Any],
+    *,
+    thresholds: Mapping[str, float] | None = None,
+) -> tuple[bool, str]:
+    """Evaluate the drift trigger over a persisted outcome stream.
+
+    The stream is ordered by timestamp and split at the midpoint: the
+    older half is the baseline, the newer half is "recent".  Returns
+    (should_retrain, reason).
+    """
+    ordered = sorted(observations, key=lambda obs: obs.timestamp)
+    count = len(ordered)
+    midpoint = count // 2
+    baseline_metrics = compute_outcome_metrics(ordered[:midpoint])
+    recent_metrics = compute_outcome_metrics(ordered[midpoint:])
+    return check_retrain_trigger(
+        recent_metrics=recent_metrics,
+        baseline_metrics=baseline_metrics,
+        thresholds=thresholds,
+        observation_count=count,
+    )
+
+
+def _file_fingerprint(path: str | Path) -> str:
+    digest = sha1()
+    with open(path, "rb") as fp:
+        for chunk in iter(lambda: fp.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def run_triggered_retrain(
+    *,
+    observations: Sequence[Any],
+    train_fn: Callable[[], Mapping[str, Any]],
+    thresholds: Mapping[str, float] | None = None,
+    parent_checkpoint_path: str | None = None,
+    parent_checkpoint_fingerprint: str | None = None,
+    config_snapshot: dict[str, Any] | None = None,
+    runs_dir: str = "runs",
+) -> RetainMetadata | None:
+    """Evaluate the trigger; if it fires, run ``train_fn`` with lineage recorded.
+
+    ``train_fn`` is the retrain entry point (a ``run_supervised_training``
+    invocation) returning its result dict; its ``"checkpoint"`` key becomes
+    the lineage output.  Returns the finalized :class:`RetainMetadata`
+    (persisted under ``runs_dir``) or ``None`` when the trigger did not fire.
+    """
+    should_retrain, reason = check_retrain_trigger_from_observations(
+        observations, thresholds=thresholds
+    )
+    if not should_retrain:
+        logger.info("retrain_trigger_not_fired reason=%s", reason)
+        return None
+    ordered = sorted(observations, key=lambda obs: obs.timestamp)
+    meta = build_retrain_metadata(
+        parent_checkpoint_path=parent_checkpoint_path,
+        parent_checkpoint_fingerprint=parent_checkpoint_fingerprint,
+        retrain_reason=reason,
+        data_start=ordered[0].timestamp.isoformat(),
+        data_end=ordered[-1].timestamp.isoformat(),
+        symbols=sorted({str(obs.symbol) for obs in ordered}),
+        paper_observation_count=len(ordered),
+        config_snapshot=dict(config_snapshot or {}),
+    )
+    logger.info(
+        "retrain_trigger_fired retrain_id=%s reason=%s observations=%d",
+        meta.retrain_id, reason, len(ordered),
+    )
+    result = train_fn()
+    output_checkpoint_path = str(result.get("checkpoint", "")) if result else ""
+    output_fingerprint = ""
+    if output_checkpoint_path and Path(output_checkpoint_path).exists():
+        output_fingerprint = _file_fingerprint(output_checkpoint_path)
+    validation_metrics: dict[str, float] = {}
+    reports = result.get("evaluation_reports", {}) if result else {}
+    val_report = reports.get("val", {}) if isinstance(reports, Mapping) else {}
+    for key in ("balanced_accuracy", "macro_f1", "accuracy"):
+        if isinstance(val_report, Mapping) and key in val_report:
+            validation_metrics[f"val_{key}"] = float(val_report[key])
+    finalized = finalize_retrain_metadata(
+        meta,
+        output_checkpoint_path=output_checkpoint_path,
+        output_checkpoint_fingerprint=output_fingerprint,
+        validation_metrics=validation_metrics,
+        promotion_eligible=False,  # eligibility is the promotion gate's call
+    )
+    save_retrain_metadata(finalized, runs_dir=runs_dir)
+    return finalized

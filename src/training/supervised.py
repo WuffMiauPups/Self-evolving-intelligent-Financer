@@ -245,6 +245,19 @@ def run_supervised_training(
         if fast.disable_risk_path:
             effective_enable_risk_path = False
             effective_loss_weights["risk_path"] = 0.0
+    # --- Forgetting-safe retraining (§4.5.6): anchor to the incumbent ---
+    # Only active when training.anchor_checkpoint_path is set (via config
+    # or the --anchor-checkpoint flag on scripts/run_train.py).
+    anchor_state_dict = None
+    if config.training.anchor_checkpoint_path:
+        from src.training.checkpoints import load_checkpoint_payload
+        anchor_state_dict = load_checkpoint_payload(config.training.anchor_checkpoint_path)["model_state"]
+        logger.info(
+            "anchor_checkpoint_loaded",
+            path=config.training.anchor_checkpoint_path,
+            distill_lambda_kd=config.training.distill_lambda_kd,
+            proximal_lambda_l2=config.training.proximal_lambda_l2,
+        )
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
@@ -274,6 +287,9 @@ def run_supervised_training(
         augmentation_enabled=config.training.augmentation_enabled,
         noise_std=config.training.noise_std,
         temporal_jitter_prob=config.training.temporal_jitter_prob,
+        anchor_state_dict=anchor_state_dict,
+        distill_lambda_kd=config.training.distill_lambda_kd,
+        proximal_lambda_l2=config.training.proximal_lambda_l2,
     )
     for split_name, symbols in bundle.split_ranges.items():
         for symbol, split in symbols.items():
@@ -649,7 +665,65 @@ def inspect_label_sensitivity(
     return profiles
 
 
+def _warn_on_normalization_stats_mismatch(
+    logger: object,
+    *,
+    checkpoint_path: str | Path,
+    checkpoint_stats: object,
+    bundle_stats: object,
+    rel_threshold: float = 0.01,
+) -> dict[str, float]:
+    """Compare checkpoint-stored vs freshly-derived normalization stats.
+
+    Returns the material (> ``rel_threshold``) per-tensor max relative
+    differences and logs a LOUD warning when any exist — in that case the
+    evaluation metrics are NOT comparable with the checkpoint's original
+    training/validation metrics.  Missing stats on either side are logged
+    at info level and skipped (pre-C2-fix checkpoints carry none).
+    """
+    from src.features.normalization import normalization_stats_max_rel_diff
+
+    if checkpoint_stats is None or bundle_stats is None:
+        logger.info(
+            "checkpoint_normalization_stats_comparison_skipped",
+            checkpoint=str(checkpoint_path),
+            checkpoint_has_stats=checkpoint_stats is not None,
+            bundle_has_stats=bundle_stats is not None,
+        )
+        return {}
+    rel_diffs = normalization_stats_max_rel_diff(checkpoint_stats, bundle_stats)
+    material = {name: round(value, 6) for name, value in rel_diffs.items() if value > rel_threshold}
+    if material:
+        logger.warning(
+            "checkpoint_normalization_stats_mismatch",
+            checkpoint=str(checkpoint_path),
+            rel_threshold=rel_threshold,
+            max_rel_diff_by_tensor=material,
+            consequence=(
+                "EVALUATION METRICS ARE NOT COMPARABLE ACROSS RUNS: this "
+                "evaluation normalizes inputs with stats re-derived from the "
+                "CURRENT data range, which differ materially from the stats "
+                "the checkpoint was trained with (meta['normalization']). "
+                "Re-run against the checkpoint's original training range, or "
+                "treat these metrics as a standalone measurement."
+            ),
+        )
+    return material
+
+
 def evaluate_checkpoint(config: AppConfig, checkpoint_path: str) -> dict[str, object]:
+    """Evaluate a saved checkpoint against the currently-configured data.
+
+    Comparability caveat (MASTER_PLAN 4.6.4): the bundle rebuild re-derives
+    train-split normalization stats from the CURRENT data range, so the
+    evaluation loaders do not necessarily normalize with the stats the
+    checkpoint was trained on (``meta['normalization']``).  The stat sets
+    are compared below and a loud ``checkpoint_normalization_stats_mismatch``
+    warning fires when any per-tensor max relative difference exceeds 1% —
+    metrics from such a run must not be compared across runs/checkpoints.
+    Full injection of the stored stats into the loader pipeline is out of
+    scope here and tracked in the master plan.
+    """
     configure_logging(
         config.logging.level,
         config.logging.json_logs,
@@ -663,6 +737,12 @@ def evaluate_checkpoint(config: AppConfig, checkpoint_path: str) -> dict[str, ob
     artifacts.feature_contract.assert_matches(
         bundle.feature_contract,
         context=f"checkpoint_eval[{Path(checkpoint_path).name}]",
+    )
+    _warn_on_normalization_stats_mismatch(
+        logger,
+        checkpoint_path=checkpoint_path,
+        checkpoint_stats=artifacts.normalization,
+        bundle_stats=bundle.normalization_stats,
     )
     logger.info(
         "checkpoint_evaluation_start",
