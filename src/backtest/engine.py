@@ -11,6 +11,7 @@ from src.data.schemas import bars_to_tensor
 from src.execution.paper_executor import PaperExecutor
 from src.execution.schemas import OrderIntent
 from src.features.feature_pipeline import FeaturePipeline
+from src.risk.constraints import action_annotation
 from src.risk.ledger import Ledger
 from src.risk.portfolio_state import PortfolioState
 from src.risk.risk_manager import RiskManager
@@ -155,13 +156,16 @@ class BacktestEngine:
                         "confidence": float(proposal.confidence),
                     }
                 )
-                if isinstance(policy, MemoryCapablePolicy):
-                    policy.record_snapshot(symbol)
                 decision = self.risk_manager.evaluate(
                     proposal,
                     portfolio,
                     evaluation_time=snapshot.timestamp,
                 )
+                if isinstance(policy, MemoryCapablePolicy):
+                    # Memory records the EXECUTED (risk-clamped) action.
+                    policy.record_snapshot(
+                        symbol, action_annotation=action_annotation(proposal, decision)
+                    )
                 if not decision.approved:
                     continue
                 bucket = snapshot.timestamp.strftime("%Y%m%d%H%M")

@@ -156,3 +156,48 @@ def test_decision_event_round_trips_via_dataclass(tmp_path) -> None:
     event = DecisionLogWriter.read_all(tmp_path / "d.jsonl")[0]
     assert event["symbol"] == "MSFT"
     assert event["proposed_action"] == -1
+
+
+# ── §4.5.2: executed-action credit assignment ──────────────────────────
+
+
+def test_action_annotation_formats_executed_action() -> None:
+    from src.risk.constraints import RiskDecision, action_annotation
+
+    proposal = _proposal(action=1)
+    resized = RiskDecision(approved=True, reasons=["resized_to_cap"], quantity=50.0, side="buy")
+    annotation = action_annotation(proposal, resized)
+    assert annotation == "action=1 approved=1 side=buy qty=50.0000 resized=1"
+
+    rejected = RiskDecision(approved=False, reasons=["daily_loss_limit"])
+    annotation = action_annotation(proposal, rejected)
+    assert annotation == "action=1 approved=0 side=- qty=0.0000 resized=0"
+
+
+def test_record_snapshot_threads_annotation_to_updater() -> None:
+    from src.strategies.memory_policy import MemoryAwarePolicy
+
+    observed: list[tuple[object, str | None]] = []
+
+    class _Updater:
+        def observe(self, encoded_state, *, action_annotation=None):
+            observed.append((encoded_state, action_annotation))
+
+    policy = MemoryAwarePolicy.__new__(MemoryAwarePolicy)
+    policy.updater = _Updater()
+    policy.last_encoded_by_symbol = {"AAPL": object()}
+    policy.record_snapshot("AAPL", action_annotation="action=1 approved=1 side=buy qty=5.0000 resized=0")
+    assert observed[0][1] == "action=1 approved=1 side=buy qty=5.0000 resized=0"
+
+
+def test_intervention_rate_computed_from_counters() -> None:
+    from src.execution.tick_processor import _intervention_rate
+    from src.monitoring.metrics_logger import MetricsLogger
+
+    metrics = MetricsLogger()
+    ctx = SimpleNamespace(metrics=metrics)
+    assert _intervention_rate(ctx) == 0.0
+    for _ in range(4):
+        metrics.increment("proposals")
+    metrics.increment("risk_interventions")
+    assert _intervention_rate(ctx) == pytest.approx(0.25)

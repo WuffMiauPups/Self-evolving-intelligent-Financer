@@ -40,6 +40,7 @@ from src.monitoring.positions_status import (
     PositionsStatusWriter,
 )
 from src.monitoring.runtime_status import RuntimeStatusSnapshot, RuntimeStatusWriter
+from src.risk.constraints import action_annotation
 from src.risk.ledger import FillRecord, Ledger
 from src.risk.portfolio_state import PortfolioState, apply_fill
 from src.risk.risk_manager import RiskManager
@@ -306,6 +307,14 @@ def _backfill_gap(
             gap_start=last_ts.isoformat(),
             gap_end=bucket_bar.timestamp.isoformat(),
         )
+
+
+def _intervention_rate(ctx: RuntimeContext) -> float:
+    counters = ctx.metrics.snapshot()
+    proposals = float(counters.get("proposals", 0.0))
+    if proposals <= 0:
+        return 0.0
+    return float(counters.get("risk_interventions", 0.0)) / proposals
 
 
 def _write_decision_event(
@@ -692,10 +701,15 @@ def process_tick(
             "fusion_level": _fusion_diag.get("support_level") if isinstance(_fusion_diag, dict) else None,
         }
         last_symbol = symbol
-        if isinstance(ctx.policy, MemoryCapablePolicy):
-            ctx.policy.record_snapshot(symbol)
 
         decision = ctx.risk_manager.evaluate(proposal, ctx.portfolio)
+        # Memory records the EXECUTED (risk-clamped) action, not raw
+        # intent — outcome learning must credit what actually happened.
+        if isinstance(ctx.policy, MemoryCapablePolicy):
+            ctx.policy.record_snapshot(symbol, action_annotation=action_annotation(proposal, decision))
+        ctx.metrics.increment("proposals")
+        if not decision.approved or "resized_to_cap" in decision.reasons:
+            ctx.metrics.increment("risk_interventions")
         logger.info(
             "risk_decision",
             symbol=symbol,
@@ -861,6 +875,7 @@ def process_tick(
             safe_to_trade=bool(ctx.health.safe_to_trade),
             last_decision=last_decision_payload,
             last_risk=last_risk_payload,
+            intervention_rate=_intervention_rate(ctx),
             memory_enabled=bool(ctx.config.memory.enabled),
             frozen_brain=not bool(ctx.config.runtime.allow_online_model_updates),
         )

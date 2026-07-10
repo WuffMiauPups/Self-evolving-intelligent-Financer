@@ -61,13 +61,21 @@ class MemoryAwarePolicy:
             return []
         return self.updater.finalize_ready(symbol, bars)
 
-    def record_snapshot(self, symbol: str) -> None:
+    def record_snapshot(self, symbol: str, *, action_annotation: str | None = None) -> None:
+        """Queue the last encoded state for outcome finalization.
+
+        ``action_annotation`` records the EXECUTED (risk-clamped) action,
+        not the model's raw intent — outcome-driven learning must credit
+        what actually happened (MASTER_PLAN §4.5.2, the shield
+        principle).  Callers pass a compact string like
+        ``"action=1 approved=1 side=buy qty=12.5 resized=0"``.
+        """
         if self.updater is None:
             return
         encoded_state = self.last_encoded_by_symbol.get(symbol)
         if encoded_state is None:
             return
-        self.updater.observe(encoded_state, action_annotation=None)
+        self.updater.observe(encoded_state, action_annotation=action_annotation)
 
     def propose(self, snapshot: object) -> tuple[TradeProposal, dict[str, object]]:
         proposal, diagnostics = self.base_policy.propose(snapshot)

@@ -51,6 +51,9 @@ class RuntimeStatusSnapshot:
     last_risk: dict[str, Any] | None = None
     memory_enabled: bool = False
     frozen_brain: bool = True
+    # Fraction of proposals the risk layer rejected or resized this
+    # session - how often the deterministic layer overrode the model.
+    intervention_rate: float = 0.0
 
     def to_json_line(self) -> str:
         return json.dumps(
@@ -64,6 +67,7 @@ class RuntimeStatusSnapshot:
                 "safe_to_trade": bool(self.safe_to_trade),
                 "last_decision": self.last_decision,
                 "last_risk": self.last_risk,
+                "intervention_rate": float(self.intervention_rate),
                 "memory_enabled": bool(self.memory_enabled),
                 "frozen_brain": bool(self.frozen_brain),
             },

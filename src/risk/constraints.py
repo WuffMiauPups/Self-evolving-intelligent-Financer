@@ -30,3 +30,20 @@ class RiskDecision:
     side: str | None = None
     target_position: float = 0.0
     client_order_id: str | None = None
+
+
+def action_annotation(proposal: "TradeProposal", decision: RiskDecision) -> str:
+    """Compact executed-action record for memory items and event logs.
+
+    Outcome-driven learning must credit the EXECUTED (risk-clamped)
+    action, never the model's raw intent (MASTER_PLAN 4.5.2).
+    """
+    reasons = [str(r) for r in decision.reasons]
+    approved = bool(decision.approved)
+    return (
+        f"action={int(proposal.action)}"
+        f" approved={int(approved)}"
+        f" side={(decision.side or '-') if approved else '-'}"
+        f" qty={float(decision.quantity) if approved else 0.0:.4f}"
+        f" resized={int('resized_to_cap' in reasons)}"
+    )
