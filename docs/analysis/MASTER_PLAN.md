@@ -15,7 +15,9 @@
 
 ## 1. Status ledger
 
-**Test suite:** 557 passed / 1 skipped (PySide6 not installed) as of commit `84a6ce4`. Baseline before this effort: 374.
+**Test suite:** 702 passed / 1 skipped (PySide6 not installed) as of commit `dd1b8d8`. Baseline before this effort: 374.
+
+**PHASE 1 CODE-COMPLETE (2026-07-10).** All of §4.1–§4.7 has landed and the full suite is green. The only open items are operational, not code: the ⟲1 retrain gate (§3 runbook — needs Alpaca credentials + a training run) and the unattended paper-trading week from Phase 0. Phase 2 entry stays gated on the ⟲1 SCORECARD.md incumbent row.
 
 | ID | Scope | Status | Commit |
 |---|---|---|---|
@@ -28,11 +30,11 @@
 | 1A | Adjusted bars (Adjustment.ALL), cache v2.0 invalidation, stylized-facts detector, fetch/cache fixes | ✅ done | `6540607` |
 | 1B core | **C2 normalization skew fixed** (stats persisted + re-applied on every inference path), parity tests, effective fast-mode config, atomic checkpoint saves, label-affecting cache fingerprints, split-boundary embargo | ✅ done | `0499055`, `8defad5` |
 | 1F | extra='forbid' + RiskConfig validators + 42-YAML hygiene test (70 tests), script footguns, pyproject fixes | ✅ done | `84a6ce4` |
-| 1B rest | Labels/calibration/parity leftovers | ⬜ **next** — §4.1–4.3 |
-| 1C | Evaluation honesty | ⬜ open — §4.4 |
-| 1D | Self-evolution loop | ⬜ open — §4.5 |
-| 1G | Runtime/docs hygiene | ⬜ open — §4.7 |
-| ⟲ #1 | First honest retrain | ⬜ **gated on §4.1–4.3** — §3 |
+| 1B rest | §4.1 labels/imbalance/selection metric, §4.2 direction-aware Platt + binding, §4.3 parity insurance | ✅ done | `02c3151`, `9efd6bc`, `66b56ab` |
+| 1C | Evaluation honesty: OOS enforcement, next-open±half-spread fills, CVaR95, truthful --compare, benchmark protocol + SCORECARD.md | ✅ done | `b3ff151`, `02c3151` (§4.4) |
+| 1D | Self-evolution loop: outcome ledger + decision events (`1639159`, `cf45cfa`), retrain trigger, transactional scorecard-gated promotion, KD/L2 anchors, backward-transfer floor | ✅ done | `e764010` |
+| 1G | Runtime/docs hygiene + §4.6 follow-ups: graceful shutdown, session-id nonce, bar_adjustment threading, webhook off hot path, caching-engine parity, README/cheatsheet truth pass | ✅ done | `dd1b8d8` |
+| ⟲ #1 | First honest retrain | ⬜ **open — operator step** (needs Alpaca creds; §3 runbook) |
 
 **Operational validation still owed from Phase 0:** one unattended week of paper trading (buffers hold one bar per period, equity tracks broker, forced outage degrades and recovers, daily-loss trips on a simulated loss). Nothing blocks starting it now.
 
