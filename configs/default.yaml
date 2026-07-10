@@ -100,6 +100,12 @@ runtime:
   # Model weights are FROZEN at runtime by default.  Memory bank can learn online.
   allow_online_model_updates: false
   allow_online_memory_updates: true
+  # Retired symptom patch: forcing FLAT predictions into directional trades
+  # papered over cost-blind labels (and was ON in backtests but OFF live,
+  # breaking parity). Labels are cost/horizon-aware now; the flag remains
+  # only as an explicit experiment knob, consumed identically by backtest
+  # and paper runtime.
+  force_directional_flip: false
   # Regime hysteresis / market priors: removed in the Great Simplification.
   # Only the top-level enabled flags survive (inert bools so GUI status
   # widgets render "off"); the old sub-keys (thresholds, cooldowns, filters)
@@ -197,7 +203,6 @@ backtest:
   initial_cash: 100000.0
   fee_bps: 1.0
   slippage_bps: 2.0
-  force_directional_flip_enabled: true
   # --- Annualization / simulation timing ---
   bars_per_year: 19656                # 252 days * 78 five-min bars
   seconds_per_bar: 300.0
@@ -238,17 +243,23 @@ training:
     mean_reversion_return_threshold: 0.0015
     flat_return_threshold: 0.00075
     time_to_move_threshold: 0.002
-  classification_loss: focal
+  # Class imbalance: exactly ONE primary correction (balanced class
+  # weights). Focal loss and the weighted sampler stack multiplicatively
+  # with the weights when combined (2-3x over-correction of the prior,
+  # pushing predictions far from base rates) - opt-in experiments only.
+  classification_loss: cross_entropy  # "focal" is opt-in
   focal_gamma: 2.0
-  # --- Adaptive focal gamma (adjusts per-epoch based on minority recall) ---
-  adaptive_focal_gamma: true
+  adaptive_focal_gamma: false
   focal_gamma_base: 1.5
   focal_gamma_boost: 2.0
   label_smoothing: 0.0
   class_weight_mode: balanced
   class_weight_cap: 3.0               # max class weight; null = uncapped
-  use_weighted_sampler: true
+  use_weighted_sampler: false         # opt-in; stacks with class weights
   weighted_sampler_mode: inverse_frequency  # or "effective_number"
+  # Best-epoch / early-stopping selection metric. Raw val loss rewards
+  # flat-hedging; balanced accuracy is what the scorecard grades.
+  model_selection_metric: val_balanced_accuracy
   minority_class_floor_warning: 0.1
   report_target_stats: true
   # --- Extended training diagnostics ---
@@ -292,7 +303,11 @@ training:
   memory_build_split: train
   early_stopping_patience: 2          # stop training if val loss degrades for 2 consecutive epochs
   restore_best_model: true            # Restore best epoch weights after training
-  transaction_cost_bps: 0.0           # Widen FLAT band by estimated round-trip cost (basis points)
+  # Round-trip cost floor for the FLAT band: a move smaller than the
+  # cost can never be worth trading, so it must not be labeled
+  # directional. ~5 bps approximates fee+slippage+spread round trip on
+  # liquid US equities (see risk.fee_bps/slippage_bps).
+  transaction_cost_bps: 5.0
   platt_calibration_enabled: true     # Fit Platt scaling on validation set after training
   # --- RL fine-tuning (reserved scaffold) ---
   rl_finetune_enabled: false

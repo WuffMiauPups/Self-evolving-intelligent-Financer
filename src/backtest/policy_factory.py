@@ -140,7 +140,7 @@ def build_brain_policy(
         feature_contract=artifacts.feature_contract,
         normalization=artifacts.normalization,
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
-        force_directional_flip=config.backtest.force_directional_flip_enabled,
+        force_directional_flip=config.runtime.force_directional_flip,
     )
 
 
@@ -175,7 +175,7 @@ def build_brain_memory_policy(
         feature_contract=artifacts.feature_contract,
         normalization=artifacts.normalization,
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
-        force_directional_flip=config.backtest.force_directional_flip_enabled,
+        force_directional_flip=config.runtime.force_directional_flip,
     )
 
     encoder = ModelStateEncoder(

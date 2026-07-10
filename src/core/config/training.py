@@ -111,9 +111,14 @@ class TrainingConfig(BaseModel):
             "time_to_move_threshold": 0.002,
         }
     )
+    # Class-imbalance policy: exactly ONE primary correction (balanced
+    # class weights).  The sampler and focal loss stack multiplicatively
+    # with the weights when enabled together, over-correcting the prior
+    # 2-3x and pushing predicted distributions far from base rates —
+    # they are opt-in experiment knobs now, not defaults.
     class_weight_mode: str = "balanced"
     class_weight_cap: float | None = 3.0
-    use_weighted_sampler: bool = True
+    use_weighted_sampler: bool = False
     weighted_sampler_mode: str = "inverse_frequency"
     minority_class_floor_warning: float = 0.1
     report_target_stats: bool = True
@@ -130,12 +135,16 @@ class TrainingConfig(BaseModel):
     multitask_enabled: bool = True
     contrastive_enabled: bool = False  # RESERVED
     contrastive_margin: float = 0.1
-    classification_loss: str = "focal"
+    classification_loss: str = "cross_entropy"
     focal_gamma: float = 2.0
-    adaptive_focal_gamma: bool = True
+    adaptive_focal_gamma: bool = False
     focal_gamma_base: float = 1.5
     focal_gamma_boost: float = 2.0
     label_smoothing: float = 0.0
+    # Best-epoch selection / early-stopping metric.  Raw multi-task val
+    # loss rewards flat-hedging; balanced accuracy is the deployment-
+    # aligned default (it is what the scorecard grades).
+    model_selection_metric: str = "val_balanced_accuracy"
     loss_weights: dict[str, float] = Field(
         default_factory=lambda: {
             "classification": 1.0,
@@ -204,6 +213,10 @@ class TrainingConfig(BaseModel):
             raise ConfigurationError("training.minority_class_floor_warning must be within [0, 1]")
         if self.classification_loss not in {"cross_entropy", "focal"}:
             raise ConfigurationError("training.classification_loss must be one of: cross_entropy, focal")
+        if self.model_selection_metric not in {"val_loss", "val_balanced_accuracy", "val_macro_f1"}:
+            raise ConfigurationError(
+                "training.model_selection_metric must be one of: val_loss, val_balanced_accuracy, val_macro_f1"
+            )
         if self.focal_gamma < 0.0:
             raise ConfigurationError("training.focal_gamma must be non-negative")
         if not 0.0 <= self.label_smoothing < 1.0:

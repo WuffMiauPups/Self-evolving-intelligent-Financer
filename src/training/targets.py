@@ -104,7 +104,14 @@ def build_training_targets(
     else:
         effective_horizon = max(outcome.future_returns)
     primary_return = float(outcome.future_returns[effective_horizon])
-    effective_epsilon = label_epsilon + (transaction_cost_bps / 10_000.0)
+    # The volatility-derived epsilon is a 1-bar return scale, but it
+    # thresholds an H-bar return whose noise std grows ~sqrt(H); without
+    # the scaling the flat band is ~sqrt(H) too narrow and noise gets
+    # labeled as signal.  The cost floor is horizon-independent: a move
+    # smaller than the round trip can never be worth trading.
+    effective_epsilon = label_epsilon * math.sqrt(max(effective_horizon, 1)) + (
+        transaction_cost_bps / 10_000.0
+    )
     if primary_return > effective_epsilon:
         direction_label = 2
         direction_name = "long"

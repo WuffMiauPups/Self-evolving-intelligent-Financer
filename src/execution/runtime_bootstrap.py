@@ -490,6 +490,7 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
         feature_contract=artifacts.feature_contract,
         normalization=artifacts.normalization,
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
+        force_directional_flip=config.runtime.force_directional_flip,
         default_target_fraction=config.runtime.default_target_fraction,
     )
     policy: object = base_policy

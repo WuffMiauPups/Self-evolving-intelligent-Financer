@@ -45,7 +45,6 @@ class BacktestConfig(BaseModel):
     initial_cash: float = 100000.0
     fee_bps: float = 1.0
     slippage_bps: float = 2.0
-    force_directional_flip_enabled: bool = True
     bars_per_year: int = 19656  # 252 trading days * 78 five-min bars
     seconds_per_bar: float = 300.0
 

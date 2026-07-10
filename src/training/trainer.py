@@ -72,6 +72,7 @@ class Trainer:
         scheduler: object | None = None,
         early_stopping_patience: int = 0,
         restore_best_on_finish: bool = True,
+        model_selection_metric: str = "val_loss",
         metrics_flat_dominance_threshold: float = 0.75,
         augmentation_enabled: bool = True,
         noise_std: float = 0.01,
@@ -111,6 +112,7 @@ class Trainer:
         self.scheduler = scheduler
         self.early_stopping_patience = early_stopping_patience
         self.restore_best_on_finish = restore_best_on_finish
+        self.model_selection_metric = model_selection_metric
         self.metrics_flat_dominance_threshold = metrics_flat_dominance_threshold
         self.augmentation_enabled = augmentation_enabled
         self.augmenter = TrainingAugmenter(
@@ -151,7 +153,7 @@ class Trainer:
         epochs: int,
     ) -> TrainingHistory:
         history = TrainingHistory()
-        best_val_loss = float("inf")
+        best_score = float("-inf")
         patience_counter = 0
         best_model_state: dict | None = None
         for epoch_index in range(epochs):
@@ -172,16 +174,26 @@ class Trainer:
             )
             history.train.append(train_metrics)
             history.val.append(val_metrics)
-            # --- Early stopping check ---
-            if val_metrics.loss < best_val_loss:
-                best_val_loss = val_metrics.loss
+            # --- Best-epoch selection + early stopping ---
+            # Selection uses the configured metric (default: balanced
+            # accuracy) instead of raw multi-task loss — the loss rewards
+            # flat-hedging, which is exactly the degenerate optimum the
+            # class-imbalance machinery exists to avoid.
+            score = self._selection_score(val_metrics)
+            if score > best_score:
+                best_score = score
                 patience_counter = 0
                 if self.restore_best_on_finish:
                     best_model_state = copy.deepcopy(self.model.state_dict())
             else:
                 patience_counter += 1
                 if self.early_stopping_patience > 0 and patience_counter >= self.early_stopping_patience:
-                    self.logger.info("early_stopping", epoch=epoch_index + 1, best_val_loss=best_val_loss)
+                    self.logger.info(
+                        "early_stopping",
+                        epoch=epoch_index + 1,
+                        metric=self.model_selection_metric,
+                        best_score=best_score,
+                    )
                     break
             self._update_focal_gamma(val_metrics)
             # Step the learning rate scheduler (if configured)
@@ -221,6 +233,15 @@ class Trainer:
         if self.restore_best_on_finish and best_model_state is not None:
             self.model.load_state_dict(best_model_state)
         return history
+
+    def _selection_score(self, metrics: object) -> float:
+        """Higher-is-better score for best-epoch selection / early stopping."""
+        if self.model_selection_metric == "val_balanced_accuracy":
+            return float(metrics.balanced_accuracy)
+        if self.model_selection_metric == "val_macro_f1":
+            return float(metrics.macro_f1)
+        # "val_loss" (legacy): lower loss is better.
+        return -float(metrics.loss)
 
     def _run_epoch(
         self,

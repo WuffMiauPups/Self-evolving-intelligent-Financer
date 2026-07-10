@@ -269,6 +269,7 @@ def run_supervised_training(
         scheduler=scheduler,
         early_stopping_patience=config.training.early_stopping_patience,
         restore_best_on_finish=config.training.restore_best_model,
+        model_selection_metric=config.training.model_selection_metric,
         metrics_flat_dominance_threshold=config.training.metrics_flat_dominance_threshold,
         augmentation_enabled=config.training.augmentation_enabled,
         noise_std=config.training.noise_std,

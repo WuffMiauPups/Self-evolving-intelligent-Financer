@@ -35,6 +35,11 @@ class RuntimeConfig(BaseModel):
     # --- Frozen-brain runtime policy ---
     allow_online_model_updates: bool = False  # model weights NEVER change at runtime
     allow_online_memory_updates: bool = True  # memory bank can learn online
+    # Retired symptom patch (was backtest-only, ON by default, breaking
+    # backtest/live parity). Labels are cost/horizon-aware now; this single
+    # flag is consumed identically by policy_factory and runtime_bootstrap
+    # and exists only for explicit experiments.
+    force_directional_flip: bool = False
     # --- Alerting ---
     alert_webhook_url: str | None = None
     alert_timeout_sec: float = 5.0
