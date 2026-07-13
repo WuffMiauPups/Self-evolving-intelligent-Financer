@@ -510,3 +510,47 @@ def test_historical_cache_legacy_format_still_readable(tmp_path: Path) -> None:
     assert loaded is not None
     assert len(loaded.bars) == len(bars)
     assert abs(loaded.bars[0].close - bars[0].close) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# build_post_training_memory stamps the bank with the checkpoint fingerprint
+# ---------------------------------------------------------------------------
+
+
+def test_post_training_memory_build_passes_encoder_fingerprint(monkeypatch) -> None:
+    """The training-path bank build must stamp the encoder fingerprint.
+
+    Regression: the ⟲1 run on 2026-07-13 produced a 19,994-item bank with
+    ``encoder_fingerprint=None`` because ``build_post_training_memory``
+    constructed its ``ModelStateEncoder`` without the fingerprint — which
+    silently disarms every later ``require_encoder_match`` check.
+    """
+    from types import SimpleNamespace
+
+    from src.training import memory_builder
+
+    config = load_config("configs/default.yaml")
+    config.training.save_memory_after_training = True
+    config.training.memory_build_split = "all"
+
+    captured: dict[str, object] = {}
+
+    def fake_build(*, encoder, **kwargs):
+        captured["fingerprint"] = encoder.encoder_fingerprint
+        return []
+
+    monkeypatch.setattr(memory_builder, "build_memory_bank_from_bars", fake_build)
+    monkeypatch.setattr(memory_builder, "save_memory_bank", lambda *a, **k: None)
+
+    bundle = SimpleNamespace(
+        feature_contract=None, normalization_stats=None, split_ranges={}
+    )
+    memory_builder.build_post_training_memory(
+        config=config,
+        model=torch.nn.Linear(2, 2),
+        bundle=bundle,
+        bars_by_symbol={"AAPL": []},
+        device=torch.device("cpu"),
+        encoder_fingerprint="STAMP_FP",
+    )
+    assert captured["fingerprint"] == "STAMP_FP"

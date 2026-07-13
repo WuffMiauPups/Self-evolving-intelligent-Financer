@@ -42,6 +42,7 @@ def build_post_training_memory(
     bundle: TrainingDataBundle,
     bars_by_symbol: dict[str, list[MarketBar]],
     device: torch.device,
+    encoder_fingerprint: str | None = None,
 ) -> str | None:
     logger = get_logger("training")
     memory_path: str | None = None
@@ -64,6 +65,9 @@ def build_post_training_memory(
             feature_contract=bundle.feature_contract,
             normalization=bundle.normalization_stats,
             expected_latent_dim=memory_config.latent_dim,
+            # Without the fingerprint the bank is saved unstamped and every
+            # later require_encoder_match check is silently bypassed.
+            encoder_fingerprint=encoder_fingerprint,
         )
         pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
         memory_bank = build_memory_bank_from_bars(

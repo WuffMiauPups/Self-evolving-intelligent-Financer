@@ -578,12 +578,15 @@ def run_supervised_training(
                 reason="insufficient_samples" if len(all_confidences) < 20 else "length_mismatch",
             )
 
+    from src.training.checkpoints import load_checkpoint_payload as _load_payload
+
     memory_path = build_post_training_memory(
         config=config,
         model=model,
         bundle=bundle,
         bars_by_symbol=bars_by_symbol,
         device=device_ctx.device,
+        encoder_fingerprint=_load_payload(checkpoint_path).get("meta", {}).get("encoder_fingerprint"),
     )
 
     logger.info(
