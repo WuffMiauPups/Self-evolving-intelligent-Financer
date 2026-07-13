@@ -34,7 +34,7 @@
 | 1C | Evaluation honesty: OOS enforcement, next-open±half-spread fills, CVaR95, truthful --compare, benchmark protocol + SCORECARD.md | ✅ done | `b3ff151`, `02c3151` (§4.4) |
 | 1D | Self-evolution loop: outcome ledger + decision events (`1639159`, `cf45cfa`), retrain trigger, transactional scorecard-gated promotion, KD/L2 anchors, backward-transfer floor | ✅ done | `e764010` |
 | 1G | Runtime/docs hygiene + §4.6 follow-ups: graceful shutdown, session-id nonce, bar_adjustment threading, webhook off hot path, caching-engine parity, README/cheatsheet truth pass | ✅ done | `dd1b8d8` |
-| ⟲ #1 | First honest retrain | ⬜ **open — operator step** (needs Alpaca creds; §3 runbook) |
+| ⟲ #1 | First honest retrain | ✅ **run 2026-07-13** — adjusted refetch clean (1.13M bars, no split artifacts); candidate `d748f28c3695` trained (best epoch 4, val BA 0.4435), normalization + split ranges + Platt sidecar verified in meta; OOS benchmark row in SCORECARD.md (BA 0.3642, excess vs buy&hold −3.96%); **promotion refused by the gate** (honest: no alpha yet), candidate staged at `checkpoints/20260713_185353/`. Gate defect found & filed: incumbent benchmarked on mismatched/in-sample window when meta lacks split ranges. |
 
 **Operational validation still owed from Phase 0:** one unattended week of paper trading (buffers hold one bar per period, equity tracks broker, forced outage degrades and recovers, daily-loss trips on a simulated loss). Nothing blocks starting it now.
 
