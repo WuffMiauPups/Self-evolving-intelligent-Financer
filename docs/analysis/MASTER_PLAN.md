@@ -185,6 +185,15 @@ Phase 2+ levers (memory prior, market-context features, OOD gating) build on thi
 - **[S] Ops nits:** webhook alerts off the rejection hot path (thread/queue); client_order_id restart-collision nonce. → verify: unit tests.
 - **[M] Docs truth pass:** rewrite README (delete dendritic/soma/Hopfield/ESOM/veto/GRU claims; "approves, resizes, or rejects" is now true — say how; document the C2 stats, scorecard, and adjusted-bar cache); delete or rewrite `LIVE_LOG_CHEATSHEET.md`; fix factory/engine docstrings claiming fusion/cutoff behavior; GUI: remove dead toggles, fix `MemoryStatus` reading nonexistent bank keys. → verify: `grep -ri "hopfield\|dendritic\|soma\|esom" README.md docs/ src/` returns only historical notes explicitly marked as removed.
 
+### 4.8 Post-⟲1 follow-up — **scheduled 2026-07-14** (found by running the ⟲1 gate for real)
+
+**[M] Promotion-gate benchmark windows must match.** `scripts/run_train.py:_benchmark_candidate_vs_incumbent` benchmarks candidate and incumbent each on their *own* OOS window (`src/evaluation/oos.py` reads each checkpoint's `training_split_ranges`). Two defects observed in the 2026-07-13 ⟲1 run:
+1. A pre-C2 incumbent **without** `training_split_ranges` was benchmarked over the FULL history including its own training data (in-sample contamination: its row had 29,693 buy-hold fills vs the candidate's 9,703).
+2. Even with ranges present, the two rows can cover different windows, making the gate's expectancy/balanced-accuracy **deltas apples-to-oranges**.
+
+Fix: benchmark BOTH checkpoints on the intersection window — bars after `max(candidate_training_end, incumbent_training_end)`; if the incumbent has no `training_split_ranges`, either use the candidate's window for both or mark the incumbent row untrusted and skip the delta gates (absolute gates like `excess_vs_buy_hold` stay). Related code: `src/training/checkpoint_promotion.py:evaluate_promotion`, `src/evaluation/benchmark.py:run_benchmark`.
+**→ verify:** regression test in `tests/test_close_the_loop.py` with a missing-split-ranges incumbent: both benchmark rows share the same window (equal buy-hold fill counts) or delta gates are skipped with a loud log; the 2026-07-13 scenario reproduced under the fix yields a fair comparison.
+
 ---
 
 ## 5. Standing rules (unchanged from v1, still binding)
