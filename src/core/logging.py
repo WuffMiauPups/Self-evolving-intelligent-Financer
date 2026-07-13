@@ -21,7 +21,14 @@ class TeeStream:
 
     def write(self, data: str) -> int:
         for stream in self._streams:
-            stream.write(data)
+            try:
+                stream.write(data)
+            except UnicodeEncodeError:
+                # Redirected stdout on Windows defaults to cp1252, which
+                # cannot encode every character a log line may contain.
+                # A log write must never take down the process — degrade
+                # to backslash-escaped ASCII instead.
+                stream.write(data.encode("ascii", errors="backslashreplace").decode("ascii"))
         return len(data)
 
     def flush(self) -> None:
@@ -48,6 +55,12 @@ class StdlibEventLogger:
 
 def _build_output_stream(file_enabled: bool, file_path: str | None) -> TextIO:
     global _LOG_FILE_HANDLE
+    # When stdout is redirected to a file/pipe on Windows it defaults to
+    # cp1252; log lines with non-Latin-1 characters would raise.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
     if _LOG_FILE_HANDLE is not None:
         try:
             _LOG_FILE_HANDLE.close()
