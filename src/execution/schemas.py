@@ -16,6 +16,9 @@ class OrderIntent:
     risk_approved: bool = False
     session_id: str | None = None
     sequence: int = 0
+    # Originating strategy (MASTER_PLAN §6.3) — carried from the proposal
+    # so the resulting FillRecord credits the right strategy's allocation.
+    strategy_id: str = "brain"
 
 
 @dataclass(frozen=True)

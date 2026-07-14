@@ -19,6 +19,9 @@ class FillRecord:
     fee: float
     realized_pnl: float  # net of fees
     client_order_id: str
+    # Strategy that proposed the trade (MASTER_PLAN §6.3). Pre-arbitration
+    # ledger lines carry no key and default to "brain" on load.
+    strategy_id: str = "brain"
 
     def to_json_line(self) -> str:
         payload = asdict(self)
@@ -36,6 +39,7 @@ class FillRecord:
             fee=float(payload.get("fee", 0.0)),
             realized_pnl=float(payload.get("realized_pnl", 0.0)),
             client_order_id=str(payload.get("client_order_id", "")),
+            strategy_id=str(payload.get("strategy_id", "brain")),
         )
 
 

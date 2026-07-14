@@ -101,6 +101,7 @@ def _proposal(action: int = 1) -> SimpleNamespace:
         action=action,
         confidence=0.8,
         target_fraction=0.05,
+        strategy_id="brain",
     )
 
 
@@ -167,11 +168,11 @@ def test_action_annotation_formats_executed_action() -> None:
     proposal = _proposal(action=1)
     resized = RiskDecision(approved=True, reasons=["resized_to_cap"], quantity=50.0, side="buy")
     annotation = action_annotation(proposal, resized)
-    assert annotation == "action=1 approved=1 side=buy qty=50.0000 resized=1"
+    assert annotation == "action=1 approved=1 side=buy qty=50.0000 resized=1 strategy=brain"
 
     rejected = RiskDecision(approved=False, reasons=["daily_loss_limit"])
     annotation = action_annotation(proposal, rejected)
-    assert annotation == "action=1 approved=0 side=- qty=0.0000 resized=0"
+    assert annotation == "action=1 approved=0 side=- qty=0.0000 resized=0 strategy=brain"
 
 
 def test_record_snapshot_threads_annotation_to_updater() -> None:

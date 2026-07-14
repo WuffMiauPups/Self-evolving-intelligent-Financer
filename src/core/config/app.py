@@ -7,6 +7,7 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.core.config.arbitration import ArbitrationConfig
 from src.core.config.broker import BrokerConfig
 from src.core.config.common import (
     BacktestConfig,
@@ -54,6 +55,7 @@ class AppConfig(BaseModel):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
+    arbitration: ArbitrationConfig = Field(default_factory=ArbitrationConfig)
 
     @model_validator(mode="after")
     def normalize_data_defaults(self) -> "AppConfig":

@@ -20,6 +20,10 @@ class TradeProposal:
     # proposals as negative-EV and rejects them.
     expected_gain_bps: float = 0.0
     expected_loss_bps: float = 0.0
+    # Originating strategy (MASTER_PLAN §6.3). "brain" for the model policy;
+    # the StrategyArbiter stamps the winning primitive's id so realized
+    # outcomes can be credited back to the strategy that proposed the trade.
+    strategy_id: str = "brain"
 
 
 @dataclass(frozen=True)
@@ -49,4 +53,5 @@ def action_annotation(proposal: "TradeProposal", decision: RiskDecision) -> str:
         f" side={(decision.side or '-') if approved else '-'}"
         f" qty={float(decision.quantity) if approved else 0.0:.4f}"
         f" resized={int('resized_to_cap' in reasons)}"
+        f" strategy={proposal.strategy_id}"
     )

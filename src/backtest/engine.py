@@ -200,6 +200,7 @@ class BacktestEngine:
                     risk_approved=True,
                     session_id="backtest",
                     sequence=sequence_by_key[order_key],
+                    strategy_id=proposal.strategy_id,
                 )
                 result = simulator.execute(intent)
                 if not result.accepted:
@@ -213,6 +214,12 @@ class BacktestEngine:
                     position.qty if position else 0.0,
                     timestamp=snapshot.timestamp,
                 )
+                # Outcome-weighted allocation (§6.3): credit the fill's
+                # realized NET PnL (PaperExecutor records it fee-adjusted)
+                # back to the strategy that proposed the trade.
+                if hasattr(policy, "record_fill_outcome") and ledger.fills:
+                    fill = ledger.fills[-1]
+                    policy.record_fill_outcome(fill.strategy_id, fill.realized_pnl)
             portfolio.mark_to_market(latest_prices, timestamp)
             equity_curve.append(portfolio.equity)
             total_exposure = sum(abs(position.qty * position.market_price) for position in portfolio.positions.values())

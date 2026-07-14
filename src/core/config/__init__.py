@@ -5,6 +5,7 @@ All public names are re-exported here so existing imports continue to work:
 """
 
 from src.core.config.app import AppConfig, load_config
+from src.core.config.arbitration import ArbitrationConfig
 from src.core.config.broker import BrokerConfig
 from src.core.config.common import (
     BacktestConfig,
@@ -23,6 +24,7 @@ from src.core.config.training import FastModeConfig, TrainingConfig
 
 __all__ = [
     "AppConfig",
+    "ArbitrationConfig",
     "BacktestConfig",
     "BrokerConfig",
     "DataConfig",

@@ -351,6 +351,18 @@ training:
   anchor_checkpoint_path: null   # incumbent checkpoint to anchor against
   distill_lambda_kd: 0.0         # KL(incumbent || student) weight; 0 = off
   proximal_lambda_l2: 0.0        # L2(student - anchor) weight; 0 = off
+  # --- Curriculum + anchored negatives (Phase 2 6.5), both off by default ---
+  # Curriculum: epoch-progressive sampler admits easy (unambiguous-label)
+  # samples first, ramping to the full set by curriculum_full_epoch.
+  curriculum_enabled: false
+  curriculum_start_quantile: 0.5
+  curriculum_full_epoch: 3
+  # Anchored negatives: the worst executed decisions (loss > round-trip cost
+  # + noise buffer) are retained permanently across retrains.
+  anchored_negatives_enabled: false
+  anchored_negatives_path: runs/anchored_negatives.jsonl
+  anchored_negatives_max: 5000
+  anchored_noise_buffer_bps: 5.0
   # --- Fast experiment mode (disabled by default) ---
   # Enable with --fast CLI flag or by setting enabled: true here.
   # Fast runs are explicitly marked in logs and run summaries.
@@ -421,6 +433,22 @@ memory:
   damping_min_multiplier: 0.5
   damping_min_neighbors: 5
   damping_full_at_return: 0.002
+
+# --- Strategy arbitration layer (MASTER_PLAN §6.3) ---
+# Registry of brain + bounded rule primitives: every strategy proposes each
+# bar, the highest-weight directional candidate wins and is scaled by its
+# budget fraction (the SOFT cap); realized fill PnL shifts the weights.
+# Disabled by default — PAPER-ONLY until an arbitrated run beats the
+# brain-only scorecard row (SCORECARD.md).
+arbitration:
+  enabled: false
+  strategies: [brain, momentum, mean_reversion]
+  budget_fractions:
+    brain: 1.0
+    momentum: 0.5
+    mean_reversion: 0.5
+  ema_alpha: 0.1        # per-strategy realized-PnL EMA smoothing
+  weight_floor: 0.05    # nonzero floor weight: losers are throttled, never starved
 
 # --- Evaluation / experiment framework ---
 evaluation:

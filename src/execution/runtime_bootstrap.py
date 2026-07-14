@@ -38,6 +38,7 @@ from src.monitoring.runtime_status import RuntimeStatusWriter
 from src.risk.ledger import Ledger
 from src.risk.portfolio_state import PortfolioState
 from src.risk.risk_manager import RiskManager
+from src.strategies.arbiter import build_arbiter
 from src.strategies.base import TradingPolicy
 from src.strategies.brain_policy import BrainPolicy
 from src.strategies.memory_policy import MemoryAwarePolicy
@@ -93,6 +94,10 @@ class RuntimeContext:
     bar_aggregator: TimeframeAggregator | None = None
     sync_failure_count: int = 0
     processed_fill_ids: set[str] = field(default_factory=set)
+    # client_order_id -> strategy_id for in-flight broker orders (§6.3):
+    # broker fills are reconstructed from closed orders, so the fill
+    # capture path reads (and deletes) the entry to attribute the fill.
+    strategy_by_client_order_id: dict[str, str] = field(default_factory=dict)
     daily_anchor_equity: float = 0.0
     daily_anchor_date: date | None = None
     # Debounced memory persistence (tick_processor._maybe_persist_memory):
@@ -100,6 +105,26 @@ class RuntimeContext:
     # memory.save_debounce_sec (plus once at graceful shutdown).
     memory_bank_dirty: bool = False
     last_memory_persist_monotonic: float = 0.0
+
+
+def maybe_wrap_arbitration(policy: object, config: AppConfig, *, logger: object) -> object:
+    """Wrap ``policy`` in the §6.3 strategy arbiter when arbitration is on.
+
+    Runs AFTER memory wrapping so the arbiter's brain member keeps its
+    memory capabilities (delegated via ``StrategyArbiter.__getattr__``).
+    Disabled config returns the policy unchanged.
+    """
+    if not config.arbitration.enabled:
+        return policy
+    arbiter = build_arbiter(policy, config.arbitration)
+    logger.info(
+        "arbitration_ready",
+        strategies=list(config.arbitration.strategies),
+        budgets=dict(config.arbitration.budget_fractions),
+        ema_alpha=config.arbitration.ema_alpha,
+        weight_floor=config.arbitration.weight_floor,
+    )
+    return arbiter
 
 
 def resolve_runtime_symbols(
@@ -604,6 +629,7 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
             allow_online_memory_updates=config.runtime.allow_online_memory_updates,
             **memory_bank.summary(),
         )
+    policy = maybe_wrap_arbitration(policy, config, logger=logger)
     if isinstance(policy, TradingPolicy):
         policy.reset_all_state(reason="runtime_start")
     session_guard = SessionGuard(config.runtime)

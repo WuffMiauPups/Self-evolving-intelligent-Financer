@@ -160,6 +160,11 @@ def _apply_broker_fill(ctx: RuntimeContext, *, order: dict, logger: object) -> N
         )
         return
     ctx.processed_fill_ids.add(client_order_id)
+    # Strategy attribution (§6.3): broker fills are reconstructed from
+    # closed orders, so the originating intent is out of hand — resolve the
+    # strategy from the submit-time map and consume the entry. Unknown ids
+    # (e.g. orders submitted before a restart) default to "brain".
+    strategy_id = ctx.strategy_by_client_order_id.pop(client_order_id, "brain")
     side = "buy" if "buy" in str(order.get("side", "")).lower() else "sell"
     signed_delta = filled_qty if side == "buy" else -filled_qty
     fill_time = order.get("updated_at")
@@ -191,8 +196,13 @@ def _apply_broker_fill(ctx: RuntimeContext, *, order: dict, logger: object) -> N
             fee=0.0,
             realized_pnl=realized,
             client_order_id=client_order_id,
+            strategy_id=strategy_id,
         )
     )
+    # Outcome-weighted allocation (§6.3): credit realized PnL back to the
+    # strategy that proposed the trade so the arbiter can shift weights.
+    if hasattr(ctx.policy, "record_fill_outcome"):
+        ctx.policy.record_fill_outcome(strategy_id, realized)
     if ctx.order_journal is not None:
         try:
             from src.execution.order_journal import OrderJournalEntry
@@ -806,7 +816,13 @@ def process_tick(
             risk_approved=True,
             session_id=ctx.runtime_session_id,
             sequence=sequence,
+            strategy_id=proposal.strategy_id,
         )
+        if ctx.client is not None:
+            # Broker fills are captured later from closed-order lookups
+            # (no intent in hand), so remember which strategy owns this
+            # client_order_id; _apply_broker_fill consumes the entry.
+            ctx.strategy_by_client_order_id[client_order_id] = proposal.strategy_id
         logger.info(
             "order_submit_attempt",
             symbol=symbol,
@@ -866,6 +882,12 @@ def process_tick(
                 position.qty if position else 0.0,
                 timestamp=snapshot.timestamp,
             )
+            # PaperExecutor already recorded the fill (with strategy_id
+            # from the intent); credit its realized net PnL back to the
+            # proposing strategy (§6.3 outcome-weighted allocation).
+            if hasattr(ctx.policy, "record_fill_outcome") and ctx.ledger.fills:
+                fill = ctx.ledger.fills[-1]
+                ctx.policy.record_fill_outcome(fill.strategy_id, fill.realized_pnl)
         elif ctx.client is not None and result.terminal and result.status == "filled":
             _apply_broker_fill(
                 ctx,

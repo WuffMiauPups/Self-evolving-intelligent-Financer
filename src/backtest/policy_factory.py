@@ -7,11 +7,14 @@ backtest could only run the baseline policy.  Pulling the factory into
 ``src/backtest/policy_factory.py`` lets both call sites share one
 implementation.
 
-Three builders:
+Four builders:
     build_baseline_policy         — no model, no memory (pure momentum)
     build_brain_policy            — BrainPolicy over a loaded checkpoint
     build_brain_memory_policy     — MemoryAwarePolicy (brain + passive memory
                                     diagnostics; memory never gates trades)
+    build_arbitration_policy      — StrategyArbiter over the brain (memory-
+                                    wrapped when enabled) + rule primitives
+                                    (MASTER_PLAN §6.3)
 
 The builders intentionally take the same signature where possible so the
 caller can switch between them by changing one string.  The memory-aware
@@ -34,6 +37,7 @@ from src.memory.storage import load_memory_bank, save_memory_bank
 from src.memory.updater import AssociativeMemoryUpdater
 from src.models.factory import resolve_inference_model
 from src.models.state_encoder import ModelStateEncoder
+from src.strategies.arbiter import StrategyArbiter, build_arbiter
 from src.strategies.baseline_policy import BaselineMomentumPolicy
 from src.strategies.baselines import BuyAndHoldPolicy, MeanReversionPolicy
 from src.strategies.brain_policy import BrainPolicy
@@ -280,3 +284,28 @@ def build_brain_memory_policy(
     _ = conservative_thresholds  # parameter reserved; fusion layer removed
     _ = verbose_fusion  # parameter reserved; fusion layer removed
     return policy
+
+
+def build_arbitration_policy(
+    config: AppConfig,
+    *,
+    bars_by_symbol: dict[str, list[MarketBar]],
+    pipeline: FeaturePipeline,
+) -> StrategyArbiter:
+    """Construct the §6.3 strategy arbiter over the configured registry.
+
+    The brain member is the memory-aware policy when memory is enabled —
+    so memory keeps learning under arbitration via the arbiter's
+    delegation — and the bare BrainPolicy otherwise. Rule primitives are
+    instantiated per ``config.arbitration.strategies`` (registry order
+    breaks weight ties).
+    """
+    if config.memory.enabled:
+        brain = build_brain_memory_policy(
+            config, bars_by_symbol=bars_by_symbol, pipeline=pipeline
+        )
+    else:
+        brain = build_brain_policy(
+            config, bars_by_symbol=bars_by_symbol, pipeline=pipeline
+        )
+    return build_arbiter(brain, config.arbitration)

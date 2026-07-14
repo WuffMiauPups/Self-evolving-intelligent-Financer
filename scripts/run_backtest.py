@@ -143,6 +143,15 @@ def main() -> int:
         help="Enable associative market memory decision support during the backtest.",
     )
     parser.add_argument(
+        "--use-arbitration",
+        action="store_true",
+        help=(
+            "Wrap the policy in the MASTER_PLAN 6.3 strategy arbiter (brain + "
+            "bounded rule primitives with soft-cap budgets and outcome-weighted "
+            "allocation)."
+        ),
+    )
+    parser.add_argument(
         "--real-data",
         action="store_true",
         help="Backtest on cached/fetched real historical bars instead of synthetic bars.",
@@ -192,6 +201,8 @@ def main() -> int:
         config.memory.enabled = True
         if config.memory.runtime_update_mode == "pending_only":
             config.memory.runtime_update_mode = "append_when_ready"
+    if args.use_arbitration:
+        config.arbitration.enabled = True
     use_real_data = args.real_data or config.training.use_real_historical_data
     bars_by_symbol = _load_bars_by_symbol(config, use_real_data=use_real_data, allow_mock=args.allow_mock)
     # Out-of-sample by default: evaluating a checkpoint on its own
@@ -337,6 +348,12 @@ def main() -> int:
             brain_policy, config, artifacts, bars_by_symbol, pipeline,
             enable_memory=True,
         )
+    if config.arbitration.enabled:
+        # Arbitration wraps OUTSIDE memory (mirrors runtime_bootstrap) so
+        # the arbiter's brain member keeps its memory capabilities.
+        from src.strategies.arbiter import build_arbiter
+
+        brain_policy = build_arbiter(brain_policy, config.arbitration)
     brain_engine = BacktestEngine(config, pipeline, RiskManager(config.risk.model_copy()))
     brain_report = brain_engine.run(bars_by_symbol, brain_policy)
     label = f"{artifacts.model_kind}_{'checkpoint' if config.model.checkpoint_path else 'untrained'}"

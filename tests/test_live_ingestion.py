@@ -63,6 +63,8 @@ def _ctx(**overrides) -> SimpleNamespace:
         bar_aggregator=None,
         sync_failure_count=0,
         processed_fill_ids=set(),
+        strategy_by_client_order_id={},
+        policy=SimpleNamespace(),  # no record_fill_outcome: arbitration off
         daily_anchor_equity=0.0,
         daily_anchor_date=None,
         buffers={},

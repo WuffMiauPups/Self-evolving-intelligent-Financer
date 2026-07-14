@@ -64,6 +64,7 @@ class PaperExecutor:
                 fee=fee,
                 realized_pnl=realized_net,
                 client_order_id=intent.client_order_id,
+                strategy_id=intent.strategy_id,
             )
         )
         return ExecutionResult(
