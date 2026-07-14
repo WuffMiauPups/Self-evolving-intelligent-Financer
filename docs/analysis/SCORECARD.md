@@ -9,3 +9,4 @@ deterministic for (checkpoint, data range).
 | checkpoint | fingerprint | data start | data end | bal. acc | expectancy | sharpe | max DD | CVaR95 | vs buy&hold | trades | tag |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | brain.pt | d748f28c3695 | 2026-03-17 | 2026-07-13 | 0.3642 | -0.15 | -3.567 | -0.0115 | -0.00014 | -0.0396 | 940 | oos |
+| brain.pt | 4575582c9cd9 | 2026-03-17 | 2026-07-13 | 0.3698 | -0.24 | -1.251 | -0.0610 | -0.00083 | -0.0517 | 872 | oos |
