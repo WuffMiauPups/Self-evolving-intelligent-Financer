@@ -24,6 +24,12 @@ class RiskConfig(BaseModel):
     # risk manager can reject trades whose expected value doesn't cover costs.
     fee_bps: float = 1.0
     slippage_bps: float = 2.0
+    # §4.4.4 fail-fast: a model without a risk head feeds (0, 0) into the
+    # EV gate, which then rejects every trade — a silent zero-trade
+    # session. True (default) refuses to CONSTRUCT a brain policy around
+    # such a model; flip to false only for explicit experiments that
+    # accept an inert EV gate.
+    ev_gate_requires_signals: bool = True
     kill_switch: bool = False
     allowed_sessions: list[str] = Field(default_factory=list)
     max_aggregate_notional: float = 50000.0

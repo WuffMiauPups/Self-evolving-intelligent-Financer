@@ -27,14 +27,10 @@ from src.strategies.memory_policy import MemoryAwarePolicy
 
 
 def _print_report(label: str, metrics: dict[str, float]) -> None:
+    # Fusion/veto report rows removed with the fusion layer itself (Great
+    # Simplification): nothing produces fusion_* metrics anymore, so the
+    # conditional block here was dead code reading keys that never exist.
     fill_count = int(metrics.get("fill_count", 0))
-    veto_count = int(metrics.get("fusion_veto_count", 0))
-    dampen_count = int(metrics.get("fusion_dampen_count", 0))
-    support_count = int(metrics.get("fusion_support_count", 0))
-    neutral_count = int(metrics.get("fusion_neutral_count", 0))
-    total_fusion = veto_count + dampen_count + support_count + neutral_count
-    blocked_count = veto_count + dampen_count
-    blocked_frac = blocked_count / total_fusion if total_fusion > 0 else 0.0
 
     print(f"\n{'='*60}")
     print(f"  {label}")
@@ -48,13 +44,6 @@ def _print_report(label: str, metrics: dict[str, float]) -> None:
     print(f"  expectancy          : {metrics.get('expectancy', 0.0):+.6f}")
     print(f"  turnover            : {metrics.get('turnover', 0.0):.4f}")
     print(f"  avg_exposure        : {metrics.get('avg_exposure', 0.0):.4f}")
-    if total_fusion > 0:
-        print(f"  --- fusion ---")
-        print(f"  support             : {support_count}  ({metrics.get('memory_supported_rate', 0.0):.3f})")
-        print(f"  neutral             : {neutral_count}  ({metrics.get('memory_neutral_rate', 0.0):.3f})")
-        print(f"  dampen              : {dampen_count}  ({metrics.get('memory_dampened_rate', 0.0):.3f})")
-        print(f"  veto                : {veto_count}  ({metrics.get('memory_veto_rate', 0.0):.3f})")
-        print(f"  blocked(veto+damp)  : {blocked_count}  ({blocked_frac:.3f} of all fusion calls)")
 
 
 def _make_memory_aware_policy(
@@ -238,6 +227,7 @@ def main() -> int:
                 feature_contract=arts.feature_contract,
                 normalization=arts.normalization,
                 max_state_gap_sec=cfg.runtime.state_reset_gap_sec,
+                ev_gate_requires_signals=cfg.risk.ev_gate_requires_signals,
             )
             if cfg.memory.enabled:
                 return _make_memory_aware_policy(bp, cfg, arts, train_bars, pipe, enable_memory=True)
@@ -342,6 +332,7 @@ def main() -> int:
         feature_contract=artifacts.feature_contract,
         normalization=artifacts.normalization,
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
+        ev_gate_requires_signals=config.risk.ev_gate_requires_signals,
     )
     if config.memory.enabled:
         brain_policy = _make_memory_aware_policy(

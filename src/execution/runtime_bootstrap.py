@@ -127,6 +127,27 @@ def maybe_wrap_arbitration(policy: object, config: AppConfig, *, logger: object)
     return arbiter
 
 
+def build_runtime_brain_policy(config: AppConfig, artifacts, device) -> BrainPolicy:
+    """Construct the runtime's BrainPolicy from resolved artifacts.
+
+    Module-level (not inline in bootstrap) so backtest-vs-runtime proposal
+    parity is testable (§4.1.4): tests/test_proposal_parity.py asserts this
+    and ``policy_factory.build_brain_policy`` produce identical proposals
+    for the same checkpoint + snapshot. Every config-driven BrainPolicy
+    field must be threaded identically in both places.
+    """
+    return BrainPolicy(
+        model=artifacts.model,
+        device=device,
+        feature_contract=artifacts.feature_contract,
+        normalization=artifacts.normalization,
+        max_state_gap_sec=config.runtime.state_reset_gap_sec,
+        force_directional_flip=config.runtime.force_directional_flip,
+        default_target_fraction=config.runtime.default_target_fraction,
+        ev_gate_requires_signals=config.risk.ev_gate_requires_signals,
+    )
+
+
 def resolve_runtime_symbols(
     symbol_results: dict[str, SymbolEligibilityResult],
     *,
@@ -570,15 +591,7 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
             allow_online_memory_updates=config.runtime.allow_online_memory_updates,
             status="model_weights_mutable_WARNING",
         )
-    base_policy = BrainPolicy(
-        model=artifacts.model,
-        device=device_ctx.device,
-        feature_contract=artifacts.feature_contract,
-        normalization=artifacts.normalization,
-        max_state_gap_sec=config.runtime.state_reset_gap_sec,
-        force_directional_flip=config.runtime.force_directional_flip,
-        default_target_fraction=config.runtime.default_target_fraction,
-    )
+    base_policy = build_runtime_brain_policy(config, artifacts, device_ctx.device)
     policy: object = base_policy
     memory_bank: MemoryBank | None = None
     if config.memory.enabled:

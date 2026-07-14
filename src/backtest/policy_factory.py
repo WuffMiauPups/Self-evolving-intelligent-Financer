@@ -171,6 +171,10 @@ def build_brain_policy(
         normalization=artifacts.normalization,
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
         force_directional_flip=config.runtime.force_directional_flip,
+        # Parity with build_runtime_brain_policy (§4.1.4): a non-default
+        # config fraction previously reached only the runtime path.
+        default_target_fraction=config.runtime.default_target_fraction,
+        ev_gate_requires_signals=config.risk.ev_gate_requires_signals,
     )
 
 
@@ -210,6 +214,8 @@ def build_brain_memory_policy(
         normalization=artifacts.normalization,
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
         force_directional_flip=config.runtime.force_directional_flip,
+        default_target_fraction=config.runtime.default_target_fraction,
+        ev_gate_requires_signals=config.risk.ev_gate_requires_signals,
     )
 
     encoder = ModelStateEncoder(

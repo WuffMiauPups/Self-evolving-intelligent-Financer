@@ -108,6 +108,38 @@ def test_round_trip_closes_on_sign_flip() -> None:
     assert metrics["round_trip_win_rate"] == pytest.approx(1.0)
 
 
+def test_sharpe_matches_hand_computed_fixture() -> None:
+    # equity 100 -> 110 -> 99 -> 108.9: bar returns exactly +10%, -10%, +10%.
+    # mean = 1/30; sample variance (n-1=2) = ((1/15)^2 + (2/15)^2 + (1/15)^2)/2
+    # = 1/75; annualized Sharpe = (1/30) / sqrt(1/75) * sqrt(252)
+    # = sqrt(75 * 252) / 30 = sqrt(18900) / 30 ≈ 4.5825757.
+    import math
+
+    metrics = compute_backtest_metrics(
+        initial_equity=100.0,
+        equity_curve=[100.0, 110.0, 99.0, 108.9],
+        fills=[],
+        exposures=[0.0] * 4,
+        bars_per_year=252,
+    )
+    assert metrics["sharpe_ratio"] == pytest.approx(math.sqrt(18900.0) / 30.0, rel=1e-9)
+
+
+def test_calmar_matches_hand_computed_fixture() -> None:
+    # equity 100 -> 120 -> 90 -> 130 over exactly one "year" (bars_per_year=4):
+    # CAGR = 30%; max drawdown = 90/120 - 1 = -25%; Calmar = 0.30 / 0.25 = 1.2.
+    metrics = compute_backtest_metrics(
+        initial_equity=100.0,
+        equity_curve=[100.0, 120.0, 90.0, 130.0],
+        fills=[],
+        exposures=[0.0] * 4,
+        bars_per_year=4,
+    )
+    assert metrics["cagr"] == pytest.approx(0.30, rel=1e-9)
+    assert metrics["max_drawdown"] == pytest.approx(-0.25, rel=1e-9)
+    assert metrics["calmar_ratio"] == pytest.approx(1.2, rel=1e-9)
+
+
 def test_degenerate_folds_excluded_from_aggregation() -> None:
     good = SimpleNamespace(test_metrics={"total_return": 0.10, "fill_count": 5.0})
     dead = SimpleNamespace(test_metrics={"total_return": 0.0, "fill_count": 0.0})
@@ -197,6 +229,24 @@ def test_same_close_mode_preserved_for_comparison() -> None:
         assert fill.price == pytest.approx(close_by_ts[fill.timestamp])
 
 
+def test_bar_loop_starts_at_first_valid_index_not_warmup() -> None:
+    # §4.4.5 engine floor: with warmup_bars BELOW the slowest feature
+    # family's warmup, the first decision must wait for first_valid_index
+    # — earlier bars would feed partially zero-filled snapshots.
+    config = _config()
+    config.runtime.warmup_bars = 8
+    bars = generate_synthetic_bars("AAPL", 240)
+    pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
+    expected_first = pipeline.build_batch(
+        bars, symbol="AAPL", temporal_window=config.runtime.warmup_bars
+    ).first_valid_index
+    assert expected_first > config.runtime.warmup_bars, "fixture must expose the floor"
+    engine = BacktestEngine(config, pipeline, RiskManager(config.risk.model_copy()))
+    report = engine.run({"AAPL": bars}, BuyAndHoldPolicy())
+    first_decision_bar = min(entry["bar_index"] for entry in report.decision_log)
+    assert first_decision_bar == expected_first
+
+
 def test_decision_log_is_emitted() -> None:
     config = _config()
     bars = generate_synthetic_bars("AAPL", 240)
@@ -210,6 +260,64 @@ def test_decision_log_is_emitted() -> None:
     first = report.decision_log[0]
     assert set(first) == {"symbol", "timestamp", "bar_index", "action", "confidence"}
     assert first["action"] == 1
+
+
+# ── --compare repair (§4.4.7) ───────────────────────────────────────────
+
+
+def test_print_report_emits_no_fusion_or_veto_rows(capsys) -> None:
+    """The fusion layer is gone; even metrics that WOULD have triggered the
+    legacy fusion block must not produce fusion/veto report rows."""
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "run_backtest_under_test",
+        Path(__file__).resolve().parents[1] / "scripts" / "run_backtest.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module._print_report(
+        "scenario",
+        {
+            "total_return": 0.01,
+            "fill_count": 3.0,
+            "fusion_veto_count": 5.0,
+            "fusion_dampen_count": 2.0,
+            "fusion_support_count": 1.0,
+            "fusion_neutral_count": 1.0,
+        },
+    )
+    output = capsys.readouterr().out.lower()
+    assert "fusion" not in output
+    assert "veto" not in output
+
+
+def test_compare_scenarios_build_via_shared_factory() -> None:
+    """Source contract: every --compare scenario comes from the shared
+    policy_factory builders — no bespoke policy construction that could
+    silently diverge from the single-scenario path."""
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "run_backtest.py").read_text(
+        encoding="utf-8"
+    )
+    compare_block = source.split("if args.compare:", 1)[1].split("return 0", 1)[0]
+    for builder in (
+        "build_baseline_policy()",
+        "build_buy_and_hold_policy()",
+        "build_brain_policy(config",
+        "build_brain_memory_policy(config",
+    ):
+        assert builder in compare_block, f"--compare must use {builder}"
+    assert "BrainPolicy(" not in compare_block, "--compare must not construct policies inline"
+    code_lines = [
+        line for line in compare_block.splitlines() if not line.strip().startswith("#")
+    ]
+    assert not any(
+        "fusion" in line.lower() and "build_brain_memory_policy" not in line
+        for line in code_lines
+    ), "--compare code must not reference the deleted fusion layer"
 
 
 # ── Scorecard: deterministic end-to-end row ────────────────────────────

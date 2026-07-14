@@ -134,10 +134,28 @@ class BrainPolicy:
     # skips on CPU; callers that want explicit control (e.g. to disable even
     # on CUDA) can pass ``True`` / ``False`` directly.
     use_amp: bool | None = None
+    # §4.4.4 fail-fast: when True, refuse to wrap a model without a risk
+    # head — its (0, 0) EV signals make the EV gate reject every trade,
+    # producing a silent zero-trade session. Production construction paths
+    # (policy_factory, runtime_bootstrap) pass risk.ev_gate_requires_signals
+    # (default true); direct construction (tests, tools) defaults to off.
+    ev_gate_requires_signals: bool = False
     memory_state_by_symbol: dict[str, torch.Tensor] = field(default_factory=dict)
     request_seq_by_symbol: dict[str, int] = field(default_factory=dict)
     last_timestamp_by_symbol: dict[str, datetime] = field(default_factory=dict)
     _diag_call_counter: int = 0
+
+    def __post_init__(self) -> None:
+        if self.ev_gate_requires_signals and getattr(self.model, "risk_head", None) is None:
+            from src.core.exceptions import ConfigurationError
+
+            raise ConfigurationError(
+                "BrainPolicy: model has no risk head, so the EV gate would "
+                "receive (0, 0) signals and reject every trade (silent "
+                "zero-trade session). Retrain with model.separate_risk_heads "
+                "or set risk.ev_gate_requires_signals=false to accept an "
+                "inert EV gate for an explicit experiment."
+            )
 
     def _amp_enabled(self) -> bool:
         """Resolve whether autocast is active for this policy's device.
