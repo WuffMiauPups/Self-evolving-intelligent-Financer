@@ -205,6 +205,136 @@ def run_benchmark(
     return row
 
 
+def _brain_decision_log(config: AppConfig, bars_by_symbol: dict[str, list]) -> list[dict[str, object]]:
+    """One honest-fill brain backtest; returns its per-decision log."""
+    config = config.model_copy(deep=True)
+    config.backtest.fill_timing = "next_open"
+    pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
+    policy = build_brain_policy(config, bars_by_symbol=bars_by_symbol, pipeline=pipeline)
+    report = BacktestEngine(config, pipeline, RiskManager(config.risk.model_copy())).run(
+        bars_by_symbol, policy
+    )
+    return report.decision_log
+
+
+def slice_decision_log(
+    decision_log: list[dict[str, object]],
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    n_slices: int,
+) -> list[tuple[str, list[dict[str, object]]]]:
+    """Bucket decisions into equal-duration chronological slices.
+
+    Boundaries come from the WINDOW (not the decisions), so two decision
+    logs over the same window land in identical buckets — the pairing the
+    backward-transfer gate needs.
+    """
+    if n_slices <= 0 or window_end <= window_start:
+        return []
+    span = (window_end - window_start) / n_slices
+    buckets: list[tuple[str, list[dict[str, object]]]] = []
+    for index in range(n_slices):
+        start = window_start + span * index
+        end = window_end if index == n_slices - 1 else window_start + span * (index + 1)
+        # Index prefix guarantees unique names for intraday windows where
+        # several slices share a calendar date.
+        name = f"s{index}:{start.date().isoformat()}..{end.date().isoformat()}"
+        members = [
+            record
+            for record in decision_log
+            if start <= record["timestamp"] and (record["timestamp"] < end or index == n_slices - 1)
+        ]
+        buckets.append((name, members))
+    return buckets
+
+
+def benchmark_backward_transfer_slices(
+    config: AppConfig,
+    bars_by_symbol: dict[str, list],
+    *,
+    candidate_checkpoint: str,
+    incumbent_checkpoint: str,
+    oos_cutoff: datetime | None,
+    n_slices: int | None = None,
+    min_decisions: int | None = None,
+) -> dict[str, tuple[float, float]]:
+    """Per-slice (candidate, incumbent) balanced accuracy for the
+    backward-transfer gate (§4.5.7).
+
+    The shared OOS window is cut into ``n_slices`` equal-duration
+    chronological regime slices; each checkpoint runs ONE honest-fill
+    backtest over the window and its decisions are graded per slice with
+    the same cost-aware banding as the scorecard. Slices where either
+    checkpoint decided fewer than ``min_decisions`` times are skipped
+    (logged): a handful of trades cannot evidence forgetting.
+
+    Note: truly pre-training "frozen historical" slices are not honestly
+    gradable while every retrain trains on the full history — the slices
+    here cover regime variation across the honest OOS window. Frozen
+    pre-training slices become possible with incremental fine-tuning.
+    """
+    promotion = config.evaluation.promotion
+    if n_slices is None:
+        n_slices = int(promotion.backward_transfer_slices)
+    if min_decisions is None:
+        min_decisions = int(promotion.backward_transfer_min_decisions)
+    if n_slices <= 0:
+        return {}
+    bars_oos, _ = enforce_out_of_sample(
+        bars_by_symbol,
+        checkpoint_path=candidate_checkpoint,
+        cutoff_override=oos_cutoff,
+    )
+    logs: dict[str, list[dict[str, object]]] = {}
+    for label, checkpoint in (
+        ("candidate", candidate_checkpoint),
+        ("incumbent", incumbent_checkpoint),
+    ):
+        run_config = config.model_copy(deep=True)
+        run_config.model.checkpoint_path = str(checkpoint)
+        logs[label] = _brain_decision_log(run_config, bars_oos)
+    all_bar_timestamps = [
+        bar.timestamp for bars in bars_oos.values() for bar in (bars[0], bars[-1])
+    ]
+    window_start, window_end = min(all_bar_timestamps), max(all_bar_timestamps)
+    horizon = int(config.training.effective_primary_horizon)
+    cost_band = float(config.training.transaction_cost_bps) / 10_000.0
+    candidate_slices = slice_decision_log(
+        logs["candidate"], window_start=window_start, window_end=window_end, n_slices=n_slices
+    )
+    incumbent_slices = slice_decision_log(
+        logs["incumbent"], window_start=window_start, window_end=window_end, n_slices=n_slices
+    )
+    slice_metrics: dict[str, tuple[float, float]] = {}
+    for (name, candidate_records), (_, incumbent_records) in zip(
+        candidate_slices, incumbent_slices
+    ):
+        if min(len(candidate_records), len(incumbent_records)) < min_decisions:
+            logger.info(
+                "backward_transfer_slice_skipped",
+                slice=name,
+                candidate_decisions=len(candidate_records),
+                incumbent_decisions=len(incumbent_records),
+                min_decisions=min_decisions,
+            )
+            continue
+        slice_metrics[name] = (
+            directional_balanced_accuracy(
+                candidate_records, bars_oos, horizon=horizon, cost_band=cost_band
+            ),
+            directional_balanced_accuracy(
+                incumbent_records, bars_oos, horizon=horizon, cost_band=cost_band
+            ),
+        )
+    logger.info(
+        "backward_transfer_slices_produced",
+        slices={name: (round(c, 4), round(i, 4)) for name, (c, i) in slice_metrics.items()},
+        n_requested=n_slices,
+    )
+    return slice_metrics
+
+
 def append_scorecard_row(row: BenchmarkRow, *, path: Path | str = DEFAULT_SCORECARD_PATH) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

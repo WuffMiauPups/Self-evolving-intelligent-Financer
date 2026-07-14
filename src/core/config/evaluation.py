@@ -57,11 +57,22 @@ class PromotionConfig(BaseModel):
     min_expectancy_delta: float = 0.0
     min_excess_vs_buy_hold: float = 0.0  # candidate return must exceed buy&hold by more than this
     backward_transfer_floor: float = 0.05  # max per-slice balanced-accuracy degradation
+    # §4.5.7 slice producer: the shared OOS window is cut into this many
+    # chronological regime slices, each graded for candidate-vs-incumbent
+    # balanced accuracy. 0 disables slice production (floor gate then idle).
+    backward_transfer_slices: int = 4
+    # Slices with fewer decisions than this (either checkpoint) are skipped
+    # — a handful of trades cannot evidence forgetting.
+    backward_transfer_min_decisions: int = 50
 
     @model_validator(mode="after")
     def validate_promotion(self) -> "PromotionConfig":
         if self.backward_transfer_floor < 0.0:
             raise ConfigurationError("evaluation.promotion.backward_transfer_floor must be non-negative")
+        if self.backward_transfer_slices < 0:
+            raise ConfigurationError("evaluation.promotion.backward_transfer_slices must be non-negative")
+        if self.backward_transfer_min_decisions < 1:
+            raise ConfigurationError("evaluation.promotion.backward_transfer_min_decisions must be positive")
         return self
 
 

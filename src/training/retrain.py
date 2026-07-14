@@ -228,6 +228,46 @@ def validate_retrain_prerequisites(
     return can_proceed, warnings
 
 
+def compute_weight_drift(
+    candidate_state: Mapping[str, Any],
+    anchor_state: Mapping[str, Any],
+) -> dict[str, float]:
+    """Per-module cosine similarity between two state dicts (§4.5.6).
+
+    Parameters are grouped by their top-level module (the prefix before
+    the first ``.``); each group's tensors are flattened and concatenated,
+    and the cosine between candidate and anchor is reported. 1.0 = the
+    module did not move; values near 0 mean the retrain rewrote it.
+    Shape-mismatched or one-sided parameters are skipped (architecture
+    changes make cosine meaningless there).
+    """
+    import torch as _torch
+
+    grouped: dict[str, tuple[list[Any], list[Any]]] = {}
+    for name, candidate_tensor in candidate_state.items():
+        anchor_tensor = anchor_state.get(name)
+        if (
+            not isinstance(candidate_tensor, _torch.Tensor)
+            or not isinstance(anchor_tensor, _torch.Tensor)
+            or candidate_tensor.shape != anchor_tensor.shape
+            or not candidate_tensor.is_floating_point()
+        ):
+            continue
+        module = name.split(".", 1)[0]
+        grouped.setdefault(module, ([], []))
+        grouped[module][0].append(candidate_tensor.detach().reshape(-1).float().cpu())
+        grouped[module][1].append(anchor_tensor.detach().reshape(-1).float().cpu())
+    drift: dict[str, float] = {}
+    for module, (candidate_parts, anchor_parts) in sorted(grouped.items()):
+        candidate_vec = _torch.cat(candidate_parts)
+        anchor_vec = _torch.cat(anchor_parts)
+        denom = candidate_vec.norm() * anchor_vec.norm()
+        if float(denom) == 0.0:
+            continue
+        drift[module] = float((candidate_vec @ anchor_vec) / denom)
+    return drift
+
+
 # Per-metric drift thresholds. The old shared 0.15 conflated two very
 # different alarms: a 0.15 Sharpe drop is noise while a 0.15 win-rate
 # drop is catastrophe. min_observations gates the check on sample size.

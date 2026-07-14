@@ -160,16 +160,19 @@ def _benchmark_candidate_vs_incumbent(
     candidate's window for information only and reported as None so the
     delta gates are skipped (absolute gates still apply).
 
-    Returns (candidate_row, incumbent_row); (None, None) with a loud
-    warning when no real OOS data exists (synthetic/test runs) or the
-    benchmark fails — the classification gates still apply then.
+    Returns (candidate_row, incumbent_row, slice_metrics);
+    (None, None, None) with a loud warning when no real OOS data exists
+    (synthetic/test runs) or the benchmark fails — the classification
+    gates still apply then. ``slice_metrics`` (§4.5.7) are per-slice
+    (candidate, incumbent) balanced accuracies over the shared window,
+    produced only when the incumbent is trusted (windowable).
     """
     if not config.training.use_real_historical_data:
         logger.warning(
             "scorecard_gate_skipped",
             reason="no real OOS data (synthetic run) — classification gates still apply",
         )
-        return None, None
+        return None, None, None
     try:
         from src.evaluation.benchmark import run_benchmark
         from src.evaluation.oos import checkpoint_training_end
@@ -192,6 +195,7 @@ def _benchmark_candidate_vs_incumbent(
             candidate_config, bars_by_symbol, oos_cutoff=shared_cutoff
         )
         incumbent_row = None
+        slice_metrics = None
         if incumbent_path.exists():
             incumbent_config = config.model_copy(deep=True)
             incumbent_config.model.checkpoint_path = str(incumbent_path)
@@ -219,14 +223,25 @@ def _benchmark_candidate_vs_incumbent(
                 incumbent_row = run_benchmark(
                     incumbent_config, bars_by_symbol, oos_cutoff=shared_cutoff
                 )
-        return candidate_row, incumbent_row
+                # §4.5.7 backward-transfer slices: only meaningful with a
+                # windowable incumbent (same-window pairing).
+                from src.evaluation.benchmark import benchmark_backward_transfer_slices
+
+                slice_metrics = benchmark_backward_transfer_slices(
+                    config,
+                    bars_by_symbol,
+                    candidate_checkpoint=str(candidate_path),
+                    incumbent_checkpoint=str(incumbent_path),
+                    oos_cutoff=shared_cutoff,
+                )
+        return candidate_row, incumbent_row, slice_metrics
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "scorecard_gate_skipped",
             reason=f"benchmark unavailable: {exc}",
             note="classification gates still apply",
         )
-        return None, None
+        return None, None, None
 
 
 def _promote_platt_sidecar(candidate_path: Path, target_path: Path, logger) -> None:
@@ -286,7 +301,7 @@ def run_canonical_training_with_gate(config: AppConfig, *, force_promote: bool =
             if isinstance(value, (int, float))
         }
 
-    candidate_row, incumbent_row = _benchmark_candidate_vs_incumbent(
+    candidate_row, incumbent_row, slice_metrics = _benchmark_candidate_vs_incumbent(
         config, candidate_path, canonical_path, logger
     )
 
@@ -303,6 +318,7 @@ def run_canonical_training_with_gate(config: AppConfig, *, force_promote: bool =
         gate=gate,
         candidate_benchmark=candidate_row,
         incumbent_benchmark=incumbent_row,
+        slice_metrics=slice_metrics,
     )
 
     if not decision.eligible and not force_promote:

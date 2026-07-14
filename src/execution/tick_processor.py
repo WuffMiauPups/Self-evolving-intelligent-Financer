@@ -200,6 +200,9 @@ def _apply_broker_fill(ctx: RuntimeContext, *, order: dict, logger: object) -> N
             strategy_id=strategy_id,
         )
     )
+    # Outcome stream (§4.5.3): every executed broker fill becomes one
+    # DecisionObservation for the retrain drift trigger.
+    _write_decision_observation(ctx, fill=ctx.ledger.fills[-1])
     # Outcome-weighted allocation (§6.3): credit realized PnL back to the
     # strategy that proposed the trade so the arbiter can shift weights.
     if hasattr(ctx.policy, "record_fill_outcome"):
@@ -398,6 +401,39 @@ def _write_decision_event(
                     None if result is None else getattr(result, "client_order_id", None)
                 ),
             )
+        )
+    except Exception:  # noqa: BLE001 - observability must never block trading
+        pass
+
+
+def _write_decision_observation(ctx: RuntimeContext, *, fill: object) -> None:
+    """Append one DecisionObservation to the outcome stream (§4.5.3).
+
+    This is the production writer the retrain drift trigger reads
+    (``scripts/run_train.py --check-retrain-trigger``): one record per
+    EXECUTED fill, with realized PnL net of fees and the risk layer's
+    clamp flag stashed at submit time. Best-effort — persistence must
+    never raise into the trade loop.
+    """
+    try:
+        exec_config = getattr(ctx.config, "execution", None)
+        if exec_config is None or not exec_config.observation_stream_enabled:
+            return
+        from src.training.replay_buffer import DecisionObservation, append_observation
+
+        client_order_id = str(getattr(fill, "client_order_id", "") or "")
+        clamped = getattr(ctx, "clamped_by_client_order_id", {}).pop(client_order_id, False)
+        append_observation(
+            exec_config.observation_stream_path,
+            DecisionObservation(
+                decision_id=client_order_id or f"{fill.symbol}-{fill.timestamp.isoformat()}",
+                symbol=str(fill.symbol),
+                timestamp=fill.timestamp,
+                features_ref="",
+                executed_action=1 if str(fill.side) == "buy" else -1,
+                realized_pnl=float(fill.realized_pnl),
+                clamped=clamped,
+            ),
         )
     except Exception:  # noqa: BLE001 - observability must never block trading
         pass
@@ -841,6 +877,12 @@ def process_tick(
             # (no intent in hand), so remember which strategy owns this
             # client_order_id; _apply_broker_fill consumes the entry.
             ctx.strategy_by_client_order_id[client_order_id] = proposal.strategy_id
+        # Outcome stream (§4.5.3): the fill capture path records whether
+        # the executed action was risk-clamped; stash it at submit time
+        # (both paper and broker fills consume the entry by id).
+        ctx.clamped_by_client_order_id[client_order_id] = "resized_to_cap" in [
+            str(reason) for reason in decision.reasons
+        ]
         logger.info(
             "order_submit_attempt",
             symbol=symbol,
@@ -902,10 +944,13 @@ def process_tick(
             )
             # PaperExecutor already recorded the fill (with strategy_id
             # from the intent); credit its realized net PnL back to the
-            # proposing strategy (§6.3 outcome-weighted allocation).
-            if hasattr(ctx.policy, "record_fill_outcome") and ctx.ledger.fills:
+            # proposing strategy (§6.3 outcome-weighted allocation) and
+            # emit its DecisionObservation (§4.5.3 outcome stream).
+            if ctx.ledger.fills:
                 fill = ctx.ledger.fills[-1]
-                ctx.policy.record_fill_outcome(fill.strategy_id, fill.realized_pnl)
+                _write_decision_observation(ctx, fill=fill)
+                if hasattr(ctx.policy, "record_fill_outcome"):
+                    ctx.policy.record_fill_outcome(fill.strategy_id, fill.realized_pnl)
         elif ctx.client is not None and result.terminal and result.status == "filled":
             _apply_broker_fill(
                 ctx,

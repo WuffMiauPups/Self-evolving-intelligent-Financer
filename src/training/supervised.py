@@ -351,6 +351,18 @@ def run_supervised_training(
                 warnings=diagnostics.warnings,
             )
     history = trainer.fit(bundle.train_loader, bundle.val_loader, epochs=effective_epochs)
+    # §4.5.6 telemetry: how far did each module move from the incumbent?
+    # Logged per anchored retrain so a rewrite of (say) the regime branch
+    # is visible even when aggregate metrics look flat.
+    if anchor_state_dict is not None:
+        from src.training.retrain import compute_weight_drift
+
+        drift_by_module = compute_weight_drift(model.state_dict(), anchor_state_dict)
+        logger.info(
+            "anchor_weight_drift",
+            cosine_by_module={name: round(value, 6) for name, value in drift_by_module.items()},
+            anchor=config.training.anchor_checkpoint_path,
+        )
     test_metrics = trainer._run_epoch(bundle.test_loader, training=False, stage="test")
     val_report = _evaluate_detailed_split(
         loader=bundle.val_loader,

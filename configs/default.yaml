@@ -406,6 +406,11 @@ execution:
   ledger_persist_path: "runs/fills.jsonl"
   decision_log_enabled: true
   decision_log_path: "runs/decisions.jsonl"
+  # Per-decision outcome stream (4.5.3): the retrain drift trigger's live
+  # data source. One DecisionObservation per executed fill; read back by
+  # scripts/run_train.py --check-retrain-trigger.
+  observation_stream_enabled: true
+  observation_stream_path: "runs/observations.jsonl"
 
 memory:
   enabled: true
@@ -482,3 +487,8 @@ evaluation:
     min_expectancy_delta: 0.0
     min_excess_vs_buy_hold: 0.0
     backward_transfer_floor: 0.05
+    # Slice producer (4.5.7): the shared OOS window is cut into this many
+    # chronological regime slices for the backward-transfer gate; slices
+    # with fewer decisions than the minimum (either checkpoint) are skipped.
+    backward_transfer_slices: 4
+    backward_transfer_min_decisions: 50

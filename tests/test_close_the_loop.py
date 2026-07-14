@@ -944,15 +944,20 @@ class TestGateWindowAlignment:
 
         monkeypatch.setattr("src.evaluation.benchmark.run_benchmark", fake_run_benchmark)
         monkeypatch.setattr(
+            "src.evaluation.benchmark.benchmark_backward_transfer_slices",
+            lambda *args, **kwargs: {"2026-05-01..2026-06-01": (0.51, 0.50)},
+        )
+        monkeypatch.setattr(
             "src.training.data_loading._resolve_bars_by_symbol",
             lambda cfg: ({"AAPL": []}, None),
         )
         config = AppConfig()
         config.training.use_real_historical_data = True
         logger = _RecordingLogger()
-        candidate_row, incumbent_row = module._benchmark_candidate_vs_incumbent(
+        candidate_row, incumbent_row, slice_metrics = module._benchmark_candidate_vs_incumbent(
             config, candidate, incumbent, logger
         )
+        self.last_slice_metrics = slice_metrics
         return calls, candidate_row, incumbent_row, logger
 
     def test_untrusted_incumbent_same_window_and_delta_gates_skipped(
@@ -973,6 +978,8 @@ class TestGateWindowAlignment:
         assert next(iter(cutoffs)) == datetime.fromisoformat("2026-03-17T17:05:00+00:00")
         # Delta gates must not see the untrusted row...
         assert incumbent_row is None
+        # ...no backward-transfer slices without a windowable incumbent...
+        assert self.last_slice_metrics is None
         # ...and the skip is loud.
         assert any(event == "benchmark_incumbent_untrusted" for event, _ in logger.warnings)
 
@@ -993,6 +1000,8 @@ class TestGateWindowAlignment:
         cutoffs = {cutoff for _, cutoff in calls}
         assert cutoffs == {datetime.fromisoformat("2026-05-01T00:00:00+00:00")}
         assert not any(event == "benchmark_incumbent_untrusted" for event, _ in logger.warnings)
+        # A trusted incumbent also gets backward-transfer slices (§4.5.7).
+        assert self.last_slice_metrics == {"2026-05-01..2026-06-01": (0.51, 0.50)}
 
     def test_no_incumbent_uses_candidate_window(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

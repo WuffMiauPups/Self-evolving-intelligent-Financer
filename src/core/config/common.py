@@ -89,3 +89,10 @@ class ExecutionConfig(BaseModel):
     ledger_persist_path: str = "runs/fills.jsonl"
     decision_log_enabled: bool = True
     decision_log_path: str = "runs/decisions.jsonl"
+    # Per-decision outcome stream (§4.5.3): one DecisionObservation per
+    # executed fill, appended live — the retrain drift trigger's data
+    # source (scripts/run_train.py --check-retrain-trigger reads it).
+    # Backtests deliberately do NOT write here: simulated outcomes would
+    # contaminate live drift detection.
+    observation_stream_enabled: bool = True
+    observation_stream_path: str = "runs/observations.jsonl"

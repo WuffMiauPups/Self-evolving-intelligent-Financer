@@ -98,6 +98,10 @@ class RuntimeContext:
     # broker fills are reconstructed from closed orders, so the fill
     # capture path reads (and deletes) the entry to attribute the fill.
     strategy_by_client_order_id: dict[str, str] = field(default_factory=dict)
+    # client_order_id -> "risk layer resized this order" (§4.5.3): stashed
+    # at submit, consumed by the fill capture path so the outcome stream
+    # records whether the EXECUTED action was clamped.
+    clamped_by_client_order_id: dict[str, bool] = field(default_factory=dict)
     daily_anchor_equity: float = 0.0
     daily_anchor_date: date | None = None
     # Debounced memory persistence (tick_processor._maybe_persist_memory):
