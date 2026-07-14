@@ -69,13 +69,35 @@ def enforce_out_of_sample(
     *,
     checkpoint_path: str | Path | None,
     allow_in_sample: bool = False,
+    cutoff_override: datetime | None = None,
 ) -> tuple[dict[str, list], bool]:
     """Apply the OOS boundary for an evaluation of ``checkpoint_path``.
 
     Returns (bars, in_sample_tagged).  Hard-fails (RuntimeError) when the
     checkpoint's training range covers every requested bar and in-sample
     evaluation was not explicitly allowed.
+
+    ``cutoff_override`` replaces the checkpoint's own training end as the
+    boundary.  Comparisons between two checkpoints (the promotion gate)
+    need both evaluated on the *same* window — bars after the max of both
+    training ends — or their metric deltas are apples-to-oranges.
     """
+    if cutoff_override is not None:
+        filtered, dropped = filter_out_of_sample(bars_by_symbol, cutoff_override)
+        if not filtered:
+            raise RuntimeError(
+                f"No out-of-sample bars after the shared cutoff "
+                f"{cutoff_override.isoformat()}. Fetch newer data."
+            )
+        if dropped:
+            logger.info(
+                "oos_bars_dropped",
+                cutoff=cutoff_override.isoformat(),
+                dropped=dropped,
+                remaining={s: len(b) for s, b in filtered.items()},
+                source="cutoff_override",
+            )
+        return filtered, False
     if not checkpoint_path:
         return bars_by_symbol, False
     cutoff = checkpoint_training_end(checkpoint_path)

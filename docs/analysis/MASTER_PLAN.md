@@ -185,7 +185,7 @@ Phase 2+ levers (memory prior, market-context features, OOD gating) build on thi
 - **[S] Ops nits:** webhook alerts off the rejection hot path (thread/queue); client_order_id restart-collision nonce. → verify: unit tests.
 - **[M] Docs truth pass:** rewrite README (delete dendritic/soma/Hopfield/ESOM/veto/GRU claims; "approves, resizes, or rejects" is now true — say how; document the C2 stats, scorecard, and adjusted-bar cache); delete or rewrite `LIVE_LOG_CHEATSHEET.md`; fix factory/engine docstrings claiming fusion/cutoff behavior; GUI: remove dead toggles, fix `MemoryStatus` reading nonexistent bank keys. → verify: `grep -ri "hopfield\|dendritic\|soma\|esom" README.md docs/ src/` returns only historical notes explicitly marked as removed.
 
-### 4.8 Post-⟲1 follow-up — **scheduled 2026-07-14** (found by running the ⟲1 gate for real)
+### 4.8 Post-⟲1 follow-up — ✅ **done 2026-07-14** (found by running the ⟲1 gate for real)
 
 **[M] Promotion-gate benchmark windows must match.** `scripts/run_train.py:_benchmark_candidate_vs_incumbent` benchmarks candidate and incumbent each on their *own* OOS window (`src/evaluation/oos.py` reads each checkpoint's `training_split_ranges`). Two defects observed in the 2026-07-13 ⟲1 run:
 1. A pre-C2 incumbent **without** `training_split_ranges` was benchmarked over the FULL history including its own training data (in-sample contamination: its row had 29,693 buy-hold fills vs the candidate's 9,703).

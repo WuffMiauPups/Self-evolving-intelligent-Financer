@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -118,6 +119,7 @@ def run_benchmark(
     bars_by_symbol: dict[str, list],
     *,
     allow_in_sample: bool = False,
+    oos_cutoff: datetime | None = None,
 ) -> BenchmarkRow:
     checkpoint_path = config.model.checkpoint_path
     if not checkpoint_path:
@@ -126,6 +128,7 @@ def run_benchmark(
         bars_by_symbol,
         checkpoint_path=checkpoint_path,
         allow_in_sample=allow_in_sample,
+        cutoff_override=oos_cutoff,
     )
     # The protocol is non-negotiable regardless of the loaded config:
     # honest fills, always.

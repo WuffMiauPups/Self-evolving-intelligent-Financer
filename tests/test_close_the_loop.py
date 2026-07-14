@@ -884,3 +884,150 @@ class TestBackwardTransferFloor:
         assert PromotionConfig().backward_transfer_floor == pytest.approx(0.05)
         with pytest.raises(ConfigurationError):
             PromotionConfig(backward_transfer_floor=-0.01)
+
+
+# ---------------------------------------------------------------------------
+# §4.8: the gate benchmarks candidate and incumbent on the SAME window
+# ---------------------------------------------------------------------------
+
+
+def _save_checkpoint_with_ranges(path: Path, end_iso: str | None) -> None:
+    meta: dict = {"model_kind": "brain"}
+    if end_iso is not None:
+        meta["training_split_ranges"] = {
+            "train": {"AAPL": {"end_timestamp": end_iso}},
+            "val": {"AAPL": {"end_timestamp": end_iso}},
+        }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"meta": meta}, path)
+
+
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.warnings: list[tuple[str, dict]] = []
+        self.infos: list[tuple[str, dict]] = []
+
+    def warning(self, event: str, **kwargs) -> None:
+        self.warnings.append((event, kwargs))
+
+    def info(self, event: str, **kwargs) -> None:
+        self.infos.append((event, kwargs))
+
+
+class TestGateWindowAlignment:
+    """Regression for the 2026-07-13 ⟲1 run: the incumbent (no
+    training_split_ranges) was benchmarked over its own training data on a
+    different window than the candidate (29,693 vs 9,703 buy-hold fills),
+    making the gate's deltas apples-to-oranges."""
+
+    def _run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        candidate_end: str | None,
+        incumbent_end: str | None,
+        incumbent_exists: bool = True,
+    ):
+        module = _load_run_train_module()
+        candidate = tmp_path / "run" / "brain.pt"
+        incumbent = tmp_path / "brain.pt"
+        _save_checkpoint_with_ranges(candidate, candidate_end)
+        if incumbent_exists:
+            _save_checkpoint_with_ranges(incumbent, incumbent_end)
+
+        calls: list[tuple[str, object]] = []
+
+        def fake_run_benchmark(cfg, bars, *, oos_cutoff=None, **kwargs):
+            calls.append((Path(cfg.model.checkpoint_path).parent.name, oos_cutoff))
+            return _benchmark_row(0.5, 1.0, 0.01)
+
+        monkeypatch.setattr("src.evaluation.benchmark.run_benchmark", fake_run_benchmark)
+        monkeypatch.setattr(
+            "src.training.data_loading._resolve_bars_by_symbol",
+            lambda cfg: ({"AAPL": []}, None),
+        )
+        config = AppConfig()
+        config.training.use_real_historical_data = True
+        logger = _RecordingLogger()
+        candidate_row, incumbent_row = module._benchmark_candidate_vs_incumbent(
+            config, candidate, incumbent, logger
+        )
+        return calls, candidate_row, incumbent_row, logger
+
+    def test_untrusted_incumbent_same_window_and_delta_gates_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls, candidate_row, incumbent_row, logger = self._run(
+            tmp_path,
+            monkeypatch,
+            candidate_end="2026-03-17T17:05:00+00:00",
+            incumbent_end=None,  # pre-fix incumbent: no training_split_ranges
+        )
+        # The benchmark ran (the guard below would also catch a swallowed
+        # exception from the function's blanket try/except).
+        assert candidate_row is not None
+        assert len(calls) == 2
+        cutoffs = {cutoff for _, cutoff in calls}
+        assert len(cutoffs) == 1, f"windows differ: {calls}"
+        assert next(iter(cutoffs)) == datetime.fromisoformat("2026-03-17T17:05:00+00:00")
+        # Delta gates must not see the untrusted row...
+        assert incumbent_row is None
+        # ...and the skip is loud.
+        assert any(event == "benchmark_incumbent_untrusted" for event, _ in logger.warnings)
+
+    def test_trusted_incumbent_uses_intersection_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Incumbent trained THROUGH a later date than the candidate: the
+        # shared window must start at the max of both ends.
+        calls, candidate_row, incumbent_row, logger = self._run(
+            tmp_path,
+            monkeypatch,
+            candidate_end="2026-03-17T17:05:00+00:00",
+            incumbent_end="2026-05-01T00:00:00+00:00",
+        )
+        assert candidate_row is not None
+        assert incumbent_row is not None
+        assert len(calls) == 2
+        cutoffs = {cutoff for _, cutoff in calls}
+        assert cutoffs == {datetime.fromisoformat("2026-05-01T00:00:00+00:00")}
+        assert not any(event == "benchmark_incumbent_untrusted" for event, _ in logger.warnings)
+
+    def test_no_incumbent_uses_candidate_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls, candidate_row, incumbent_row, _ = self._run(
+            tmp_path,
+            monkeypatch,
+            candidate_end="2026-03-17T17:05:00+00:00",
+            incumbent_end=None,
+            incumbent_exists=False,
+        )
+        assert candidate_row is not None
+        assert incumbent_row is None
+        assert calls == [("run", datetime.fromisoformat("2026-03-17T17:05:00+00:00"))]
+
+
+def test_enforce_out_of_sample_cutoff_override(tmp_path: Path):
+    from src.evaluation.oos import enforce_out_of_sample
+
+    bars = {
+        "AAPL": [
+            SimpleNamespace(timestamp=datetime(2026, 3, 1, tzinfo=UTC)),
+            SimpleNamespace(timestamp=datetime(2026, 4, 1, tzinfo=UTC)),
+        ]
+    }
+    cutoff = datetime(2026, 3, 15, tzinfo=UTC)
+    filtered, tagged = enforce_out_of_sample(
+        bars, checkpoint_path=None, cutoff_override=cutoff
+    )
+    assert tagged is False
+    assert [b.timestamp for b in filtered["AAPL"]] == [datetime(2026, 4, 1, tzinfo=UTC)]
+
+    with pytest.raises(RuntimeError, match="shared cutoff"):
+        enforce_out_of_sample(
+            bars,
+            checkpoint_path=None,
+            cutoff_override=datetime(2026, 12, 1, tzinfo=UTC),
+        )

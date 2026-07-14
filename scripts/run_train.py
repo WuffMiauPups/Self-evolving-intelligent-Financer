@@ -153,6 +153,13 @@ def _benchmark_candidate_vs_incumbent(
 ):
     """Scorecard rows for candidate (and incumbent, if any) on real OOS bars.
 
+    Both checkpoints are benchmarked on the SAME window — bars after the
+    max of both training ends — so the gate's deltas compare like with
+    like.  An incumbent without ``training_split_ranges`` (pre-fix
+    artifact) cannot be honestly windowed: it is benchmarked on the
+    candidate's window for information only and reported as None so the
+    delta gates are skipped (absolute gates still apply).
+
     Returns (candidate_row, incumbent_row); (None, None) with a loud
     warning when no real OOS data exists (synthetic/test runs) or the
     benchmark fails — the classification gates still apply then.
@@ -165,17 +172,53 @@ def _benchmark_candidate_vs_incumbent(
         return None, None
     try:
         from src.evaluation.benchmark import run_benchmark
+        from src.evaluation.oos import checkpoint_training_end
         from src.training.data_loading import _resolve_bars_by_symbol
 
         bars_by_symbol, _ = _resolve_bars_by_symbol(config)
         candidate_config = config.model_copy(deep=True)
         candidate_config.model.checkpoint_path = str(candidate_path)
-        candidate_row = run_benchmark(candidate_config, bars_by_symbol)
+
+        candidate_end = checkpoint_training_end(candidate_path)
+        incumbent_end = (
+            checkpoint_training_end(incumbent_path) if incumbent_path.exists() else None
+        )
+        shared_cutoff = None
+        if candidate_end is not None:
+            ends = [candidate_end] + ([incumbent_end] if incumbent_end is not None else [])
+            shared_cutoff = max(ends)
+
+        candidate_row = run_benchmark(
+            candidate_config, bars_by_symbol, oos_cutoff=shared_cutoff
+        )
         incumbent_row = None
         if incumbent_path.exists():
             incumbent_config = config.model_copy(deep=True)
             incumbent_config.model.checkpoint_path = str(incumbent_path)
-            incumbent_row = run_benchmark(incumbent_config, bars_by_symbol)
+            if incumbent_end is None:
+                # No recorded training ranges: an unwindowable incumbent.
+                # Its row (on the candidate's window) is logged for context
+                # but MUST NOT feed the delta gates — parts of that window
+                # may be inside its training data.
+                untrusted_row = run_benchmark(
+                    incumbent_config, bars_by_symbol, oos_cutoff=shared_cutoff
+                )
+                logger.warning(
+                    "benchmark_incumbent_untrusted",
+                    incumbent=str(incumbent_path),
+                    reason=(
+                        "incumbent records no training_split_ranges; benchmarked on the "
+                        "candidate's window for information only — delta gates skipped, "
+                        "absolute gates (excess_vs_buy_hold) still apply"
+                    ),
+                    balanced_accuracy=untrusted_row.balanced_accuracy,
+                    expectancy=untrusted_row.expectancy,
+                    excess_vs_buy_hold=untrusted_row.excess_vs_buy_hold,
+                )
+            else:
+                incumbent_row = run_benchmark(
+                    incumbent_config, bars_by_symbol, oos_cutoff=shared_cutoff
+                )
         return candidate_row, incumbent_row
     except Exception as exc:  # noqa: BLE001
         logger.warning(
