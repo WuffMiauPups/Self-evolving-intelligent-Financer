@@ -154,6 +154,52 @@ class WalkForwardRunner:
         self.config = config
         self.bars_by_symbol = bars_by_symbol
 
+    def _refuse_in_sample_folds(
+        self, fold_defs: list[FoldDefinition]
+    ) -> list[FoldDefinition]:
+        """Hard-refuse folds whose test window overlaps the checkpoint's
+        training range (§4.4.3 minimum variant).
+
+        The CLI path OOS-filters bars before constructing this runner, but
+        the runner itself must be safe for direct use: evaluating a fold
+        inside the checkpoint's training range measures memorization. A
+        fold is refused when ANY symbol's first test bar is at or before
+        the checkpoint's training end. If every fold is refused the run
+        fails loudly instead of returning an empty result.
+        """
+        checkpoint_path = self.config.model.checkpoint_path
+        if not fold_defs or not checkpoint_path:
+            return fold_defs
+        from src.evaluation.oos import checkpoint_training_end
+
+        cutoff = checkpoint_training_end(checkpoint_path)
+        if cutoff is None:
+            return fold_defs
+        kept: list[FoldDefinition] = []
+        refused = 0
+        for fold_def in fold_defs:
+            first_test_timestamp = min(
+                bars[fold_def.test_start].timestamp
+                for bars in self.bars_by_symbol.values()
+            )
+            if first_test_timestamp <= cutoff:
+                refused += 1
+            else:
+                kept.append(fold_def)
+        if refused:
+            logger.warning(
+                "walk_forward_folds_refused_in_sample refused=%d kept=%d training_end=%s",
+                refused, len(kept), cutoff.isoformat(),
+            )
+        if not kept:
+            raise RuntimeError(
+                f"All {refused} walk-forward folds overlap the checkpoint's "
+                f"training range (training end {cutoff.isoformat()}) — "
+                "evaluating them would measure memorization, not edge. "
+                "Use later bars or an older checkpoint."
+            )
+        return kept
+
     def run(self, policy_builder: PolicyBuilder) -> WalkForwardResult:
         """Execute walk-forward evaluation.
 
@@ -169,6 +215,7 @@ class WalkForwardRunner:
         wf_config = self.config.evaluation.walk_forward
         min_bars = min(len(bars) for bars in self.bars_by_symbol.values())
         fold_defs = generate_folds(min_bars, wf_config)
+        fold_defs = self._refuse_in_sample_folds(fold_defs)
 
         if not fold_defs:
             logger.warning(
@@ -287,6 +334,62 @@ class WalkForwardRunner:
             fold_definitions=fold_defs,
             total_elapsed_seconds=total_elapsed,
         )
+
+
+def compare_walk_forward(
+    candidate: WalkForwardResult,
+    incumbent: WalkForwardResult,
+    *,
+    metric: str = "total_return",
+) -> dict[str, object]:
+    """Paired candidate-vs-incumbent stats on IDENTICAL folds (§4.4.3).
+
+    Both results must come from the same fold definitions (same data, same
+    windows) — otherwise per-fold deltas are apples-to-oranges. Folds where
+    either arm never traded are excluded as degenerate, not averaged as
+    zeros. Significance is the same one-sided exact sign test the memory
+    credit gate uses: P(X >= positive | n=active, p=0.5).
+    """
+    from src.evaluation.memory_credit import sign_test_p_value
+
+    if candidate.fold_definitions != incumbent.fold_definitions:
+        raise ValueError(
+            "compare_walk_forward requires identical fold definitions; "
+            f"candidate has {len(candidate.fold_definitions)} folds, "
+            f"incumbent has {len(incumbent.fold_definitions)}"
+        )
+    incumbent_by_index = {
+        fold.fold_definition.fold_index: fold for fold in incumbent.folds
+    }
+    deltas: list[float] = []
+    degenerate = 0
+    for cand_fold in candidate.folds:
+        inc_fold = incumbent_by_index.get(cand_fold.fold_definition.fold_index)
+        if inc_fold is None:
+            degenerate += 1
+            continue
+        if (
+            cand_fold.test_metrics.get("fill_count", 0.0) <= 0
+            or inc_fold.test_metrics.get("fill_count", 0.0) <= 0
+        ):
+            degenerate += 1
+            continue
+        deltas.append(
+            cand_fold.test_metrics.get(metric, 0.0)
+            - inc_fold.test_metrics.get(metric, 0.0)
+        )
+    positive = sum(1 for delta in deltas if delta > 0)
+    p_value = sign_test_p_value(positive, len(deltas))
+    return {
+        "metric": metric,
+        "fold_deltas": deltas,
+        "mean_delta": sum(deltas) / len(deltas) if deltas else 0.0,
+        "positive_folds": positive,
+        "active_folds": len(deltas),
+        "degenerate_folds": degenerate,
+        "sign_test_p_value": p_value,
+        "candidate_beats_incumbent": bool(deltas) and p_value <= 0.05,
+    }
 
 
 def _aggregate_metrics(

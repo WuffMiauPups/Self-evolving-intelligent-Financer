@@ -20,7 +20,10 @@ class WalkForwardConfig(BaseModel):
     step_bars: int = 1000
     window_type: str = "rolling"  # "rolling" or "expanding"
     min_train_bars: int = 2000
-    reset_model_per_fold: bool = True
+    # reset_model_per_fold was DELETED (2026-07-14 audit): it was defined
+    # but read nowhere — per-fold retraining does not exist (§4.4.3 [L]).
+    # Every fold already gets a freshly built policy from the checkpoint;
+    # extra="forbid" makes any config still setting the old key fail loudly.
     reset_memory_per_fold: bool = True
 
     @model_validator(mode="after")

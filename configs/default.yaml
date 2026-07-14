@@ -471,7 +471,6 @@ evaluation:
     step_bars: 1000
     window_type: rolling
     min_train_bars: 2000
-    reset_model_per_fold: true
     reset_memory_per_fold: true
   # --- Scorecard-judged promotion (MASTER_PLAN 4.5.5 / 4.5.7) ---
   # A candidate must beat the incumbent's benchmark row (balanced

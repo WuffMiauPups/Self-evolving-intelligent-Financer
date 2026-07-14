@@ -262,6 +262,114 @@ def test_decision_log_is_emitted() -> None:
     assert first["action"] == 1
 
 
+# ── Walk-forward honesty (§4.4.3) ───────────────────────────────────────
+
+
+def _wf_config():
+    from src.core.config import WalkForwardConfig
+
+    config = _config()
+    config.evaluation.walk_forward = WalkForwardConfig(
+        train_bars=60, val_bars=20, test_bars=40, step_bars=40, min_train_bars=30
+    )
+    return config
+
+
+def test_walk_forward_refuses_every_fold_for_checkpoint_trained_through_now(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.evaluation.walk_forward import WalkForwardRunner
+
+    config = _wf_config()
+    config.model.checkpoint_path = "stub.pt"
+    bars = generate_synthetic_bars("AAPL", 240)
+    monkeypatch.setattr(
+        "src.evaluation.oos.checkpoint_training_end", lambda _path: bars[-1].timestamp
+    )
+    runner = WalkForwardRunner(config, {"AAPL": bars})
+
+    def _never_called(*_args):  # pragma: no cover - guard must fire first
+        raise AssertionError("policy_builder must not run when every fold is refused")
+
+    with pytest.raises(RuntimeError, match="overlap the checkpoint's training range"):
+        runner.run(_never_called)
+
+
+def test_walk_forward_keeps_only_post_training_folds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.evaluation.walk_forward import WalkForwardRunner
+
+    config = _wf_config()
+    config.model.checkpoint_path = "stub.pt"
+    bars = generate_synthetic_bars("AAPL", 240)
+    cutoff = bars[150].timestamp
+    monkeypatch.setattr("src.evaluation.oos.checkpoint_training_end", lambda _path: cutoff)
+    runner = WalkForwardRunner(config, {"AAPL": bars})
+    result = runner.run(lambda cfg, train_bars, pipe: BuyAndHoldPolicy())
+    assert result.fold_definitions, "post-cutoff folds must survive"
+    for fold in result.fold_definitions:
+        assert bars[fold.test_start].timestamp > cutoff
+
+
+def test_reset_model_per_fold_key_is_rejected() -> None:
+    """The flag was defined-but-dead (read nowhere); it is DELETED, and a
+    config still setting it must fail loudly instead of implying per-fold
+    retraining that does not exist."""
+    from src.core.config import WalkForwardConfig
+
+    with pytest.raises(Exception, match="reset_model_per_fold"):
+        WalkForwardConfig(reset_model_per_fold=True)
+
+
+def test_compare_walk_forward_paired_sign_test() -> None:
+    from src.evaluation.walk_forward import (
+        FoldDefinition,
+        FoldResult,
+        WalkForwardResult,
+        compare_walk_forward,
+    )
+
+    def _fold_def(i: int) -> FoldDefinition:
+        return FoldDefinition(
+            fold_index=i, train_start=0, train_end=60,
+            val_start=60, val_end=80, test_start=80 + i * 40, test_end=120 + i * 40,
+        )
+
+    definitions = [_fold_def(i) for i in range(4)]
+
+    def _result(returns: list[float], fills: list[float]) -> WalkForwardResult:
+        folds = [
+            FoldResult(
+                fold_definition=definitions[i],
+                test_metrics={"total_return": returns[i], "fill_count": fills[i]},
+                backtest_report=None,
+                elapsed_seconds=0.0,
+            )
+            for i in range(4)
+        ]
+        return WalkForwardResult(
+            folds=folds, aggregate_metrics={}, config_snapshot={}, fold_definitions=definitions
+        )
+
+    candidate = _result([0.02, 0.01, -0.01, 0.05], [3, 3, 3, 0])
+    incumbent = _result([0.01, 0.00, 0.00, 0.00], [3, 3, 3, 3])
+    comparison = compare_walk_forward(candidate, incumbent)
+    # Fold 3 is degenerate (candidate never traded); 3 active folds,
+    # candidate wins 2: exact sign test P(X >= 2 | n=3) = 4/8 = 0.5.
+    assert comparison["active_folds"] == 3
+    assert comparison["degenerate_folds"] == 1
+    assert comparison["positive_folds"] == 2
+    assert comparison["sign_test_p_value"] == pytest.approx(0.5)
+    assert comparison["candidate_beats_incumbent"] is False
+
+    # Mismatched fold definitions are apples-to-oranges: refuse.
+    other = _result([0.0] * 4, [1] * 4)
+    other.fold_definitions = definitions[:3]
+    with pytest.raises(ValueError, match="identical fold definitions"):
+        compare_walk_forward(candidate, other)
+
+
 # ── --compare repair (§4.4.7) ───────────────────────────────────────────
 
 
