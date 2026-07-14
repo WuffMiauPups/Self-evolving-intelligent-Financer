@@ -87,6 +87,15 @@ class RiskConfig(BaseModel):
             raise ConfigurationError("risk.max_daily_loss_pct must be within (0, 1] when set")
         return value
 
+    @field_validator("max_position_notional", "max_aggregate_notional", "max_leverage_ratio")
+    @classmethod
+    def validate_positive_caps(cls, value: float, info) -> float:
+        # A zero or negative cap silently zeroes every trade — nonsense that
+        # should fail at load (found by the §6.4 cap-sweep harness).
+        if value <= 0.0:
+            raise ConfigurationError(f"risk.{info.field_name} must be > 0")
+        return value
+
     @model_validator(mode="after")
     def validate_notional_caps(self) -> "RiskConfig":
         if self.max_aggregate_notional < self.max_position_notional:
