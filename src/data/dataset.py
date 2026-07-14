@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -152,6 +153,32 @@ def collate_training_samples(batch: list[TrainingSample]) -> dict[str, Any]:
     return payload
 
 
+def count_nonfinite_columns(columns: "ColumnarSamples") -> dict[str, int]:
+    """Per-field count of non-finite (NaN/±inf) values in the tensor columns.
+
+    The collate path sanitizes these to 0.0 via ``nan_to_num``; this makes
+    the sanitation observable instead of silent (§4.7) — a large count means
+    the feature pipeline is emitting garbage that training would otherwise
+    quietly learn as zeros.
+    """
+    counts: dict[str, int] = {}
+
+    def _add(name: str, tensor: torch.Tensor) -> None:
+        if tensor.is_floating_point():
+            bad = int((~torch.isfinite(tensor)).sum().item())
+            if bad:
+                counts[name] = bad
+
+    _add("features", columns.features)
+    for name, tensor in columns.branch_inputs.items():
+        _add(f"branch_inputs.{name}", tensor)
+    _add("regime_input", columns.regime_input)
+    _add("temporal_tensor", columns.temporal_tensor)
+    for name, tensor in columns.regression_targets.items():
+        _add(f"regression_targets.{name}", tensor)
+    return counts
+
+
 def make_columnar_collate(columns: "ColumnarSamples"):
     """Create a collate function that slices columnar tensors directly.
 
@@ -163,6 +190,13 @@ def make_columnar_collate(columns: "ColumnarSamples"):
     an ``IndexDataset``) and returns a dict with the same structure as
     ``collate_training_samples``.
     """
+    # Counted once at loader construction (not per batch — the columns are
+    # immutable), so surfacing costs nothing on the hot path.
+    nonfinite_counts = count_nonfinite_columns(columns)
+    if nonfinite_counts:
+        logging.getLogger(__name__).warning(
+            "collate_nonfinite_inputs sanitized_to_zero=%s", nonfinite_counts
+        )
 
     def collate(indices: list[int]) -> dict[str, Any]:
         idx = torch.tensor(indices, dtype=torch.long,

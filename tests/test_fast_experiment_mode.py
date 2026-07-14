@@ -105,15 +105,18 @@ def _make_fake_config(fast_enabled: bool = False, **fast_kwargs) -> _FakeConfig:
 
 class TestFastModeConfig:
     def test_defaults_disabled(self):
+        # §4.6.5: knob defaults are YAML-aligned (a pre-configured fast
+        # profile), but the gate itself must stay off — enabled=False
+        # makes every knob inert.
         fc = FastModeConfig()
         assert fc.enabled is False
-        assert fc.fast_months is None
+        assert fc.fast_months == 6
         assert fc.fast_start_date is None
         assert fc.fast_end_date is None
-        assert fc.symbols == []
-        assert fc.max_train_samples is None
-        assert fc.max_val_samples is None
-        assert fc.max_test_samples is None
+        assert fc.symbols == ["AAPL", "MSFT", "NVDA", "SPY", "QQQ"]
+        assert fc.max_train_samples == 50_000
+        assert fc.max_val_samples == 15_000
+        assert fc.max_test_samples == 10_000
         assert fc.max_epochs is None
         assert fc.disable_future_return is False
         assert fc.disable_risk_path is False
@@ -492,8 +495,10 @@ class TestFastSymbolSubset:
         fc = FastModeConfig(enabled=True, symbols=["AAPL"])
         assert fc.symbols == ["AAPL"]
 
-    def test_fast_symbol_config_empty_default(self):
-        fc = FastModeConfig(enabled=True)
+    def test_fast_symbol_config_empty_falls_back_to_universe(self):
+        # An explicit empty list means "use data.symbols" (the default is
+        # now the YAML-aligned 5-symbol fast profile, §4.6.5).
+        fc = FastModeConfig(enabled=True, symbols=[])
         assert fc.symbols == []
 
 

@@ -34,15 +34,15 @@ class FastModeConfig(BaseModel):
 
     enabled: bool = False
     # Date range
-    fast_months: int | None = None
+    fast_months: int | None = 6
     fast_start_date: str | None = None
     fast_end_date: str | None = None
     # Symbol subset
-    symbols: list[str] = Field(default_factory=list)
+    symbols: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA", "SPY", "QQQ"])
     # Sample caps
-    max_train_samples: int | None = None
-    max_val_samples: int | None = None
-    max_test_samples: int | None = None
+    max_train_samples: int | None = 50000
+    max_val_samples: int | None = 15000
+    max_test_samples: int | None = 10000
     sample_seed: int = 42
     # Epoch cap
     max_epochs: int | None = None
@@ -73,8 +73,13 @@ class TrainingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     use_real_historical_data: bool = False
+    # Config-driven training seed (§4.7): the seed was hardcoded to 7 in
+    # build_training_components, which silently zeroed seed variance for
+    # any sweep routed through it — every "different" run trained
+    # identically. YAML is canonical; 7 preserves historical behavior.
+    seed: int = 7
     batch_size: int = 384
-    epochs: int = 3
+    epochs: int = 5
     learning_rate: float = 1.0e-3
     weight_decay: float = 1.0e-4
     # --- Learning rate scheduling ---
@@ -88,16 +93,16 @@ class TrainingConfig(BaseModel):
     val_split: float = 0.2
     test_split: float = 0.1
     label_epsilon: float = 5.0e-4
-    transaction_cost_bps: float = 0.0
+    transaction_cost_bps: float = 6.0
     # --- Adaptive label epsilon (per-symbol volatility scaling) ---
     adaptive_label_epsilon: bool = True
     adaptive_epsilon_multiplier: float = 1.0
     adaptive_epsilon_min: float = 1.0e-4
     adaptive_epsilon_max: float = 5.0e-3
     checkpoint_dir: str = "checkpoints"
-    sequence_length: int = 64
-    use_amp: bool = False
-    forward_horizons: list[int] = Field(default_factory=lambda: [1, 5, 15])
+    sequence_length: int = 48
+    use_amp: bool = True
+    forward_horizons: list[int] = Field(default_factory=lambda: [1, 3, 6])
     # --- State + future-path target design ---
     primary_direction_horizon: int | None = None  # defaults to max(forward_horizons) if None
     auxiliary_horizons: list[int] = Field(default_factory=list)  # additional horizons for future-path targets
@@ -209,10 +214,10 @@ class TrainingConfig(BaseModel):
     noise_std: float = 0.01
     temporal_jitter_prob: float = 0.0  # reserved; 0.0 = off until batched jitter lands
     # --- Early stopping ---
-    early_stopping_patience: int = 0  # 0 = disabled
+    early_stopping_patience: int = 2
     restore_best_model: bool = True
     # --- Platt calibration ---
-    platt_calibration_enabled: bool = False
+    platt_calibration_enabled: bool = True
     # --- Fast experiment mode ---
     fast_mode: FastModeConfig = Field(default_factory=FastModeConfig)
 

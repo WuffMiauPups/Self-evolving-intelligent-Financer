@@ -109,14 +109,25 @@ class ModelStateEncoder:
             ],
             dim=0,
         )
-        with torch.no_grad(), maybe_autocast(self.device, self._amp_enabled()):
-            output = self.model(
-                branch_inputs=branch_inputs,
-                regime_input=regime_input,
-                memory_state=None,
-                full_features=full_features,
-                temporal_tensor=temporal_tensor,
-            )
+        # Encoding must run with inference-mode normalization/dropout (§4.7):
+        # BatchNorm running stats and dropout masks would otherwise leak the
+        # surrounding phase (e.g. a mid-training memory rebuild) into bank
+        # latents. Save/restore so callers keep their own train/eval state.
+        was_training = bool(getattr(self.model, "training", False))
+        if was_training:
+            self.model.eval()
+        try:
+            with torch.no_grad(), maybe_autocast(self.device, self._amp_enabled()):
+                output = self.model(
+                    branch_inputs=branch_inputs,
+                    regime_input=regime_input,
+                    memory_state=None,
+                    full_features=full_features,
+                    temporal_tensor=temporal_tensor,
+                )
+        finally:
+            if was_training:
+                self.model.train(True)
         if output.fused_representation.dim() != 2 or output.fused_representation.shape[0] != len(snapshots):
             raise ValueError(
                 f"Expected fused_representation shape (batch, latent), got {tuple(output.fused_representation.shape)}"

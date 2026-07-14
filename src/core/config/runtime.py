@@ -10,8 +10,8 @@ class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     symbols: list[str] = Field(default_factory=lambda: ["AAPL"])
-    timeframe: str = "1Min"
-    warmup_bars: int = 64
+    timeframe: str = "5Min"
+    warmup_bars: int = 48
     decision_interval_sec: float = 2.0
     # 0 (or any non-positive value) means UNBOUNDED — the paper/live trade loop
     # runs until manually stopped, fatal error, kill switch, or stream exhaustion.
@@ -22,7 +22,7 @@ class RuntimeConfig(BaseModel):
     block_on_reconciliation_mismatch: bool = True
     allowed_sessions: list[str] = Field(default_factory=lambda: ["regular"])
     allow_prepost: bool = False
-    max_data_staleness_sec: int = 30
+    max_data_staleness_sec: int = 1200
     block_on_backwards_time: bool = True
     block_on_data_gap: bool = True
     block_on_symbol_ineligible: bool = False

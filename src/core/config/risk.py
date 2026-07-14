@@ -9,13 +9,16 @@ from src.core.time_utils import SESSION_NAMES
 class RiskConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    max_daily_loss: float = 500.0
-    max_position_notional: float = 5000.0
-    max_position_per_symbol: int = 1
-    max_concurrent_positions: int = 3
+    # Limits are YAML-aligned (§4.6.5): default.yaml is canonical and these
+    # defaults must match it so code building RiskConfig() directly trades
+    # under the same limits the deployed config states.
+    max_daily_loss: float = 350.0
+    max_position_notional: float = 12000.0
+    max_position_per_symbol: int = 3
+    max_concurrent_positions: int = 15
     cooldown_sec: int = 60
     stale_data_sec: int = 30
-    max_spread_bps: float = 15.0
+    max_spread_bps: float = 100.0
     duplicate_order_window_sec: int = 15
     # Trading costs (physics, not decisions): fed into the EV gate so the
     # risk manager can reject trades whose expected value doesn't cover costs.

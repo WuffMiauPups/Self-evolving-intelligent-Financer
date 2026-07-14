@@ -238,7 +238,7 @@ def test_flatten_still_subject_to_staleness_and_session() -> None:
 
 
 def test_aggregate_notional_includes_proposed_order() -> None:
-    config = RiskConfig(max_aggregate_notional=6_000.0)
+    config = RiskConfig(max_aggregate_notional=6_000.0, max_position_notional=5_000.0)
     manager = RiskManager(config)
     portfolio = _with_position(_portfolio(), "MSFT", qty=40.0)  # 4000 notional
     # +3000 proposed -> prospective 7000 > 6000: rejected pre-trade would pass.
@@ -250,7 +250,7 @@ def test_aggregate_notional_includes_proposed_order() -> None:
 
 
 def test_aggregate_notional_boundary_exactly_at_cap_approves() -> None:
-    config = RiskConfig(max_aggregate_notional=6_000.0)
+    config = RiskConfig(max_aggregate_notional=6_000.0, max_position_notional=5_000.0)
     manager = RiskManager(config)
     portfolio = _with_position(_portfolio(), "MSFT", qty=40.0)
     # +2000 proposed -> prospective exactly 6000: not a breach (strict >).
@@ -295,7 +295,7 @@ def test_leverage_ratio_includes_proposed_order() -> None:
 
 
 def test_oversized_proposal_is_resized_to_cap_and_approved() -> None:
-    config = RiskConfig()  # max_position_notional = 5000
+    config = RiskConfig(max_position_notional=5_000.0)
     manager = RiskManager(config)
     portfolio = _portfolio()
     # Requested 20000 notional; cap shrinks it to 5000 -> 50 shares @ 100.

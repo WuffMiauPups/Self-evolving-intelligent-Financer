@@ -232,6 +232,7 @@ backtest:
 
 training:
   use_real_historical_data: true
+  seed: 7                             # training RNG seed; vary per sweep run
   batch_size: 384
   epochs: 5
   learning_rate: 0.001
@@ -328,9 +329,10 @@ training:
   restore_best_model: true            # Restore best epoch weights after training
   # Round-trip cost floor for the FLAT band: a move smaller than the
   # cost can never be worth trading, so it must not be labeled
-  # directional. ~5 bps approximates fee+slippage+spread round trip on
-  # liquid US equities (see risk.fee_bps/slippage_bps).
-  transaction_cost_bps: 5.0
+  # directional. Kept IDENTICAL to the backtest fill cost by contract
+  # (§4.4.2): 2 * (backtest.fee_bps + backtest.slippage_bps) — asserted
+  # by tests/test_label_quality.py::test_label_cost_matches_backtest_costs.
+  transaction_cost_bps: 6.0
   platt_calibration_enabled: true     # Fit Platt scaling on validation set after training
   # --- RL fine-tuning (reserved scaffold) ---
   rl_finetune_enabled: false

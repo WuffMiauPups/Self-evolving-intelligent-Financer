@@ -39,8 +39,8 @@ class DataConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     symbols: list[str] = Field(default_factory=list)
-    timeframe: str = "1Min"
-    start_date: str | date | datetime | None = None
+    timeframe: str = "5Min"
+    start_date: str | date | datetime | None = date(2022, 1, 1)
     end_date: str | date | datetime | None = None
     cache_dir: str = "artifacts/historical"
     # Corporate-action adjustment for historical bar fetches.  "all"

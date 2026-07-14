@@ -18,7 +18,9 @@ class DeviceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     preferred: str = "auto"
-    use_amp: bool = False
+    # YAML is canonical (§4.6.5); autocast is still guarded off on
+    # non-CUDA devices, so True is safe everywhere.
+    use_amp: bool = True
     matmul_precision: str = "high"
     torch_compile_enabled: bool = False  # opt-in: requires MSVC cl.exe on Windows or a compiler toolchain; set True once your env is verified
 
@@ -30,7 +32,11 @@ class FeatureConfig(BaseModel):
     volatility_windows: list[int] = Field(default_factory=lambda: [5, 10, 20])
     momentum_windows: list[int] = Field(default_factory=lambda: [3, 5, 10])
     volume_windows: list[int] = Field(default_factory=lambda: [5, 20])
-    epsilon: float = 1.0e-6
+    # Denominator floor for return/ratio features. 5e-4 (the long-standing
+    # YAML value) is canonical (§4.6.5) — the old 1e-6 code default was
+    # never effective on any load_config path but silently diverged for
+    # code constructing FeatureConfig() directly.
+    epsilon: float = 5.0e-4
     # Cross-sectional market context (RESEARCH_ROADMAP Phase 3): SPY/QQQ
     # returns + realized vol, universe breadth, symbol-vs-SPY relative
     # strength, emitted as ``market_*`` features.  Flipping this changes

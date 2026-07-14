@@ -321,7 +321,10 @@ class Trainer:
             # Only fires during training, never during validation.
             if training and self.augmentation_enabled:
                 batch["features"] = self.augmenter.augment(batch["features"])
-            with maybe_autocast(self.device, self.use_amp and training):
+            # Validation/test epochs must not build autograd graphs (§4.7):
+            # the backward pass only runs when training, so grad tracking
+            # outside training is pure memory/compute waste per batch.
+            with torch.set_grad_enabled(training), maybe_autocast(self.device, self.use_amp and training):
                 output = self.model(
                     branch_inputs=batch["branch_inputs"],
                     regime_input=batch["regime_input"],

@@ -147,3 +147,18 @@ def test_default_training_config_single_imbalance_mechanism() -> None:
     )
     assert config.training.model_selection_metric == "val_balanced_accuracy"
     assert config.training.transaction_cost_bps > 0.0
+
+
+def test_label_cost_matches_backtest_costs() -> None:
+    """§4.4.2: labels and fills price the same economic reality.
+
+    The FLAT-band cost floor must equal the round trip a backtested fill
+    actually pays (fee + slippage per side, spread excluded because it is
+    per-bar data, not config), and the EV gate's risk costs must be the
+    same numbers the backtest charges. One reality, three consumers.
+    """
+    config = load_config("configs/default.yaml")
+    round_trip_bps = 2.0 * (config.backtest.fee_bps + config.backtest.slippage_bps)
+    assert config.training.transaction_cost_bps == round_trip_bps
+    assert config.risk.fee_bps == config.backtest.fee_bps
+    assert config.risk.slippage_bps == config.backtest.slippage_bps

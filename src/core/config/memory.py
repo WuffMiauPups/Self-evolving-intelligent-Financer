@@ -32,15 +32,18 @@ class MemoryConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # enabled=False stays the bare-code default deliberately (documented
+    # §4.6.5 divergence): a bare config must not switch subsystems on.
+    # The other values are YAML-aligned.
     enabled: bool = False
-    build_from_real_checkpoint: bool = False
+    build_from_real_checkpoint: bool = True
     latent_dim: int | None = None
     top_k: int = 5
     similarity_metric: str = "cosine"
-    max_items: int = 5000
+    max_items: int = 20000
     rebuild_on_startup: bool = False
     persist_path: str = "artifacts/market_memory.pt"
-    forward_horizons: list[int] = Field(default_factory=lambda: [1, 5, 15])
+    forward_horizons: list[int] = Field(default_factory=lambda: [1, 3, 6])
     path_label_rules: dict[str, float] = Field(
         default_factory=lambda: {
             "breakout_return_threshold": 0.003,
@@ -52,7 +55,7 @@ class MemoryConfig(BaseModel):
     runtime_update_mode: str = "pending_only"
     build_history_bars: int = 320
     # --- Encoder versioning ---
-    require_encoder_match: bool = False
+    require_encoder_match: bool = True
     # --- Pending observation persistence ---
     persist_pending_observations: bool = True
     pending_store_path: str = "artifacts/pending_observations.pt"

@@ -13,6 +13,7 @@ from src.core.logging import configure_logging, get_logger
 from src.core.seeds import seed_everything
 from src.data.schemas import MarketBar
 from src.features.feature_pipeline import FeaturePipeline
+from src.features.normalization import NormalizationStats
 from src.models.factory import build_checkpoint_meta, build_model_from_contract, load_model_artifacts
 from src.training.checkpoints import save_checkpoint
 from src.training.data_loading import _build_training_client, _resolve_bars_by_symbol, _FAST_SMALL_MODEL_OVERRIDES
@@ -28,9 +29,10 @@ def build_training_components(
     config: AppConfig,
     *,
     use_baseline: bool = False,
+    normalization_override: NormalizationStats | None = None,
 ) -> tuple[torch.nn.Module, TrainingDataBundle, dict[str, list[MarketBar]], dict[str, object], ModelConfig]:
     logger = get_logger("training")
-    seed_everything(7)
+    seed_everything(config.training.seed)
     device_ctx = build_device_context(config.device.preferred, config.training.use_amp or config.device.use_amp)
     pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
     bars_by_symbol, data_meta = _resolve_bars_by_symbol(config)
@@ -38,6 +40,7 @@ def build_training_components(
         config=config,
         bars_by_symbol=bars_by_symbol,
         pipeline=pipeline,
+        normalization_override=normalization_override,
     )
     # Fast-mode: small model profile reduces capacity for rapid experiments
     effective_model_config = config.model
@@ -736,15 +739,13 @@ def _warn_on_normalization_stats_mismatch(
 def evaluate_checkpoint(config: AppConfig, checkpoint_path: str) -> dict[str, object]:
     """Evaluate a saved checkpoint against the currently-configured data.
 
-    Comparability caveat (MASTER_PLAN 4.6.4): the bundle rebuild re-derives
-    train-split normalization stats from the CURRENT data range, so the
-    evaluation loaders do not necessarily normalize with the stats the
-    checkpoint was trained on (``meta['normalization']``).  The stat sets
-    are compared below and a loud ``checkpoint_normalization_stats_mismatch``
-    warning fires when any per-tensor max relative difference exceeds 1% —
-    metrics from such a run must not be compared across runs/checkpoints.
-    Full injection of the stored stats into the loader pipeline is out of
-    scope here and tracked in the master plan.
+    Normalization (MASTER_PLAN 4.6.4): when the checkpoint carries
+    train-split stats (``meta['normalization']``), they are INJECTED into
+    the bundle build so every evaluation — regardless of the configured
+    data range — normalizes inputs with the exact stats the checkpoint
+    trained with, keeping metrics comparable across runs.  Pre-C2
+    checkpoints without stats fall back to re-derived stats and a loud
+    warning: those metrics must not be compared across data ranges.
     """
     configure_logging(
         config.logging.level,
@@ -754,18 +755,29 @@ def evaluate_checkpoint(config: AppConfig, checkpoint_path: str) -> dict[str, ob
     )
     logger = get_logger("training")
     device_ctx = build_device_context(config.device.preferred, config.training.use_amp or config.device.use_amp)
-    _, bundle, _, data_meta, _ = build_training_components(config, use_baseline=False)
     artifacts = load_model_artifacts(checkpoint_path, device=device_ctx.device)
+    _, bundle, _, data_meta, _ = build_training_components(
+        config,
+        use_baseline=False,
+        normalization_override=artifacts.normalization,
+    )
     artifacts.feature_contract.assert_matches(
         bundle.feature_contract,
         context=f"checkpoint_eval[{Path(checkpoint_path).name}]",
     )
-    _warn_on_normalization_stats_mismatch(
-        logger,
-        checkpoint_path=checkpoint_path,
-        checkpoint_stats=artifacts.normalization,
-        bundle_stats=bundle.normalization_stats,
-    )
+    if artifacts.normalization is not None:
+        logger.info(
+            "checkpoint_normalization_stats_injected",
+            checkpoint=str(checkpoint_path),
+            note="evaluation inputs normalized with the checkpoint's training stats",
+        )
+    else:
+        _warn_on_normalization_stats_mismatch(
+            logger,
+            checkpoint_path=checkpoint_path,
+            checkpoint_stats=artifacts.normalization,
+            bundle_stats=bundle.normalization_stats,
+        )
     logger.info(
         "checkpoint_evaluation_start",
         checkpoint=str(checkpoint_path),

@@ -32,9 +32,26 @@ from src.training.sample_cache import (
     save_cached_samples,
     save_cached_shard,
 )
-from src.training.sample_columns import ColumnarDataset, ColumnarSamples, IndexDataset, normalize_columns
+from src.training.sample_columns import (
+    ColumnarDataset,
+    ColumnarSamples,
+    IndexDataset,
+    apply_normalization_stats,
+    normalize_columns,
+)
 from src.training.splits import SymbolSplit, build_symbol_splits
 from src.training.targets import build_training_targets, compute_symbol_epsilon
+
+
+def train_drop_last(sample_count: int, batch_size: int) -> bool:
+    """Whether the training DataLoader should drop its final partial batch.
+
+    True only when the dataset spans more than one batch: dropping the
+    remainder then guards BatchNorm against size-1 batches at negligible
+    data cost. Single-batch datasets (smoke/fast-mode tests) must keep
+    every sample — drop_last would leave zero batches.
+    """
+    return sample_count > batch_size
 
 
 @dataclass(frozen=True)
@@ -92,6 +109,7 @@ def build_real_data_training_bundle(
     config: AppConfig,
     bars_by_symbol: dict[str, list[MarketBar]],
     pipeline: FeaturePipeline,
+    normalization_override: NormalizationStats | None = None,
 ) -> TrainingDataBundle:
     logger = get_logger("training_data")
     feature_contract: FeatureContract | None = None
@@ -157,6 +175,7 @@ def build_real_data_training_bundle(
             samples_by_split=columns_by_split,
             split_ranges=split_ranges,
             logger=logger,
+            normalization_override=normalization_override,
         )
 
     # --- Shard cache: load as many per-symbol shards as possible -------------
@@ -494,6 +513,7 @@ def build_real_data_training_bundle(
         samples_by_split=columns_by_split,
         split_ranges=split_ranges,
         logger=logger,
+        normalization_override=normalization_override,
     )
 
 
@@ -504,6 +524,7 @@ def _finalize_training_bundle(
     samples_by_split: dict[str, ColumnarSamples],
     split_ranges: dict[str, dict[str, SymbolSplit]],
     logger,
+    normalization_override: NormalizationStats | None = None,
 ) -> TrainingDataBundle:
     # Fast-mode: deterministic sample caps per split (applied post-cache so the
     # cached artifact stays full-size and reusable across fast/non-fast runs).
@@ -542,7 +563,18 @@ def _finalize_training_bundle(
     # The returned stats travel with the bundle into checkpoint meta so
     # inference re-applies the identical transform (C2 train/serve skew).
     normalization_stats = None
-    if "train" in samples_by_split:
+    if normalization_override is not None:
+        # §4.6.4 injection: normalize every split with the CALLER's stats
+        # (a checkpoint's persisted train-split stats) instead of deriving
+        # from the current data — evaluation against any data range then
+        # applies the identical transform the checkpoint trained with.
+        apply_normalization_stats(
+            normalization_override,
+            *[samples_by_split[k] for k in ("train", "val", "test") if k in samples_by_split],
+        )
+        normalization_stats = normalization_override
+        logger.info("normalization_stats_injected", source="caller_override")
+    elif "train" in samples_by_split:
         normalization_stats = normalize_columns(
             samples_by_split["train"],
             *[
@@ -684,6 +716,13 @@ def _finalize_training_bundle(
         sampler=sampler,
         collate_fn=train_collate,
         pin_memory=pin_memory,
+        # §4.7 BatchNorm guard: a size-1 final training batch trains
+        # BatchNorm on single-sample statistics (and hard-crashes for
+        # (N, C) inputs). Dropping the remainder batch costs < batch_size
+        # samples per epoch; datasets that fit in a single batch (smoke
+        # runs) keep everything. Applies to whatever the sampler yields,
+        # so curriculum-subset epochs are covered too.
+        drop_last=train_drop_last(len(train_columns), config.training.batch_size),
     )
     val_columns = samples_by_split["val"]
     val_loader = DataLoader(

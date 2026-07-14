@@ -492,6 +492,25 @@ def columnar_from_shards(
     return out
 
 
+def apply_normalization_stats(stats: NormalizationStats, *splits: ColumnarSamples) -> None:
+    """Apply EXISTING train-split stats to columns, replacing derivation.
+
+    §4.6.4: evaluating a checkpoint against a different data range must
+    normalize with the stats the checkpoint was trained with — otherwise
+    metrics are not comparable across runs. Uses the same ``apply_*``
+    transforms as every inference path, so injected evaluation inputs are
+    scaled exactly like live/backtest inputs.
+    """
+    for cols in splits:
+        cols.features = stats.apply_features(cols.features)
+        cols.regime_input = stats.apply_regime(cols.regime_input)
+        cols.temporal_tensor = stats.apply_temporal(cols.temporal_tensor)
+        cols.branch_inputs = {
+            name: stats.apply_branch(name, tensor)
+            for name, tensor in cols.branch_inputs.items()
+        }
+
+
 def normalize_columns(
     train: ColumnarSamples,
     *others: ColumnarSamples,

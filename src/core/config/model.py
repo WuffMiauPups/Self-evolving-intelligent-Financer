@@ -21,8 +21,10 @@ class ModelConfig(BaseModel):
     dropout: float = 0.10
     baseline_hidden_dim: int = 192
     use_cnn_encoder: bool = True
-    cnn_channels: list[int] = Field(default_factory=lambda: [64, 128])
-    cnn_kernel_sizes: list[int] = Field(default_factory=lambda: [3, 5])
+    # YAML-aligned (§4.6.5); checkpoint metas persist these explicitly,
+    # so reconstruction never depends on the defaults.
+    cnn_channels: list[int] = Field(default_factory=lambda: [64, 128, 256])
+    cnn_kernel_sizes: list[int] = Field(default_factory=lambda: [3, 5, 7])
     cnn_dilations: list[int] = Field(default_factory=lambda: [1, 2, 4])
     temporal_blocks: int = 3
     checkpoint_path: str | None = None
