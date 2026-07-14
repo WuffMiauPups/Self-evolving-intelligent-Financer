@@ -1,10 +1,15 @@
 """Thin memory-aware policy wrapper.
 
-After the Great Simplification, memory is PASSIVE:
+Memory's influence is bounded by design (MASTER_PLAN §6.2):
 - Encoded states are stored in the memory bank via the updater.
-- The bank's ``query_top_k_simple`` kNN lookup is exposed in diagnostics only.
-- Memory does NOT gate, veto, or adjust trade proposals. Fusion / market-priors /
-  regime-hysteresis layers have been removed.
+- Retrieval always honors the temporal cutoff and never returns the
+  query's own stored state.
+- With ``influence_mode="damping"``, kNN outcome statistics apply a size
+  multiplier in [damping_min_multiplier, 1.0] to the proposal's target
+  fraction: memory can only SHRINK a trade when similar past states lost
+  money in the proposal's direction. It can never grow a trade, flip or
+  veto an action, or touch confidence. Default mode is "off"
+  (diagnostics only) until the counterfactual credit gate is positive.
 
 Platt calibration (if a fitted calibrator is supplied) is applied to the base
 policy's confidence before returning.
@@ -17,6 +22,7 @@ from datetime import datetime
 
 from src.data.schemas import MarketBar
 from src.memory.memory_bank import MemoryBank
+from src.memory.schemas import MemoryItem
 from src.memory.updater import AssociativeMemoryUpdater
 from src.models.state_encoder import EncodedState, ModelStateEncoder
 from src.risk.constraints import TradeProposal
@@ -35,6 +41,11 @@ class MemoryAwarePolicy:
     updater: AssociativeMemoryUpdater | None = None
     platt_calibrator: object | None = None  # PlattCalibrator
     knn_top_k: int = 5
+    # Bounded influence (§6.2). Values mirror MemoryConfig.
+    influence_mode: str = "off"
+    damping_min_multiplier: float = 0.5
+    damping_min_neighbors: int = 5
+    damping_full_at_return: float = 0.002
 
     last_encoded_by_symbol: dict[str, EncodedState] = field(default_factory=dict)
     _temporal_cutoff: datetime | None = field(default=None, repr=False)
@@ -81,9 +92,7 @@ class MemoryAwarePolicy:
         proposal, diagnostics = self.base_policy.propose(snapshot)
         encoded_state = self.encoder.encode(snapshot)
         self.last_encoded_by_symbol[snapshot.symbol] = encoded_state
-        diagnostics = self._attach_memory_diag(diagnostics, encoded_state)
-        if self._platt_ready():
-            proposal = replace(proposal, confidence=float(self.platt_calibrator.calibrate(proposal.confidence)))
+        proposal, diagnostics = self._finish_proposal(proposal, diagnostics, encoded_state)
         return proposal, diagnostics
 
     def propose_batch(self, snapshots: list) -> list[tuple[TradeProposal, dict[str, object]]]:
@@ -100,14 +109,66 @@ class MemoryAwarePolicy:
             snapshots, base_results, encoded_states
         ):
             self.last_encoded_by_symbol[snapshot.symbol] = encoded_state
-            diagnostics = self._attach_memory_diag(diagnostics, encoded_state)
-            if self._platt_ready():
-                proposal = replace(
-                    proposal,
-                    confidence=float(self.platt_calibrator.calibrate(proposal.confidence)),
-                )
+            proposal, diagnostics = self._finish_proposal(proposal, diagnostics, encoded_state)
             results.append((proposal, diagnostics))
         return results
+
+    def _finish_proposal(
+        self,
+        proposal: TradeProposal,
+        diagnostics: dict,
+        encoded_state: EncodedState,
+    ) -> tuple[TradeProposal, dict[str, object]]:
+        """Shared post-processing: one retrieval feeds diagnostics + damping."""
+        neighbors = self._safe_retrieve(encoded_state)
+        diagnostics = self._attach_memory_diag(diagnostics, neighbors)
+        proposal, damping_diag = self._apply_damping(proposal, neighbors)
+        diagnostics["memory_damping"] = damping_diag
+        if self._platt_ready():
+            proposal = replace(
+                proposal,
+                confidence=float(self.platt_calibrator.calibrate(proposal.confidence)),
+            )
+        return proposal, diagnostics
+
+    def _apply_damping(
+        self,
+        proposal: TradeProposal,
+        neighbors: list[MemoryItem],
+    ) -> tuple[TradeProposal, dict[str, object]]:
+        """Damping-only size prior (§6.2): multiplier ∈ [min_multiplier, 1.0].
+
+        The action-aligned mean of neighbor outcomes decides the multiplier:
+        similar past states that LOST money in the proposal's direction
+        shrink the trade linearly, saturating at the floor when the mean
+        adverse return reaches ``damping_full_at_return``. A favorable mean
+        is clamped to 1.0 — memory never grows a position. Flat proposals
+        and thin evidence (< min_neighbors outcomes) pass through untouched.
+        """
+        diag: dict[str, object] = {"applied": False, "multiplier": 1.0}
+        if self.influence_mode != "damping" or proposal.action == 0:
+            return proposal, diag
+        aligned_returns = [
+            float(proposal.action) * float(item.outcome.primary_return)
+            for item in neighbors
+            if item.outcome is not None
+        ]
+        diag["aligned_outcome_count"] = len(aligned_returns)
+        if len(aligned_returns) < self.damping_min_neighbors:
+            diag["reason"] = "insufficient_neighbors"
+            return proposal, diag
+        mean_aligned = sum(aligned_returns) / len(aligned_returns)
+        diag["aligned_mean_return"] = mean_aligned
+        if mean_aligned >= 0.0:
+            return proposal, diag
+        span = 1.0 - self.damping_min_multiplier
+        multiplier = 1.0 - (abs(mean_aligned) / self.damping_full_at_return) * span
+        multiplier = min(1.0, max(self.damping_min_multiplier, multiplier))
+        diag.update({"applied": True, "multiplier": multiplier})
+        return (
+            replace(proposal, target_fraction=proposal.target_fraction * multiplier),
+            diag,
+        )
 
     def metrics_snapshot(self) -> dict[str, float]:
         metrics: dict[str, float] = {
@@ -141,24 +202,24 @@ class MemoryAwarePolicy:
             exclude_item=(encoded_state.symbol, encoded_state.timestamp),
         )
 
-    def _attach_memory_diag(
-        self, diagnostics: dict, encoded_state: EncodedState
-    ) -> dict:
+    def _safe_retrieve(self, encoded_state: EncodedState) -> list[MemoryItem]:
+        if len(self.bank) < 1:
+            return []
+        try:
+            return self._retrieve_neighbors(encoded_state)
+        except Exception as exc:  # noqa: BLE001 - retrieval must not block trading
+            logger.warning("memory_retrieval_failed symbol=%s error=%s", encoded_state.symbol, exc)
+            return []
+
+    def _attach_memory_diag(self, diagnostics: dict, matches: list[MemoryItem]) -> dict:
         diagnostics = dict(diagnostics)
-        if len(self.bank) >= 1:
-            try:
-                matches = self._retrieve_neighbors(encoded_state)
-                diagnostics["memory_knn"] = {
-                    "neighbor_count": len(matches),
-                    "neighbor_symbols": [m.symbol for m in matches],
-                    "neighbor_outcomes": [
-                        float(m.outcome.primary_return)
-                        for m in matches
-                        if m.outcome is not None
-                    ],
-                }
-            except Exception as exc:  # noqa: BLE001 - best effort
-                diagnostics["memory_knn_error"] = str(exc)
-        else:
-            diagnostics["memory_knn"] = {"neighbor_count": 0}
+        diagnostics["memory_knn"] = {
+            "neighbor_count": len(matches),
+            "neighbor_symbols": [m.symbol for m in matches],
+            "neighbor_outcomes": [
+                float(m.outcome.primary_return)
+                for m in matches
+                if m.outcome is not None
+            ],
+        }
         return diagnostics

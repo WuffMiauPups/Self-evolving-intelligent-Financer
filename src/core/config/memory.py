@@ -131,6 +131,19 @@ class MemoryConfig(BaseModel):
     save_debounce_sec: float = 300.0
     # Cap on queued pending observations per symbol (oldest dropped, loudly).
     pending_max_per_symbol: int = 2048
+    # --- Bounded memory influence (Phase 2 §6.2) ---
+    # "off": memory stays purely diagnostic. "damping": kNN outcome stats
+    # apply a size multiplier in [damping_min_multiplier, 1.0] to the
+    # proposal's target fraction — memory can only SHRINK a trade, never
+    # grow one, flip its direction, veto it, or touch confidence. Keep off
+    # until the counterfactual credit gate shows > 0 on OOS folds.
+    influence_mode: str = "off"
+    damping_min_multiplier: float = 0.5
+    # Fewer action-aligned neighbor outcomes than this → no influence.
+    damping_min_neighbors: int = 5
+    # Mean action-aligned neighbor return at which damping saturates to the
+    # floor (e.g. 0.002 = neighbors averaging -20bps against the action).
+    damping_full_at_return: float = 0.002
     # --- Adaptive homeostatic gating ---
     # When True, replace fixed similarity/calibration/coherence thresholds
     # with self-regulating EMA-based gating that adapts to the bank's own
@@ -288,4 +301,12 @@ class MemoryConfig(BaseModel):
             raise ConfigurationError("memory.save_debounce_sec must be non-negative")
         if self.pending_max_per_symbol <= 0:
             raise ConfigurationError("memory.pending_max_per_symbol must be positive")
+        if self.influence_mode not in {"off", "damping"}:
+            raise ConfigurationError("memory.influence_mode must be one of: off, damping")
+        if not 0.0 < self.damping_min_multiplier <= 1.0:
+            raise ConfigurationError("memory.damping_min_multiplier must be within (0, 1]")
+        if self.damping_min_neighbors <= 0:
+            raise ConfigurationError("memory.damping_min_neighbors must be positive")
+        if self.damping_full_at_return <= 0.0:
+            raise ConfigurationError("memory.damping_full_at_return must be positive")
         return self

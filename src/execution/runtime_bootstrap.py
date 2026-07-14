@@ -592,6 +592,11 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
             bank=memory_bank,
             updater=memory_updater,
             platt_calibrator=_platt_calibrator,
+            knn_top_k=effective_memory_config.top_k,
+            influence_mode=effective_memory_config.influence_mode,
+            damping_min_multiplier=effective_memory_config.damping_min_multiplier,
+            damping_min_neighbors=effective_memory_config.damping_min_neighbors,
+            damping_full_at_return=effective_memory_config.damping_full_at_return,
         )
         logger.info(
             "memory_runtime_ready",

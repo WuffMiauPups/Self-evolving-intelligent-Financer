@@ -271,6 +271,11 @@ def build_brain_memory_policy(
         bank=memory_bank,
         updater=updater,
         platt_calibrator=_platt_calibrator,
+        knn_top_k=config.memory.top_k,
+        influence_mode=config.memory.influence_mode,
+        damping_min_multiplier=config.memory.damping_min_multiplier,
+        damping_min_neighbors=config.memory.damping_min_neighbors,
+        damping_full_at_return=config.memory.damping_full_at_return,
     )
     _ = conservative_thresholds  # parameter reserved; fusion layer removed
     _ = verbose_fusion  # parameter reserved; fusion layer removed

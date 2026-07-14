@@ -527,6 +527,16 @@ memory:
   # --- Pending observation persistence ---
   persist_pending_observations: true
   pending_store_path: artifacts/pending_observations.pt
+  save_debounce_sec: 300.0             # bank/pending saved at most once per interval (plus at shutdown)
+  pending_max_per_symbol: 2048         # oldest pending observations dropped (loudly) beyond this
+  # --- Bounded memory influence (Phase 2 §6.2) ---
+  # damping: kNN outcome stats can only SHRINK a trade (multiplier in
+  # [damping_min_multiplier, 1.0]) — never grow, flip, veto, or touch
+  # confidence. Keep "off" until the counterfactual credit gate is positive.
+  influence_mode: "off"
+  damping_min_multiplier: 0.5
+  damping_min_neighbors: 5
+  damping_full_at_return: 0.002
   # --- Decision fusion layer ---
   # advisory-only: never overrides risk manager, never promotes flat base actions.
   decision_fusion:
