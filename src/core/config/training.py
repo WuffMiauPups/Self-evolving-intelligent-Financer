@@ -180,6 +180,15 @@ class TrainingConfig(BaseModel):
             "min_observations": 200,
         }
     )
+    # --- Anchored negatives + adaptive curriculum (§6.5, roadmap §4.8-9) ---
+    # Defaults are OFF/neutral: enabling either is an explicit experiment.
+    curriculum_enabled: bool = False
+    curriculum_start_quantile: float = 0.5  # epoch-0 inclusion quantile, in (0, 1]
+    curriculum_full_epoch: int = 3  # epoch at which the ramp reaches 1.0 (all samples)
+    anchored_negatives_enabled: bool = False
+    anchored_negatives_path: str = "runs/anchored_negatives.jsonl"
+    anchored_negatives_max: int = 5000
+    anchored_noise_buffer_bps: float = 5.0  # added to transaction_cost_bps for the mistake margin
     # --- Forgetting-safe retraining (§4.5.6): anchor to the incumbent ---
     anchor_checkpoint_path: str | None = None
     distill_lambda_kd: float = 0.0  # KL(incumbent || student) weight; 0 = off
@@ -277,6 +286,14 @@ class TrainingConfig(BaseModel):
             )
         if any(value < 0.0 for value in self.retrain_triggers.values()):
             raise ConfigurationError("training.retrain_triggers values must be non-negative")
+        if not 0.0 < self.curriculum_start_quantile <= 1.0:
+            raise ConfigurationError("training.curriculum_start_quantile must be within (0, 1]")
+        if self.curriculum_full_epoch < 1:
+            raise ConfigurationError("training.curriculum_full_epoch must be >= 1")
+        if self.anchored_negatives_max <= 0:
+            raise ConfigurationError("training.anchored_negatives_max must be positive")
+        if self.anchored_noise_buffer_bps < 0.0:
+            raise ConfigurationError("training.anchored_noise_buffer_bps must be non-negative")
         if self.distill_lambda_kd < 0.0:
             raise ConfigurationError("training.distill_lambda_kd must be non-negative")
         if self.proximal_lambda_l2 < 0.0:

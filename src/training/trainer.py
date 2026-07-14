@@ -183,7 +183,12 @@ class Trainer:
         best_score = float("-inf")
         patience_counter = 0
         best_model_state: dict | None = None
+        # Epoch-aware samplers (CurriculumSampler, DistributedSampler, ...)
+        # need the current epoch to pick their subset/permutation.
+        train_sampler = getattr(train_loader, "sampler", None)
         for epoch_index in range(epochs):
+            if hasattr(train_sampler, "set_epoch"):
+                train_sampler.set_epoch(epoch_index)
             self.logger.info("epoch_start", epoch=epoch_index + 1, epochs=epochs)
             train_metrics = self._run_epoch(
                 train_loader,

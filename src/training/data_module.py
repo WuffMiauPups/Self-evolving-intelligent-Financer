@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import math
 import random
 from dataclasses import dataclass, replace
 
@@ -20,6 +21,7 @@ from src.training.class_balance import (
     build_weighted_sampler,
     compute_target_diagnostics,
 )
+from src.training.curriculum import CurriculumSampler, compute_sample_difficulties
 from src.training.sample_cache import (
     CachedSymbolShard,
     CachedTrainingData,
@@ -567,6 +569,49 @@ def _finalize_training_bundle(
         if config.training.use_weighted_sampler
         else None
     )
+    # --- Adaptive curriculum (§6.5 / roadmap §4 item 9) --------------------
+    # Difficulty = distance of the sample's primary return from the label
+    # band edge, using the SAME effective epsilon that labeled it
+    # (targets.py: label_epsilon * sqrt(horizon) + cost).  The honest
+    # per-sample return is the future_returns column at the primary
+    # horizon — the exact value the direction label was derived from.
+    # NOTE: with adaptive_label_epsilon the per-symbol epsilon is not
+    # recoverable from cached columnar samples, so the static
+    # config.training.label_epsilon is the band-scale proxy here.
+    if config.training.curriculum_enabled:
+        if sampler is not None:
+            logger.warning(
+                "curriculum_skipped_weighted_sampler_active",
+                note="use_weighted_sampler and curriculum_enabled are mutually exclusive; keeping the weighted sampler",
+            )
+        else:
+            primary_horizon = config.training.effective_primary_horizon
+            returns_column = train_columns.future_returns.get(primary_horizon)
+            if returns_column is None:
+                returns_column = train_columns.regression_targets.get("primary_return")
+            if returns_column is None:
+                logger.warning(
+                    "curriculum_skipped_no_primary_return",
+                    primary_horizon=primary_horizon,
+                    note="train columns expose neither the primary-horizon future_returns column nor a primary_return regression target",
+                )
+            else:
+                effective_epsilon = config.training.label_epsilon * math.sqrt(
+                    max(primary_horizon, 1)
+                ) + config.training.transaction_cost_bps / 10_000.0
+                sampler = CurriculumSampler(
+                    compute_sample_difficulties(returns_column, effective_epsilon),
+                    start_quantile=config.training.curriculum_start_quantile,
+                    full_epoch=config.training.curriculum_full_epoch,
+                )
+                logger.info(
+                    "curriculum_sampler_enabled",
+                    train_samples=len(train_columns),
+                    epoch0_samples=len(sampler),
+                    effective_epsilon=effective_epsilon,
+                    start_quantile=config.training.curriculum_start_quantile,
+                    full_epoch=config.training.curriculum_full_epoch,
+                )
     # --- GPU-resident preload --------------------------------------------
     # When a CUDA device is available and the full columnar dataset fits
     # in less than 50% of free VRAM, move all tensor columns to GPU once

@@ -19,6 +19,8 @@ from hashlib import sha1
 from pathlib import Path
 from typing import Any
 
+from src.training.curriculum import AnchoredNegativeStore, select_anchored_negatives
+
 logger = logging.getLogger(__name__)
 
 
@@ -331,6 +333,7 @@ def run_triggered_retrain(
     parent_checkpoint_fingerprint: str | None = None,
     config_snapshot: dict[str, Any] | None = None,
     runs_dir: str = "runs",
+    training_config: Any | None = None,
 ) -> RetainMetadata | None:
     """Evaluate the trigger; if it fires, run ``train_fn`` with lineage recorded.
 
@@ -338,6 +341,12 @@ def run_triggered_retrain(
     invocation) returning its result dict; its ``"checkpoint"`` key becomes
     the lineage output.  Returns the finalized :class:`RetainMetadata`
     (persisted under ``runs_dir``) or ``None`` when the trigger did not fire.
+
+    ``training_config`` (a ``TrainingConfig``, duck-typed) opts into the
+    anchored-negatives flow (§6.5): when
+    ``training_config.anchored_negatives_enabled`` is set, the worst
+    beyond-margin executed losers from ``observations`` are appended to the
+    permanent :class:`AnchoredNegativeStore` before ``train_fn`` runs.
     """
     should_retrain, reason = check_retrain_trigger_from_observations(
         observations, thresholds=thresholds
@@ -360,6 +369,27 @@ def run_triggered_retrain(
         "retrain_trigger_fired retrain_id=%s reason=%s observations=%d",
         meta.retrain_id, reason, len(ordered),
     )
+    # Anchored negatives (§6.5): persist this cycle's genuine mistakes into
+    # the permanent store BEFORE training so the retrain dataset build (and
+    # every future one) can re-include them.
+    if training_config is not None and getattr(
+        training_config, "anchored_negatives_enabled", False
+    ):
+        store = AnchoredNegativeStore(
+            training_config.anchored_negatives_path,
+            max_anchored=int(training_config.anchored_negatives_max),
+        )
+        anchored = select_anchored_negatives(
+            list(ordered),
+            cost_bps=float(training_config.transaction_cost_bps),
+            noise_buffer_bps=float(training_config.anchored_noise_buffer_bps),
+            max_count=int(training_config.anchored_negatives_max),
+        )
+        newly_anchored = store.append_new(anchored)
+        logger.info(
+            "anchored_negatives_updated retrain_id=%s anchored_total=%d newly_anchored=%d",
+            meta.retrain_id, len(store.load()), newly_anchored,
+        )
     result = train_fn()
     output_checkpoint_path = str(result.get("checkpoint", "")) if result else ""
     output_fingerprint = ""
