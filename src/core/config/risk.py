@@ -30,6 +30,15 @@ class RiskConfig(BaseModel):
     rolling_drawdown_window: int = 100
     quantity_precision: float = 0.001
     max_processed_request_ids: int = 100_000
+    # --- Outcome-adaptive risk budget (Phase 2 §6.4) ---
+    # When enabled, risk-INCREASING trades are sized down as realized rolling
+    # drawdown deepens: multiplier 1.0 at zero drawdown, linear to
+    # budget_min_multiplier at budget_full_at_drawdown. Deterministic, bounded,
+    # logged on every decision (RiskDecision.budget_multiplier). Risk-reducing
+    # trades are never throttled — de-risking must stay full-size.
+    adaptive_budget_enabled: bool = False
+    budget_min_multiplier: float = 0.25
+    budget_full_at_drawdown: float = -0.05
 
     @field_validator("allowed_sessions")
     @classmethod
@@ -102,5 +111,11 @@ class RiskConfig(BaseModel):
             raise ConfigurationError(
                 "risk.max_aggregate_notional must be >= risk.max_position_notional "
                 f"(got {self.max_aggregate_notional} < {self.max_position_notional})"
+            )
+        if not 0.0 < self.budget_min_multiplier <= 1.0:
+            raise ConfigurationError("risk.budget_min_multiplier must be within (0, 1]")
+        if self.budget_full_at_drawdown >= 0.0:
+            raise ConfigurationError(
+                "risk.budget_full_at_drawdown must be negative (a drawdown level)"
             )
         return self

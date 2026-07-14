@@ -11,6 +11,24 @@ from src.risk.portfolio_state import PortfolioState
 from src.risk.position_sizer import PositionSizer
 
 
+def adaptive_budget_multiplier(
+    rolling_drawdown: float,
+    *,
+    full_at_drawdown: float,
+    min_multiplier: float,
+) -> float:
+    """Deterministic size throttle from realized rolling drawdown (§6.4).
+
+    1.0 at zero/positive drawdown, linear down to ``min_multiplier`` when
+    the drawdown reaches ``full_at_drawdown`` (a negative fraction), hard
+    floor below that. Pure function — no state, no learning.
+    """
+    if rolling_drawdown >= 0.0:
+        return 1.0
+    fraction = min(rolling_drawdown / full_at_drawdown, 1.0)
+    return 1.0 - fraction * (1.0 - min_multiplier)
+
+
 class RiskManager:
     def __init__(self, config: RiskConfig) -> None:
         # The config is shared, learned-module-visible state: the manager
@@ -70,6 +88,37 @@ class RiskManager:
             abs(target_qty) < 1.0e-9
             or (target_qty * current_qty > 0.0 and abs(target_qty) < abs(current_qty))
         )
+
+        # --- Outcome-adaptive risk budget (§6.4): realized drawdown throttles
+        # risk-INCREASING size, bounded [budget_min_multiplier, 1.0]. Never
+        # touches risk-reducing trades, and never converts an intended add
+        # into a trim — if the throttled target would fall below the current
+        # position, it clamps to "no change" (rejected as no_position_change).
+        budget_multiplier = 1.0
+        if (
+            self.config.adaptive_budget_enabled
+            and proposal.action != 0
+            and not risk_reducing
+        ):
+            budget_multiplier = adaptive_budget_multiplier(
+                portfolio.rolling_drawdown(self.config.rolling_drawdown_window),
+                full_at_drawdown=self.config.budget_full_at_drawdown,
+                min_multiplier=self.config.budget_min_multiplier,
+            )
+            if budget_multiplier < 1.0:
+                throttled_abs = self.position_sizer.calculate_target_quantity(
+                    equity=portfolio.equity,
+                    price=proposal.price,
+                    target_fraction=proposal.target_fraction * budget_multiplier,
+                    max_notional=self.config.max_position_notional,
+                )
+                throttled_qty = float(proposal.action) * throttled_abs
+                if throttled_qty * current_qty > 0.0 and abs(throttled_qty) < abs(current_qty):
+                    throttled_qty = current_qty
+                target_qty = throttled_qty
+                delta_qty = target_qty - current_qty
+                side = "buy" if delta_qty > 0 else "sell"
+                order_qty = abs(delta_qty)
 
         if (self.config.kill_switch or self._kill_switch) and not risk_reducing:
             reasons.append("kill_switch")
@@ -154,7 +203,9 @@ class RiskManager:
             reasons.append("no_position_change")
 
         if reasons:
-            return RiskDecision(approved=False, reasons=reasons)
+            return RiskDecision(
+                approved=False, reasons=reasons, budget_multiplier=budget_multiplier
+            )
 
         self._processed_request_ids[proposal.request_id] = None
         if len(self._processed_request_ids) > self.config.max_processed_request_ids:
@@ -163,13 +214,19 @@ class RiskManager:
                 self._processed_request_ids.popitem(last=False)
         self._recent_orders[recent_key] = now
         self._recent_orders[(proposal.symbol, "_any")] = now
+        approval_tags: list[str] = []
+        if resized:
+            approval_tags.append("resized_to_cap")
+        if budget_multiplier < 1.0:
+            approval_tags.append("adaptive_budget")
         return RiskDecision(
             approved=True,
-            reasons=["resized_to_cap"] if resized else [],
+            reasons=approval_tags,
             quantity=order_qty,
             side=side,
             target_position=target_qty,
             client_order_id=proposal.request_id,
+            budget_multiplier=budget_multiplier,
         )
 
     def seed_existing_positions(

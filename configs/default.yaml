@@ -205,6 +205,14 @@ risk:
   allowed_sessions: []
   # --- Deduplication ---
   max_processed_request_ids: 100000   # cap on seen request ID set
+  # --- Outcome-adaptive risk budget (Phase 2 §6.4) ---
+  # Realized rolling drawdown throttles risk-INCREASING size: multiplier 1.0
+  # at zero drawdown, linear to budget_min_multiplier at
+  # budget_full_at_drawdown. Risk-reducing trades are never throttled.
+  # Logged on every decision (budget_multiplier).
+  adaptive_budget_enabled: false
+  budget_min_multiplier: 0.25
+  budget_full_at_drawdown: -0.05
 
 backtest:
   initial_cash: 100000.0

@@ -30,6 +30,9 @@ class RiskDecision:
     side: str | None = None
     target_position: float = 0.0
     client_order_id: str | None = None
+    # Outcome-adaptive budget throttle applied to this decision (§6.4).
+    # 1.0 = no throttle; < 1.0 = sized down due to realized drawdown.
+    budget_multiplier: float = 1.0
 
 
 def action_annotation(proposal: "TradeProposal", decision: RiskDecision) -> str:
