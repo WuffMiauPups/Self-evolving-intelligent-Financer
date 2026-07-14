@@ -37,9 +37,31 @@ def _item_epoch(item: MemoryItem) -> int:
 
 
 def compute_encoder_fingerprint(checkpoint_meta: dict[str, Any]) -> str:
-    """Fingerprint the encoder weights so stale banks can be detected."""
+    """Fingerprint the encoder so stale banks/calibrators can be detected.
+
+    2026-07-14 collision fix: the fingerprint previously reduced to
+    (version, kind, model_config) — the "epoch"/"training_loss" keys it
+    hoped to hash never existed in meta (the save path writes
+    "train_loss"), and neither the feature contract nor the weights
+    entered the hash. Two same-config trainings therefore collided even
+    across DIFFERENT feature contracts (observed: the ⟲2 44-dim and ⟲3
+    52-dim candidates shared 4575582c9cd97795), silently defeating both
+    the Platt calibrator binding and memory.require_encoder_match.
+    "feature_contract" and "weights_digest" (sha1 of the state dict,
+    stamped by build_checkpoint_meta) now anchor the identity. Old
+    checkpoints keep their stored meta["encoder_fingerprint"] — this
+    function only runs at save time or as a legacy fallback.
+    """
     relevant_keys: dict[str, Any] = {}
-    for key in ("checkpoint_version", "model_kind", "model_config", "epoch", "training_loss"):
+    for key in (
+        "checkpoint_version",
+        "model_kind",
+        "model_config",
+        "feature_contract",
+        "weights_digest",
+        "epoch",
+        "training_loss",
+    ):
         if key in checkpoint_meta:
             relevant_keys[key] = checkpoint_meta[key]
     payload = json.dumps(relevant_keys, sort_keys=True, default=str)

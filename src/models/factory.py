@@ -74,6 +74,21 @@ def build_model_from_contract(
     raise ConfigurationError(f"Unsupported model kind: {model_kind}")
 
 
+def state_dict_digest(state_dict: dict[str, Any]) -> str:
+    """sha1 over parameter names + tensor bytes: the weights' identity."""
+    import hashlib
+
+    digest = hashlib.sha1()
+    for name in sorted(state_dict):
+        tensor = state_dict[name]
+        digest.update(name.encode("utf-8"))
+        if isinstance(tensor, torch.Tensor):
+            digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
+        else:
+            digest.update(repr(tensor).encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
 def build_checkpoint_meta(
     *,
     model_kind: str,
@@ -81,6 +96,7 @@ def build_checkpoint_meta(
     feature_config: FeatureConfig,
     feature_contract: FeatureContract,
     extra: dict[str, Any] | None = None,
+    weights_digest: str | None = None,
 ) -> dict[str, Any]:
     meta = {
         # 2.0: Great Simplification — dendritic branches, soma, regime encoder,
@@ -93,6 +109,11 @@ def build_checkpoint_meta(
         "feature_config": feature_config.model_dump(mode="json"),
         "feature_contract": feature_contract.to_dict(),
     }
+    # Weights identity (2026-07-14 fingerprint-collision fix): without it,
+    # two same-config trainings share an encoder fingerprint and stale
+    # banks/calibrators silently pass their binding checks.
+    if weights_digest is not None:
+        meta["weights_digest"] = weights_digest
     if extra:
         meta.update(extra)
     meta["encoder_fingerprint"] = compute_encoder_fingerprint(meta)

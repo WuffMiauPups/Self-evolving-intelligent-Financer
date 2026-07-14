@@ -94,9 +94,9 @@ Phase 2+ levers (memory prior, market-context features, OOD gating) build on thi
 
 | Retrain | After | Status |
 |---|---|---|
-| ⟲ 1 | §4.1 + §4.2 | **open — next milestone** |
-| ⟲ 2 | model-head disentanglement (§6, Phase 2) | blocked on ⟲1 scorecard |
-| ⟲ 3 | FeatureContract bump for market-context features (§7, Phase 3) | blocked on ⟲2 |
+| ⟲ 1 | §4.1 + §4.2 | ✅ run 2026-07-13 (see §1 ledger: gate-refused, then user force-promoted `d748f28c` as bootstrap incumbent) |
+| ⟲ 2 | model-head disentanglement (§6, Phase 2) | ✅ run 2026-07-14 (§6.1: classification +0.44pt, trading worse → refused; `4575582c` staged) |
+| ⟲ 3 | FeatureContract bump for market-context features (§7, Phase 3) | ✅ **run 2026-07-14, NEGATIVE** — isolated run (`checkpoints/retrain3_market_context/`, contract 44→52, honest 6bps labels, config seed, val BA 0.4418). Same-window OOS vs incumbent (cutoff 2026-03-18): **BA 0.3617 vs 0.3648 (−0.31pt), expectancy −0.17 vs −0.10, excess vs buy&hold −6.2% vs −5.5%** → NOT promoted; `features.market_context_enabled` stays **false**; fingerprint `9b3ff04c6a7c` (re-stamped — this run exposed the encoder-fingerprint collision, fixed same day: contract + weights digest now enter the hash). Cross-sectional market context as trained does not add OOS accuracy; next levers: curriculum/anchored-negative experiment knobs (§6.5), or richer context features, before burning another full retrain. |
 
 ---
 

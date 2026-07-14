@@ -416,6 +416,8 @@ def run_supervised_training(
             canonical_path_protected=str(canonical_path),
             note="Set isolate_checkpoint=False to write to canonical_path instead.",
         )
+    from src.models.factory import state_dict_digest
+
     save_checkpoint(
         checkpoint_path,
         model=model,
@@ -425,6 +427,7 @@ def run_supervised_training(
             model_config=effective_model_config,
             feature_config=config.features,
             feature_contract=bundle.feature_contract,
+            weights_digest=state_dict_digest(model.state_dict()),
             extra={
                 "train_loss": history.train[-1].loss if history.train else 0.0,
                 "val_loss": history.val[-1].loss if history.val else 0.0,
