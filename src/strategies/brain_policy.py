@@ -110,6 +110,11 @@ def _reassemble_bucketed_outputs(
             if outputs[0].risk_predictions is not None
             else None
         ),
+        horizon_returns=(
+            gather_dict([o.horizon_returns for o in outputs])
+            if outputs[0].horizon_returns is not None
+            else None
+        ),
     )
 
 

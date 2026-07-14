@@ -17,6 +17,36 @@ class ValueHead(nn.Module):
         return self.network(inputs)
 
 
+class ReturnHeads(nn.Module):
+    """One small regression head per forward horizon (Phase 2 §6.1).
+
+    Replaces the old design where every ``return_h{H}`` target was
+    regressed onto the single ``target_fraction`` scalar — one scalar
+    cannot fit three horizons, so the gradient pulled it toward an
+    uninterpretable blend. Keys follow the training target names
+    (``return_h15`` etc.); outputs are raw return fractions.
+    """
+
+    def __init__(self, input_dim: int, horizons: list[int], hidden_dim: int = 64) -> None:
+        super().__init__()
+        self.horizons = sorted(int(h) for h in horizons)
+        if not self.horizons:
+            raise ValueError("ReturnHeads requires at least one horizon")
+        self.heads = nn.ModuleDict(
+            {
+                f"return_h{horizon}": nn.Sequential(
+                    nn.Linear(input_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, 1),
+                )
+                for horizon in self.horizons
+            }
+        )
+
+    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        return {name: head(x) for name, head in self.heads.items()}
+
+
 class RiskHead(nn.Module):
     """Predicts raw-fraction MFE / MAE / volatility / path_drawdown.
 

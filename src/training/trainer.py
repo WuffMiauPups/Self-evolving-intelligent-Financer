@@ -335,12 +335,14 @@ class Trainer:
                 )
 
                 # --- C. Legacy multitask regression loss ---
+                decoupled = bool(getattr(self.model, "decoupled_heads", False))
                 regression_loss = output.action_logits.new_zeros(())
                 regression_components: dict[str, float] = {}
                 if self.multitask_enabled:
                     regression_loss, regression_components = multitask_regression_loss(
                         output,
                         batch.get("regression_targets", {}),
+                        decoupled=decoupled,
                     )
 
                 # --- D. Future return regression loss ---
@@ -357,6 +359,7 @@ class Trainer:
                 if self.enable_risk_path_targets:
                     rp_loss, rp_components = risk_path_regression_loss(
                         output, batch.get("regression_targets", {}),
+                        decoupled=decoupled,
                     )
                     risk_path_loss = rp_loss
                     regression_components.update(rp_components)

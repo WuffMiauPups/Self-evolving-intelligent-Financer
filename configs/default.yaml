@@ -170,6 +170,13 @@ model:
   soma_confidence_weighting_enabled: true
   regime_prototype_init_scale: 0.02    # scale for regime embedding initialization
   separate_risk_heads: true           # Dedicated heads for MFE/MAE/volatility/drawdown (feed the EV gate)
+  # --- Head disentanglement (Phase 2 §6.1) ---
+  # confidence = softmax P(chosen class), sizing not learned (risk layer owns
+  # it), per-horizon return heads replace the shared return scalar. Old
+  # checkpoints reconstruct their legacy architecture from their own saved
+  # config regardless of these values.
+  decoupled_heads: true
+  return_head_horizons: []             # synced to training horizons at train time
 
 risk:
   max_daily_loss: 350.0

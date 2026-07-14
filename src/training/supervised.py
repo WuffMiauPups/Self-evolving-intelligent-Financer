@@ -49,6 +49,25 @@ def build_training_components(
             overrides=_FAST_SMALL_MODEL_OVERRIDES,
             note="Reduced model capacity for fast experiment. NOT for production.",
         )
+    if effective_model_config.decoupled_heads and not use_baseline:
+        # Phase 2 §6.1: the per-horizon return heads must cover exactly the
+        # horizons the dataset produces targets for. The training config is
+        # the single source of truth; the synced list is persisted in the
+        # checkpoint's effective model config so inference reconstructs it.
+        horizon_union = sorted(
+            {*config.training.forward_horizons, *config.training.auxiliary_horizons}
+        )
+        effective_model_config = effective_model_config.model_copy(
+            update={"return_head_horizons": horizon_union}
+        )
+        logger.info(
+            "decoupled_heads_active",
+            return_head_horizons=horizon_union,
+            note=(
+                "confidence = P(chosen class); sizing not learned (risk layer "
+                "owns it); per-horizon return heads replace the shared scalar"
+            ),
+        )
     model = build_model_from_contract(
         model_kind="baseline" if use_baseline else "brain",
         model_config=effective_model_config,

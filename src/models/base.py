@@ -21,6 +21,9 @@ class ModelOutput:
     memory_state: torch.Tensor | None = None
     temporal_embedding: torch.Tensor | None = None
     risk_predictions: dict[str, torch.Tensor] | None = None
+    # Per-horizon return predictions keyed like the training targets
+    # ("return_h15", ...). None on legacy (pre-disentanglement) models.
+    horizon_returns: dict[str, torch.Tensor] | None = None
 
 
 class TradingModelProtocol(Protocol):

@@ -21,7 +21,7 @@ from src.core.config import ModelConfig
 from src.models.base import ModelOutput
 from src.models.cnn_encoder import MarketTemporalCNN
 from src.models.policy_head import PolicyHead
-from src.models.value_head import RiskHead, ValueHead
+from src.models.value_head import ReturnHeads, RiskHead, ValueHead
 from src.utils.torch_utils import ensure_batch_dimension
 
 
@@ -77,17 +77,25 @@ class BrainTradingModel(nn.Module):
         )
 
         head_input_dim = hidden_dim
+        # Phase 2 §6.1: with decoupled_heads, confidence is derived from the
+        # action logits (P of the chosen class), sizing is not learned, and
+        # per-horizon return heads take over return regression.
+        self.decoupled_heads = bool(getattr(config, "decoupled_heads", False))
         self.policy_head = PolicyHead(
             input_dim=head_input_dim,
             hidden_dim=config.head_hidden_dim,
             dropout=config.dropout,
             decouple_confidence=True,  # confidence no longer multiplied by soma
             depth=getattr(config, "head_depth", 1),
+            decoupled=self.decoupled_heads,
         )
         self.value_head = ValueHead(input_dim=head_input_dim, hidden_dim=config.head_hidden_dim)
         self.risk_head: RiskHead | None = None
         if getattr(config, "separate_risk_heads", False):
             self.risk_head = RiskHead(head_input_dim)
+        self.return_heads: ReturnHeads | None = None
+        if getattr(config, "return_head_horizons", None):
+            self.return_heads = ReturnHeads(head_input_dim, list(config.return_head_horizons))
 
     def initial_memory_state(
         self,
@@ -157,6 +165,7 @@ class BrainTradingModel(nn.Module):
         policy_output = self.policy_head(hidden, torch.ones(batch_size, 1, device=hidden.device, dtype=hidden.dtype))
         value = self.value_head(hidden)
         risk_predictions = self.risk_head(hidden) if self.risk_head is not None else None
+        horizon_returns = self.return_heads(hidden) if self.return_heads is not None else None
 
         ones = torch.ones(batch_size, 1, device=hidden.device, dtype=hidden.dtype)
         return ModelOutput(
@@ -173,4 +182,5 @@ class BrainTradingModel(nn.Module):
             memory_state=None,  # GRU removed
             temporal_embedding=temporal_embedding,
             risk_predictions=risk_predictions,
+            horizon_returns=horizon_returns,
         )

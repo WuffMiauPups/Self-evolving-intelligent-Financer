@@ -34,3 +34,15 @@ class ModelConfig(BaseModel):
     decouple_confidence_from_soma: bool = False
     regime_prototype_init_scale: float = 0.02
     separate_risk_heads: bool = True  # RiskHead emits MFE/MAE for EV gate (Phase 5)
+    # --- Head disentanglement (Phase 2, MASTER_PLAN §6.1) ---
+    # Legacy defaults (False / empty) reconstruct pre-Phase-2 checkpoints
+    # exactly; new trainings enable these via configs/default.yaml.
+    # decoupled_heads: confidence = softmax probability of the chosen class
+    # (no learned confidence head), target_fraction is not learned (sizing
+    # comes from the risk layer), and the legacy stability/primary_return
+    # regressions onto those scalars are disabled.
+    decoupled_heads: bool = False
+    # One small regression head per forward horizon (return_h{H}). Synced to
+    # the training horizon set at train time; persisted in checkpoint meta so
+    # inference reconstructs the exact architecture.
+    return_head_horizons: list[int] = Field(default_factory=list)
