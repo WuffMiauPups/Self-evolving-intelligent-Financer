@@ -194,8 +194,27 @@ class _FeatureCache:
         if key in self._cache:
             return self._cache[key]
 
+        # Cross-sectional market context (Phase 3): computed once per
+        # feature config from the full multi-symbol bar set; the config
+        # key includes market_context_enabled (model_dump_json), so
+        # flag-on and flag-off experiments never share a cache entry.
+        market_context = None
+        if feature_config.market_context_enabled:
+            from src.features.market_context import compute_market_context_batch
+
+            market_context = compute_market_context_batch(
+                bars_by_symbol,
+                short_window=int(feature_config.windows["short"]),
+                medium_window=int(feature_config.windows["medium"]),
+                epsilon=feature_config.epsilon,
+            )
         batched = {
-            symbol: pipeline.build_batch(bars, symbol=symbol, temporal_window=warmup_bars)
+            symbol: pipeline.build_batch(
+                bars,
+                symbol=symbol,
+                temporal_window=warmup_bars,
+                market_context=market_context,
+            )
             for symbol, bars in bars_by_symbol.items()
         }
         self._cache[key] = batched

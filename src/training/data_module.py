@@ -226,6 +226,21 @@ def build_real_data_training_bundle(
         if symbol in shard_misses or symbol not in shard_hits
     }
 
+    # Cross-sectional market context (Phase 3): computed ONCE from the
+    # full multi-symbol bar set (not just the rebuild subset — breadth
+    # and the SPY/QQQ proxies must see the whole universe) and broadcast
+    # into every symbol's batched snapshots.  None while the flag is off.
+    market_context = None
+    if config.features.market_context_enabled and rebuild_symbols:
+        from src.features.market_context import compute_market_context_batch
+
+        market_context = compute_market_context_batch(
+            bars_by_symbol,
+            short_window=int(config.features.windows["short"]),
+            medium_window=int(config.features.windows["medium"]),
+            epsilon=config.features.epsilon,
+        )
+
     all_horizons = config.training.all_horizons
     max_horizon = max(all_horizons)
 
@@ -290,7 +305,10 @@ def build_real_data_training_bundle(
         # ------------------------------------------------------------------
         sequence_length = config.training.sequence_length
         batched_snapshots = pipeline.build_batch(
-            bars, symbol=symbol, temporal_window=sequence_length
+            bars,
+            symbol=symbol,
+            temporal_window=sequence_length,
+            market_context=market_context,
         )
         # Accumulate this symbol's samples locally so we can persist
         # them as a standalone shard at the end of the loop (incremental
@@ -411,7 +429,10 @@ def build_real_data_training_bundle(
         if feature_contract is not None:
             try:
                 shard_fingerprint = compute_shard_fingerprint(
-                    config=config, symbol=symbol, bars=raw_bars
+                    config=config,
+                    symbol=symbol,
+                    bars=raw_bars,
+                    market_bars_by_symbol=bars_by_symbol,
                 )
                 save_cached_shard(
                     fingerprint=shard_fingerprint,

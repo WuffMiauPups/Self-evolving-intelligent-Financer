@@ -56,7 +56,7 @@ PARITY_RTOL = 1.0e-4
 PARITY_ATOL = 5.0e-5
 
 
-def _make_bars(count: int, *, seed: int = 7) -> list[MarketBar]:
+def _make_bars(count: int, *, seed: int = 7, symbol: str = "AAPL") -> list[MarketBar]:
     """Deterministic synthetic bars with ~1% moves.
 
     ``generate_synthetic_bars`` produces ~0.01% moves, which puts price
@@ -77,7 +77,7 @@ def _make_bars(count: int, *, seed: int = 7) -> list[MarketBar]:
         low = min(open_price, close) * 0.998
         bars.append(
             MarketBar(
-                symbol="AAPL",
+                symbol=symbol,
                 timestamp=start + timedelta(minutes=index),
                 open=open_price,
                 high=high,
@@ -177,6 +177,73 @@ def test_scalar_vs_batch_parity_small_window_config() -> None:
         }
     )
     _run_parity(small, temporal_window=40, n_bars=90)
+
+
+def test_scalar_vs_batch_parity_with_market_context() -> None:
+    """Phase 3 market-context features must satisfy the same scalar/batch
+    invariant as every other family: ``build_batch(...).snapshot_at(i)``
+    equals ``build`` on the ``temporal_window`` slice ending at ``i``,
+    with the scalar context computed from the same-length slices of every
+    symbol's bars.  Covers all eight ``market_*`` features (SPY/QQQ
+    proxies, breadth over a 4-symbol universe, relative strength)."""
+    from src.features.market_context import (
+        compute_market_context_batch,
+        compute_market_context_snapshot,
+    )
+
+    config = load_config("configs/default.yaml")
+    features = config.features.model_copy(update={"market_context_enabled": True})
+    short_w = int(features.windows["short"])
+    medium_w = int(features.windows["medium"])
+    temporal_window = config.runtime.warmup_bars
+    n_bars = 130
+    bars_by_symbol = {
+        "AAPL": _make_bars(n_bars, seed=7, symbol="AAPL"),
+        "SPY": _make_bars(n_bars, seed=11, symbol="SPY"),
+        "QQQ": _make_bars(n_bars, seed=13, symbol="QQQ"),
+        "MSFT": _make_bars(n_bars, seed=17, symbol="MSFT"),
+    }
+    pipeline = FeaturePipeline(features, device=torch.device("cpu"))
+    batch_context = compute_market_context_batch(
+        bars_by_symbol,
+        short_window=short_w,
+        medium_window=medium_w,
+        epsilon=features.epsilon,
+    )
+    batched = pipeline.build_batch(
+        bars_by_symbol["AAPL"],
+        symbol="AAPL",
+        temporal_window=temporal_window,
+        market_context=batch_context,
+    )
+    saw_nonzero_market_value = False
+    for index in range(int(features.windows["long"]), n_bars):
+        slices = {
+            symbol: bars[max(0, index + 1 - temporal_window): index + 1]
+            for symbol, bars in bars_by_symbol.items()
+        }
+        scalar_context = compute_market_context_snapshot(
+            slices,
+            short_window=short_w,
+            medium_window=medium_w,
+            epsilon=features.epsilon,
+        )
+        scalar = pipeline.build(
+            slices["AAPL"], symbol="AAPL", market_context=scalar_context
+        )
+        batch_snapshot = batched.snapshot_at(index)
+        _assert_snapshots_match(scalar, batch_snapshot, index)
+        market_rows = [
+            row
+            for row, name in enumerate(scalar.feature_names)
+            if name.startswith("market_")
+        ]
+        assert len(market_rows) == 8
+        if any(float(scalar.features[row]) != 0.0 for row in market_rows):
+            saw_nonzero_market_value = True
+    # Guard against a vacuous pass where both paths agree on all-zero
+    # market features (e.g. a broken context wiring on both sides).
+    assert saw_nonzero_market_value
 
 
 def test_first_valid_index_covers_all_feature_family_warmups() -> None:

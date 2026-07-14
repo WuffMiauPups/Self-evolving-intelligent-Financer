@@ -40,6 +40,12 @@ from src.features.calendar_features import (
     compute_calendar_features,
     compute_calendar_features_rolling,
 )
+from src.features.market_context import (
+    MarketContextBatch,
+    MarketContextSnapshot,
+    compute_market_context_features,
+    compute_market_context_features_rolling,
+)
 
 
 @dataclass(frozen=True)
@@ -274,11 +280,19 @@ class FeaturePipeline:
             tuple[dict[str, list[str]], list[str]],
         ] = {}
 
-    def build(self, bars: Sequence[MarketBar], *, symbol: str) -> FeatureSnapshot:
+    def build(
+        self,
+        bars: Sequence[MarketBar],
+        *,
+        symbol: str,
+        market_context: MarketContextSnapshot | None = None,
+    ) -> FeatureSnapshot:
         if not bars:
             raise ValueError("At least one bar is required to build features")
         tensor = bars_to_tensor(bars, device=self.device, dtype=self.dtype)
-        return self.build_from_tensor(tensor, symbol=symbol, last_bar=bars[-1])
+        return self.build_from_tensor(
+            tensor, symbol=symbol, last_bar=bars[-1], market_context=market_context
+        )
 
     def build_from_tensor(
         self,
@@ -289,6 +303,7 @@ class FeaturePipeline:
         timestamp: datetime | None = None,
         last_price: float | None = None,
         spread: float | None = None,
+        market_context: MarketContextSnapshot | None = None,
     ) -> FeatureSnapshot:
         """Build a feature snapshot from a precomputed ``(T, 6)`` tensor.
 
@@ -341,13 +356,26 @@ class FeaturePipeline:
         )
         values.update(compute_technical_indicators(bars_tensor, self.config.epsilon))
         values.update(compute_calendar_features(resolved_timestamp, device=bars_tensor.device))
+        if self.config.market_context_enabled:
+            # Cross-sectional market context (Phase 3).  The market_*
+            # names are ALWAYS emitted when the flag is on — availability
+            # of the context object only changes values (0.0 fallback),
+            # never the contract.
+            values.update(
+                compute_market_context_features(
+                    bars_tensor,
+                    context=market_context,
+                    medium_window=int(self.config.windows["medium"]),
+                    epsilon=self.config.epsilon,
+                )
+            )
 
         feature_names = sorted(values.keys())
         cache_key = tuple(feature_names)
         cached = self._name_cache.get(cache_key)
         if cached is None:
             branch_feature_names = self._resolve_branch_feature_names(feature_names)
-            regime_names = [name for name in feature_names if name.startswith("regime_")]
+            regime_names = self._resolve_regime_feature_names(feature_names)
             self._name_cache[cache_key] = (branch_feature_names, regime_names)
         else:
             branch_feature_names, regime_names = cached
@@ -389,6 +417,7 @@ class FeaturePipeline:
         *,
         symbol: str,
         temporal_window: int,
+        market_context: MarketContextBatch | None = None,
     ) -> BatchedFeatureSnapshots:
         """Vectorized rolling feature pipeline for a full bar history.
 
@@ -439,12 +468,23 @@ class FeaturePipeline:
                 symbol=symbol,
                 feature_config_snapshot=self._feature_config_snapshot(),
                 temporal_window=temporal_window,
+                # Market-context data participates in the key: re-fetched
+                # SPY/QQQ bars (same endpoints) must not serve stale
+                # cached market features.
+                market_context_signature=(
+                    market_context.signature() if market_context is not None else None
+                ),
             )
             cached = load_cached(fingerprint)
             if cached is not None:
                 return cached
 
-        result = self._build_batch_impl(bars, symbol=symbol, temporal_window=temporal_window)
+        result = self._build_batch_impl(
+            bars,
+            symbol=symbol,
+            temporal_window=temporal_window,
+            market_context=market_context,
+        )
 
         if fingerprint is not None:
             save_cached(fingerprint, result)
@@ -491,6 +531,10 @@ class FeaturePipeline:
             "branch_feature_prefixes": {
                 k: list(v) for k, v in getattr(cfg, "branch_feature_prefixes", {}).items()
             },
+            # Cache-key participation: flipping the flag adds/removes the
+            # market_* feature columns, so it must change every batch
+            # fingerprint (tests/test_market_context.py pins this).
+            "market_context_enabled": bool(getattr(cfg, "market_context_enabled", False)),
         }
 
     def _build_batch_impl(
@@ -499,6 +543,7 @@ class FeaturePipeline:
         *,
         symbol: str,
         temporal_window: int,
+        market_context: MarketContextBatch | None = None,
     ) -> BatchedFeatureSnapshots:
         """Uncached build_batch body. See :meth:`build_batch` for contract."""
         if not bars:
@@ -563,6 +608,16 @@ class FeaturePipeline:
         values.update(
             compute_technical_indicators_rolling(bars_tensor, epsilon)
         )
+        if self.config.market_context_enabled:
+            values.update(
+                compute_market_context_features_rolling(
+                    bars_tensor,
+                    [bar.timestamp for bar in bars],
+                    context=market_context,
+                    medium_window=int(self.config.windows["medium"]),
+                    epsilon=epsilon,
+                )
+            )
 
         # --- Post-step: zero out non-regime features whose config_window
         # exceeds the per-bar temporal_window ---
@@ -634,13 +689,42 @@ class FeaturePipeline:
                 values[key] = torch.zeros(
                     n, dtype=bars_tensor.dtype, device=bars_tensor.device
                 )
+        # Market-context features: the scalar path computes the context
+        # from a ``temporal_window``-sized slice per symbol, so a window
+        # larger than the slice is permanently zero there (same guards
+        # as the return / volatility families).  Mirror that here.
+        if self.config.market_context_enabled:
+            market_short_w = int(self.config.windows["short"])
+            market_medium_w = int(self.config.windows["medium"])
+            zero_col = lambda: torch.zeros(  # noqa: E731
+                n, dtype=bars_tensor.dtype, device=bars_tensor.device
+            )
+            # returns: scalar guard ``numel > W`` → oversized when W >= temporal_window.
+            if market_short_w >= temporal_window:
+                for key in ("market_spy_return_short", "market_qqq_return_short"):
+                    if key in values:
+                        values[key] = zero_col()
+            if market_medium_w >= temporal_window:
+                for key in (
+                    "market_spy_return_medium",
+                    "market_qqq_return_medium",
+                    "market_breadth_medium",
+                    "market_rel_strength_medium",
+                ):
+                    if key in values:
+                        values[key] = zero_col()
+            # realized vol: scalar guard ``numel - 1 >= W`` (log returns).
+            if market_medium_w > temporal_window - 1:
+                for key in ("market_spy_vol_medium", "market_qqq_vol_medium"):
+                    if key in values:
+                        values[key] = zero_col()
 
         feature_names = sorted(values.keys())
         cache_key = tuple(feature_names)
         cached = self._name_cache.get(cache_key)
         if cached is None:
             branch_feature_names = self._resolve_branch_feature_names(feature_names)
-            regime_names = [name for name in feature_names if name.startswith("regime_")]
+            regime_names = self._resolve_regime_feature_names(feature_names)
             self._name_cache[cache_key] = (branch_feature_names, regime_names)
         else:
             branch_feature_names, regime_names = cached
@@ -730,6 +814,18 @@ class FeaturePipeline:
             candidates.append(_ATR_PERIOD)
         if temporal_window > _MACD_MIN_BARS:
             candidates.append(_MACD_MIN_BARS)
+        # market_* features: returns need ``W + 1`` bars (scalar guard
+        # ``numel > W``), realized vol needs ``W + 1`` bars (W log
+        # returns).  In shipped configs windows['long'] dominates both,
+        # but keep the derivation exact for small-window configs.
+        if getattr(self.config, "market_context_enabled", False):
+            market_short_w = int(self.config.windows["short"])
+            market_medium_w = int(self.config.windows["medium"])
+            candidates.extend(
+                w for w in (market_short_w, market_medium_w) if w < temporal_window
+            )
+            if market_medium_w <= temporal_window - 1:
+                candidates.append(market_medium_w)
         return max(candidates)
 
     def _build_temporal_columns(
@@ -748,7 +844,7 @@ class FeaturePipeline:
     def infer_branch_dimensions(self, feature_names: list[str]) -> dict[str, int]:
         return {
             branch_name: len(self._match_features(feature_names, prefixes))
-            for branch_name, prefixes in self.config.branch_feature_prefixes.items()
+            for branch_name, prefixes in self._effective_branch_prefixes().items()
         }
 
     def _assign_branch_inputs(
@@ -770,8 +866,44 @@ class FeaturePipeline:
     def _resolve_branch_feature_names(self, feature_names: list[str]) -> dict[str, list[str]]:
         return {
             branch_name: self._match_features(feature_names, prefixes)
-            for branch_name, prefixes in self.config.branch_feature_prefixes.items()
+            for branch_name, prefixes in self._effective_branch_prefixes().items()
         }
+
+    def _effective_branch_prefixes(self) -> dict[str, list[str]]:
+        """Config branch prefixes plus the implicit market_→regime mapping.
+
+        market_* features (Phase 3 cross-sectional context) ride the
+        REGIME branch: market state is regime-level conditioning, and
+        mapping it in code — instead of editing
+        ``features.branch_feature_prefixes`` in YAML — keeps the stored
+        ``feature_config`` of already-shipped checkpoints comparable
+        (adding "market_" to the YAML would refuse every old checkpoint
+        even with the flag off).  This is a no-op while
+        ``market_context_enabled`` is false because no market_* feature
+        names exist then.
+        """
+        prefixes = {
+            branch_name: list(branch_prefixes)
+            for branch_name, branch_prefixes in self.config.branch_feature_prefixes.items()
+        }
+        regime_prefixes = prefixes.get("regime")
+        if regime_prefixes is not None and "market_" not in regime_prefixes:
+            regime_prefixes.append("market_")
+        return prefixes
+
+    @staticmethod
+    def _resolve_regime_feature_names(feature_names: list[str]) -> list[str]:
+        """Names feeding the regime-detector input.
+
+        market_* features join regime_* so regime detection sees the
+        MARKET, not just the symbol (Phase 3).  No-op while
+        ``market_context_enabled`` is false (no market_* names exist).
+        """
+        return [
+            name
+            for name in feature_names
+            if name.startswith("regime_") or name.startswith("market_")
+        ]
 
     def _build_temporal_tensor(self, bars_tensor: torch.Tensor) -> tuple[list[str], torch.Tensor]:
         if bars_tensor.dim() != 2 or bars_tensor.shape[-1] < 6:

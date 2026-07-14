@@ -76,9 +76,26 @@ class BacktestEngine:
         # ``regime_price_z_*`` features, well within FP32 noise).
         # ------------------------------------------------------------------
         warmup_bars = self.config.runtime.warmup_bars
+        # Cross-sectional market context (Phase 3): computed ONCE from the
+        # full multi-symbol bar set and broadcast into every symbol's
+        # batched snapshots.  None while the flag is off (default) — the
+        # pipeline then emits no market_* features at all.
+        market_context = None
+        if self.config.features.market_context_enabled:
+            from src.features.market_context import compute_market_context_batch
+
+            market_context = compute_market_context_batch(
+                bars_by_symbol,
+                short_window=int(self.config.features.windows["short"]),
+                medium_window=int(self.config.features.windows["medium"]),
+                epsilon=self.config.features.epsilon,
+            )
         batched_by_symbol = {
             symbol: self.feature_pipeline.build_batch(
-                bars, symbol=symbol, temporal_window=warmup_bars
+                bars,
+                symbol=symbol,
+                temporal_window=warmup_bars,
+                market_context=market_context,
             )
             for symbol, bars in bars_by_symbol.items()
         }

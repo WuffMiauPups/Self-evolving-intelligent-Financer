@@ -224,10 +224,26 @@ def resolve_inference_model(
     if model_config.checkpoint_path:
         artifacts = load_model_artifacts(model_config.checkpoint_path, device=device)
         checkpoint_feature_config = artifacts.meta.get("feature_config")
-        if checkpoint_feature_config is not None and checkpoint_feature_config != feature_config.model_dump(mode="json"):
-            raise ConfigurationError(
-                f"Checkpoint feature configuration mismatch for {Path(model_config.checkpoint_path)}"
-            )
+        if checkpoint_feature_config is not None:
+            expected_feature_config = feature_config.model_dump(mode="json")
+            if checkpoint_feature_config != expected_feature_config:
+                # Round-trip the stored dict through FeatureConfig so a
+                # checkpoint saved BEFORE a new defaulted field existed
+                # (e.g. market_context_enabled) still compares equal while
+                # the current config keeps the default.  A checkpoint that
+                # is genuinely different — including one trained with the
+                # other value of such a flag — still refuses here, and the
+                # feature-contract check below refuses on name/dim drift.
+                try:
+                    normalized_checkpoint_config = FeatureConfig(
+                        **checkpoint_feature_config
+                    ).model_dump(mode="json")
+                except Exception:  # noqa: BLE001 — unparseable == mismatch
+                    normalized_checkpoint_config = checkpoint_feature_config
+                if normalized_checkpoint_config != expected_feature_config:
+                    raise ConfigurationError(
+                        f"Checkpoint feature configuration mismatch for {Path(model_config.checkpoint_path)}"
+                    )
         artifacts.feature_contract.assert_matches(
             feature_contract,
             context=f"checkpoint_contract[{Path(model_config.checkpoint_path).name}]",

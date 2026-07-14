@@ -509,7 +509,30 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
 
     pipeline = FeaturePipeline(config.features, device=device_ctx.device)
     sample_symbol = eligible_symbols[0]
-    sample_snapshot = pipeline.build(buffers[sample_symbol].snapshot(), symbol=sample_symbol)
+    # Cross-sectional market context (Phase 3): the sample snapshot that
+    # derives the runtime feature contract must be built the same way the
+    # per-tick snapshots are (market_* names are emitted either way, so
+    # the contract is identical — this just keeps the sample values and
+    # degradation warnings honest).
+    sample_market_context = None
+    if config.features.market_context_enabled:
+        from src.features.market_context import compute_market_context_snapshot
+
+        sample_market_context = compute_market_context_snapshot(
+            {
+                buffer_symbol: buffer.snapshot_tensor()
+                for buffer_symbol, buffer in buffers.items()
+                if len(buffer) > 0
+            },
+            short_window=int(config.features.windows["short"]),
+            medium_window=int(config.features.windows["medium"]),
+            epsilon=config.features.epsilon,
+        )
+    sample_snapshot = pipeline.build(
+        buffers[sample_symbol].snapshot(),
+        symbol=sample_symbol,
+        market_context=sample_market_context,
+    )
     runtime_contract = sample_snapshot.contract
     artifacts = resolve_inference_model(
         model_config=config.model,

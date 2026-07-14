@@ -135,6 +135,11 @@ features:
   momentum_windows: [3, 5, 10]
   volume_windows: [5, 20]
   epsilon: 0.0005
+  # Cross-sectional market context (market_* features: SPY/QQQ return+vol,
+  # universe breadth, symbol-vs-SPY relative strength).  Flipping this
+  # requires retrain ⟲3: the feature contract changes, so checkpoints
+  # trained with the other setting refuse to load.
+  market_context_enabled: false
   branch_feature_prefixes:
     trend: ["return_", "log_return_", "momentum_", "rsi_", "macd_"]
     volatility: ["volatility_", "range_", "body_", "upper_wick_", "lower_wick_", "atr_"]

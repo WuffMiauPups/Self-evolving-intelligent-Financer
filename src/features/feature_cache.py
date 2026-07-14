@@ -38,7 +38,11 @@ import torch
 #   1 — implicit pre-versioning behavior (no salt in the fingerprint).
 #   2 — §4.3 parity fixes: RSI/momentum warmup zeroing, epsilon-guarded
 #       return denominators, volatility_proxy_t window reset.
-FEATURE_SCHEMA_VERSION = 2
+#   3 — Phase 3 cross-sectional market context: market_* feature family
+#       (SPY/QQQ return+vol, breadth, relative strength) behind
+#       features.market_context_enabled; fingerprint additionally keys
+#       on the flag and on the market-context data signature.
+FEATURE_SCHEMA_VERSION = 3
 
 DEFAULT_CACHE_DIR = Path("artifacts/features_cache")
 ENV_DISABLE = "SETAI_DISABLE_FEATURE_CACHE"
@@ -54,6 +58,7 @@ def compute_fingerprint(
     symbol: str,
     feature_config_snapshot: dict[str, Any],
     temporal_window: int,
+    market_context_signature: dict[str, Any] | None = None,
 ) -> str:
     payload = {
         # Read at call time (not bound at import) so a version bump —
@@ -65,6 +70,11 @@ def compute_fingerprint(
         "features": feature_config_snapshot,
         "window": int(temporal_window),
     }
+    if market_context_signature is not None:
+        # Only present when a market-context batch was supplied: the
+        # cached market_* columns depend on OTHER symbols' bars, which
+        # bars_signature alone cannot see.
+        payload["market_context"] = market_context_signature
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:32]
 

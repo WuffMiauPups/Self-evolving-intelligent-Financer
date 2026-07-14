@@ -263,10 +263,41 @@ def build_memory_bank_from_bars(
         encode_chunk_size = max(1, encode_chunk_size)
     logger.info("memory_build_encode_chunk_size=%d", encode_chunk_size)
 
+    # Cross-sectional market context (Phase 3): computed ONCE from the
+    # full multi-symbol bar set and broadcast into every symbol's batched
+    # snapshots.  None while the flag is off (default).
+    market_context_batch = None
+    sample_market_context = None
+    if getattr(pipeline.config, "market_context_enabled", False):
+        from src.features.market_context import (
+            compute_market_context_batch,
+            compute_market_context_snapshot,
+        )
+
+        market_context_batch = compute_market_context_batch(
+            bars_by_symbol,
+            short_window=int(pipeline.config.windows["short"]),
+            medium_window=int(pipeline.config.windows["medium"]),
+            epsilon=pipeline.config.epsilon,
+        )
+        sample_market_context = compute_market_context_snapshot(
+            {
+                symbol: list(bars)[: warmup_bars + 1]
+                for symbol, bars in bars_by_symbol.items()
+            },
+            short_window=int(pipeline.config.windows["short"]),
+            medium_window=int(pipeline.config.windows["medium"]),
+            epsilon=pipeline.config.epsilon,
+        )
+
     # First-pass probe to discover the latent dim (no allocation of the full
     # bank until we know this). Single-sample call is fine here — it only
     # runs once.
-    sample_snapshot = pipeline.build(sample_bars[: warmup_bars + 1], symbol=sample_symbol)
+    sample_snapshot = pipeline.build(
+        sample_bars[: warmup_bars + 1],
+        symbol=sample_symbol,
+        market_context=sample_market_context,
+    )
     sample_encoded = encoder.encode(sample_snapshot)
     # Stamp the bank with the encoder's fingerprint at construction so that
     # check_encoder_compatibility has a real reference for every appended
@@ -313,7 +344,10 @@ def build_memory_bank_from_bars(
         # then extracts per-bar snapshots in O(F) — no re-slice, no
         # re-reduction.  Biggest offline-build cold-start win.
         batched_snapshots = pipeline.build_batch(
-            list(bars), symbol=symbol, temporal_window=warmup_bars
+            list(bars),
+            symbol=symbol,
+            temporal_window=warmup_bars,
+            market_context=market_context_batch,
         )
         eligible_indices = list(range(warmup_bars, max_index))
         # Deterministic per-symbol stratified downsample.

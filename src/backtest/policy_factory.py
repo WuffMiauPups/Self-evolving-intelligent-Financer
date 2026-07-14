@@ -85,6 +85,30 @@ def build_mean_reversion_policy() -> MeanReversionPolicy:
     return MeanReversionPolicy()
 
 
+def _sample_market_context(
+    config: AppConfig,
+    *,
+    bars_by_symbol: dict[str, list[MarketBar]],
+):
+    """Per-tick market context for contract-derivation sample snapshots.
+
+    None while ``features.market_context_enabled`` is off.  The market_*
+    feature NAMES are emitted regardless of context availability, so the
+    derived contract never depends on this — passing it just keeps the
+    sample values and degradation warnings honest."""
+    if not config.features.market_context_enabled:
+        return None
+    from src.features.market_context import compute_market_context_snapshot
+
+    warmup = config.runtime.warmup_bars
+    return compute_market_context_snapshot(
+        {symbol: bars[: warmup + 1] for symbol, bars in bars_by_symbol.items()},
+        short_window=int(config.features.windows["short"]),
+        medium_window=int(config.features.windows["medium"]),
+        epsilon=config.features.epsilon,
+    )
+
+
 def _resolve_artifacts(
     config: AppConfig,
     *,
@@ -103,6 +127,7 @@ def _resolve_artifacts(
     sample_snapshot = pipeline.build(
         bars_by_symbol[sample_symbol][: config.runtime.warmup_bars + 1],
         symbol=sample_symbol,
+        market_context=_sample_market_context(config, bars_by_symbol=bars_by_symbol),
     )
     device = _resolve_backtest_device(config)
     logger.info(
@@ -201,6 +226,7 @@ def build_brain_memory_policy(
     sample_snapshot = pipeline.build(
         bars_by_symbol[sample_symbol][: config.runtime.warmup_bars + 1],
         symbol=sample_symbol,
+        market_context=_sample_market_context(config, bars_by_symbol=bars_by_symbol),
     )
     sample_encoded = encoder.encode(sample_snapshot)
 

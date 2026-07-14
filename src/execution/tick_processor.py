@@ -28,6 +28,7 @@ from src.execution.schemas import OrderIntent
 from src.execution.session_guards import SessionGuard
 from src.execution.runtime_bootstrap import RuntimeContext
 from src.features.feature_pipeline import FeaturePipeline, FeatureSnapshot
+from src.features.market_context import compute_market_context_snapshot
 from src.memory.memory_bank import MemoryBank
 from src.memory.storage import save_memory_bank
 from src.monitoring.equity_log import EquityLogWriter, EquitySnapshot
@@ -608,6 +609,22 @@ def process_tick(
     # per symbol inside ``MemoryAwarePolicy.propose_batch``.
     # ------------------------------------------------------------------
     eligible_batch: list[tuple[str, FeatureSnapshot, object]] = []
+    # Cross-sectional market context (Phase 3): computed ONCE per tick
+    # from every warm buffer and broadcast into each symbol's feature
+    # snapshot below.  None while the flag is off (default).  Missing
+    # SPY/QQQ buffers degrade to 0.0 features with a one-time warning.
+    market_context = None
+    if ctx.config.features.market_context_enabled:
+        market_context = compute_market_context_snapshot(
+            {
+                buffer_symbol: buffer.snapshot_tensor()
+                for buffer_symbol, buffer in ctx.buffers.items()
+                if len(buffer) > 0
+            },
+            short_window=int(ctx.config.features.windows["short"]),
+            medium_window=int(ctx.config.features.windows["medium"]),
+            epsilon=ctx.config.features.epsilon,
+        )
     # A failed broker sync means portfolio/order state is stale: skip
     # proposal generation for the tick (the data lane above still ran)
     # and let the next poll retry the sync.
@@ -685,6 +702,7 @@ def process_tick(
             buf.snapshot_tensor(),
             symbol=symbol,
             last_bar=buf.last_bar(),
+            market_context=market_context,
         )
         eligible_batch.append((symbol, snapshot, bar))
 

@@ -86,7 +86,7 @@ class CachedSymbolShard:
 
 def _feature_config_fingerprint(cfg: AppConfig) -> dict[str, Any]:
     f = cfg.features
-    return {
+    payload = {
         "windows": dict(f.windows),
         "volatility_windows": list(f.volatility_windows),
         "momentum_windows": list(f.momentum_windows),
@@ -96,6 +96,12 @@ def _feature_config_fingerprint(cfg: AppConfig) -> dict[str, Any]:
             k: list(v) for k, v in f.branch_feature_prefixes.items()
         },
     }
+    # Included only when ON so every fingerprint minted before the flag
+    # existed stays byte-identical — flag-off users keep their warm
+    # shard/sample caches; flipping the flag invalidates everything.
+    if getattr(f, "market_context_enabled", False):
+        payload["market_context_enabled"] = True
+    return payload
 
 
 def _training_config_fingerprint(cfg: AppConfig) -> dict[str, Any]:
@@ -318,15 +324,26 @@ def _symbol_bars_fingerprint_payload(bars: list[MarketBar]) -> dict[str, Any]:
 
 
 def compute_shard_fingerprint(
-    *, config: AppConfig, symbol: str, bars: list[MarketBar]
+    *,
+    config: AppConfig,
+    symbol: str,
+    bars: list[MarketBar],
+    market_bars_by_symbol: dict[str, list[MarketBar]] | None = None,
 ) -> str:
     """Per-symbol shard key.  Invariant: identical (config, symbol, bar
-    summary) → identical fingerprint → the same shard file."""
+    summary) → identical fingerprint → the same shard file.
+
+    When ``features.market_context_enabled`` is on, a shard's market_*
+    columns depend on EVERY symbol's bars (SPY/QQQ proxies, breadth), so
+    the full-universe bar summary joins the key — any symbol's bar change
+    invalidates every shard.  Flag-off fingerprints are unchanged."""
     payload = {
         "config": _config_fingerprint_payload(config),
         "symbol": symbol,
         "bars": _symbol_bars_fingerprint_payload(bars),
     }
+    if getattr(config.features, "market_context_enabled", False):
+        payload["market_bars"] = _bars_fingerprint(market_bars_by_symbol or {})
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:24]
 
@@ -546,7 +563,10 @@ def load_all_shards(
     reference_contract: FeatureContract | None = None
     for symbol in bars_by_symbol:
         fingerprint = compute_shard_fingerprint(
-            config=config, symbol=symbol, bars=bars_by_symbol[symbol]
+            config=config,
+            symbol=symbol,
+            bars=bars_by_symbol[symbol],
+            market_bars_by_symbol=bars_by_symbol,
         )
         shard = load_cached_shard(fingerprint=fingerprint, cache_dir=cache_dir)
         if shard is None:

@@ -31,6 +31,12 @@ class FeatureConfig(BaseModel):
     momentum_windows: list[int] = Field(default_factory=lambda: [3, 5, 10])
     volume_windows: list[int] = Field(default_factory=lambda: [5, 20])
     epsilon: float = 1.0e-6
+    # Cross-sectional market context (RESEARCH_ROADMAP Phase 3): SPY/QQQ
+    # returns + realized vol, universe breadth, symbol-vs-SPY relative
+    # strength, emitted as ``market_*`` features.  Flipping this changes
+    # the feature contract (names/dims), so it requires a full retrain
+    # (⟲3); checkpoints trained with the other setting refuse to load.
+    market_context_enabled: bool = False
     branch_feature_prefixes: dict[str, list[str]] = Field(
         default_factory=lambda: {
             "trend": ["return_", "log_return_", "momentum_", "rsi_", "macd_"],
