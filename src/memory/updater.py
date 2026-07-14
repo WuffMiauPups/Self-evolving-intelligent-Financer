@@ -4,6 +4,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -40,6 +41,19 @@ class AssociativeMemoryUpdater:
         pending_items = self.pending_by_symbol[encoded_state.symbol]
         if any(item.timestamp == encoded_state.timestamp for item in pending_items):
             return
+        # Bounded queue: under ``pending_only`` (or a stalled finalizer)
+        # pending states would otherwise accumulate without limit for the
+        # life of the process. Drop the oldest — the newest observation is
+        # always the most likely to still be finalizable.
+        max_pending = int(getattr(self.config, "pending_max_per_symbol", 0) or 0)
+        if max_pending > 0 and len(pending_items) >= max_pending:
+            dropped = pending_items.pop(0)
+            logger.warning(
+                "pending_observation_dropped symbol=%s timestamp=%s cap=%d",
+                dropped.symbol,
+                dropped.timestamp.isoformat(),
+                max_pending,
+            )
         pending_items.append(
             PendingMemoryState(
                 symbol=encoded_state.symbol,
@@ -128,7 +142,10 @@ class AssociativeMemoryUpdater:
             for item in items:
                 all_pending.append({
                     "symbol": item.symbol,
-                    "timestamp": item.timestamp,
+                    # ISO string, not a datetime object: datetime payloads force
+                    # torch.load(weights_only=True) to fail and every restart
+                    # through the unsafe legacy fallback.
+                    "timestamp": item.timestamp.isoformat(),
                     "feature_contract_id": item.feature_contract_id,
                     "latent": item.latent.detach().cpu(),
                     "regime_weights": None if item.regime_weights is None else item.regime_weights.detach().cpu(),
@@ -166,9 +183,15 @@ class AssociativeMemoryUpdater:
             return 0
         restored = 0
         for item_data in payload.get("pending_items", []):
+            raw_timestamp = item_data["timestamp"]
+            timestamp = (
+                datetime.fromisoformat(raw_timestamp)
+                if isinstance(raw_timestamp, str)
+                else raw_timestamp  # legacy payloads stored datetime objects
+            )
             pending = PendingMemoryState(
                 symbol=str(item_data["symbol"]),
-                timestamp=item_data["timestamp"],
+                timestamp=timestamp,
                 feature_contract_id=str(item_data["feature_contract_id"]),
                 latent=item_data["latent"].detach().cpu(),
                 regime_weights=None if item_data["regime_weights"] is None else item_data["regime_weights"].detach().cpu(),
@@ -344,6 +367,26 @@ def build_memory_bank_from_bars(
 
     logger.info("phase_timing phase=build_memory_done items=%d", len(bank))
     bank.meta["builder"] = "offline_complete"
+    # Provenance: record exactly what data range and leakage guards this
+    # bank was built with, so downstream evaluation can verify (not assume)
+    # that its outcomes end where they claim to.
+    built_through: datetime | None = None
+    outcome_horizon = max(memory_config.forward_horizons)
+    for bars in bars_by_symbol.values():
+        max_index = len(bars) - outcome_horizon - embargo_bars
+        if max_index <= warmup_bars:
+            continue
+        last_decision_ts = bars[max_index - 1].timestamp
+        if built_through is None or last_decision_ts > built_through:
+            built_through = last_decision_ts
+    bank.meta.update(
+        {
+            "builder_warmup_bars": int(warmup_bars),
+            "builder_embargo_bars": int(embargo_bars),
+            "builder_outcome_horizon": int(outcome_horizon),
+            "builder_built_through_ts": built_through.isoformat() if built_through else None,
+        }
+    )
     return bank
 
 

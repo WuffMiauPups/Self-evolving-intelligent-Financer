@@ -95,6 +95,11 @@ class RuntimeContext:
     processed_fill_ids: set[str] = field(default_factory=set)
     daily_anchor_equity: float = 0.0
     daily_anchor_date: date | None = None
+    # Debounced memory persistence (tick_processor._maybe_persist_memory):
+    # bank saves happen off the per-symbol hot path, at most once per
+    # memory.save_debounce_sec (plus once at graceful shutdown).
+    memory_bank_dirty: bool = False
+    last_memory_persist_monotonic: float = 0.0
 
 
 def resolve_runtime_symbols(
@@ -227,10 +232,21 @@ def _build_or_load_memory_bank(
                     f"bank={bank.encoder_fingerprint}, encoder={encoder.encoder_fingerprint}. "
                     "Rebuild the bank against the current checkpoint."
                 )
-            # Stamp the bank if it was built before fingerprint stamping was
-            # introduced. This makes future appends gate on the encoder.
+            # An unstamped bank has UNKNOWN provenance — it may have been
+            # built by any past encoder. Stamping the current fingerprint
+            # over it would forge exactly the evidence the stale-bank check
+            # relies on, so warn loudly instead and leave it unstamped
+            # (rebuild via scripts/build_memory.py to get a stamped bank).
             if bank.encoder_fingerprint is None and encoder.encoder_fingerprint is not None:
-                bank.encoder_fingerprint = encoder.encoder_fingerprint
+                logger.warning(
+                    "memory_bank_unstamped",
+                    path=str(persist_path),
+                    note=(
+                        "bank records no encoder_fingerprint (built pre-stamping); "
+                        "stale-bank detection is inactive for its items — rebuild "
+                        "with scripts/build_memory.py against the current checkpoint"
+                    ),
+                )
             logger.info("memory_bank_loaded", path=str(persist_path), **bank.summary())
             return bank
         except Exception as exc:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from hashlib import sha1
 from typing import Any
 
@@ -25,6 +26,14 @@ logger = logging.getLogger(__name__)
 def feature_contract_fingerprint(contract: FeatureContract) -> str:
     payload = json.dumps(contract.to_dict(), sort_keys=True)
     return sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _item_epoch(item: MemoryItem) -> int:
+    """Epoch seconds of an item's timestamp (0 for items without one)."""
+    timestamp = item.timestamp
+    if timestamp is None:
+        return 0
+    return int(timestamp.timestamp())
 
 
 def compute_encoder_fingerprint(checkpoint_meta: dict[str, Any]) -> str:
@@ -52,12 +61,18 @@ class MemoryBank:
     )
     meta: dict[str, Any] = field(default_factory=dict)
     _latent_matrix_normalized: torch.Tensor | None = field(default=None, repr=False)
+    # Epoch-second timestamps parallel to ``latent_matrix`` rows, so temporal
+    # filtering in retrieval is a vectorized mask instead of a Python loop.
+    _timestamps_epoch: torch.Tensor = field(
+        default_factory=lambda: torch.empty((0,), dtype=torch.int64), repr=False
+    )
 
     def __post_init__(self) -> None:
         if self.feature_contract_id is None:
             self.feature_contract_id = feature_contract_fingerprint(self.feature_contract)
         if not self.items:
             self.latent_matrix = torch.empty((0, self.latent_dim), dtype=torch.float32)
+            self._timestamps_epoch = torch.empty((0,), dtype=torch.int64)
             return
         self._rebuild_latent_matrix()
 
@@ -76,33 +91,69 @@ class MemoryBank:
             self.items.pop(0)
             if self.latent_matrix.shape[0] > 0:
                 self.latent_matrix = self.latent_matrix[1:].contiguous()
+            if self._timestamps_epoch.shape[0] > 0:
+                self._timestamps_epoch = self._timestamps_epoch[1:].contiguous()
         self.items.append(item)
         row = item.latent.detach().cpu().to(dtype=torch.float32).reshape(1, -1)
+        ts_row = torch.tensor([_item_epoch(item)], dtype=torch.int64)
         if self.latent_matrix.shape[0] == 0 or self.latent_matrix.shape[1] != self.latent_dim:
             self.latent_matrix = row
+            self._timestamps_epoch = ts_row
         else:
             self.latent_matrix = torch.cat([self.latent_matrix, row], dim=0)
+            self._timestamps_epoch = torch.cat([self._timestamps_epoch, ts_row], dim=0)
         self._latent_matrix_normalized = None
         return True
 
     def extend(self, items: list[MemoryItem]) -> int:
-        """Append multiple items. Returns count of items actually added."""
-        added = 0
-        for item in items:
-            if self.append(item):
-                added += 1
-        return added
+        """Append multiple items in one bulk operation.
+
+        Validates each item, stacks all accepted latents once, and does a
+        single ``torch.cat`` + a single FIFO trim — O(N) per call. (The old
+        implementation looped over ``append``, whose per-item full-matrix
+        ``torch.cat`` made large builds O(N²): ~200 GB of cumulative memcpy
+        at 20k items.) Returns the count of items actually added.
+        """
+        accepted = [item for item in items if self._validate_item(item)]
+        if not accepted:
+            return 0
+        rows = torch.stack(
+            [item.latent.detach().cpu().to(dtype=torch.float32).reshape(-1) for item in accepted],
+            dim=0,
+        )
+        ts_rows = torch.tensor([_item_epoch(item) for item in accepted], dtype=torch.int64)
+        if self.latent_matrix.shape[0] == 0 or self.latent_matrix.shape[1] != self.latent_dim:
+            self.latent_matrix = rows
+            self._timestamps_epoch = ts_rows
+            self.items = list(accepted)
+        else:
+            self.latent_matrix = torch.cat([self.latent_matrix, rows], dim=0)
+            self._timestamps_epoch = torch.cat([self._timestamps_epoch, ts_rows], dim=0)
+            self.items.extend(accepted)
+        overflow = len(self.items) - self.max_items
+        if overflow > 0:
+            self.items = self.items[overflow:]
+            self.latent_matrix = self.latent_matrix[overflow:].contiguous()
+            self._timestamps_epoch = self._timestamps_epoch[overflow:].contiguous()
+        self._latent_matrix_normalized = None
+        return len(accepted)
 
     def query_top_k_simple(
         self,
         query_latent: torch.Tensor,
         k: int = 5,
+        *,
+        exclude_after: datetime | None = None,
+        exclude_item: tuple[str, datetime] | None = None,
     ) -> list[MemoryItem]:
         """Cosine-kNN lookup over stored items.
 
-        Returns the top-k MemoryItems whose normalized latents are most similar
-        to the query. Passive scaffold: diagnostic only, does not influence trade
-        decisions (wiring lives in MemoryAwarePolicy).
+        ``exclude_after`` drops every item whose timestamp is at or after the
+        cutoff — this is the temporal guarantee the backtest engine relies on
+        (a bank built over the full history must not leak future outcomes
+        into a decision at bar t). ``exclude_item`` additionally drops the
+        query's own (symbol, timestamp) so a stored copy of the current state
+        can never be its own nearest neighbor.
         """
         if not self.items or self.latent_matrix.shape[0] == 0:
             return []
@@ -112,11 +163,24 @@ class MemoryBank:
             dim=-1,
         )
         sims = (query @ keys.T).squeeze(0)
+        if exclude_after is not None:
+            cutoff_epoch = int(exclude_after.timestamp())
+            sims = sims.masked_fill(self._timestamps_epoch >= cutoff_epoch, float("-inf"))
+        if exclude_item is not None:
+            symbol, timestamp = exclude_item
+            ts_epoch = int(timestamp.timestamp())
+            for index in (self._timestamps_epoch == ts_epoch).nonzero(as_tuple=True)[0].tolist():
+                if self.items[index].symbol == symbol:
+                    sims[index] = float("-inf")
         top = min(int(k), sims.shape[0])
         if top <= 0:
             return []
-        _, indices = torch.topk(sims, k=top, dim=-1)
-        return [self.items[int(i)] for i in indices.tolist()]
+        values, indices = torch.topk(sims, k=top, dim=-1)
+        return [
+            self.items[int(i)]
+            for value, i in zip(values.tolist(), indices.tolist())
+            if value != float("-inf")
+        ]
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -213,6 +277,7 @@ class MemoryBank:
     def _rebuild_latent_matrix(self) -> None:
         if not self.items:
             self.latent_matrix = torch.empty((0, self.latent_dim), dtype=torch.float32)
+            self._timestamps_epoch = torch.empty((0,), dtype=torch.int64)
             self._latent_matrix_normalized = None
             return
         rows = [
@@ -220,6 +285,9 @@ class MemoryBank:
             for item in self.items
         ]
         self.latent_matrix = torch.stack(rows, dim=0)
+        self._timestamps_epoch = torch.tensor(
+            [_item_epoch(item) for item in self.items], dtype=torch.int64
+        )
         self._latent_matrix_normalized = None
 
     def _ensure_latent_matrix_normalized(self) -> torch.Tensor:

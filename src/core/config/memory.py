@@ -125,6 +125,12 @@ class MemoryConfig(BaseModel):
     # --- Pending observation persistence ---
     persist_pending_observations: bool = True
     pending_store_path: str = "artifacts/pending_observations.pt"
+    # Debounce for runtime memory persistence: the bank/pending stores are
+    # saved at most once per interval (plus once at graceful shutdown)
+    # instead of synchronously on the per-symbol decision hot path.
+    save_debounce_sec: float = 300.0
+    # Cap on queued pending observations per symbol (oldest dropped, loudly).
+    pending_max_per_symbol: int = 2048
     # --- Adaptive homeostatic gating ---
     # When True, replace fixed similarity/calibration/coherence thresholds
     # with self-regulating EMA-based gating that adapts to the bank's own
@@ -278,4 +284,8 @@ class MemoryConfig(BaseModel):
             raise ConfigurationError("memory.temperature_candidates must be non-empty")
         if self.outlier_sigma <= 0.0:
             raise ConfigurationError("memory.outlier_sigma must be positive")
+        if self.save_debounce_sec < 0.0:
+            raise ConfigurationError("memory.save_debounce_sec must be non-negative")
+        if self.pending_max_per_symbol <= 0:
+            raise ConfigurationError("memory.pending_max_per_symbol must be positive")
         return self

@@ -125,15 +125,29 @@ class MemoryAwarePolicy:
         calibrator = self.platt_calibrator
         return calibrator is not None and getattr(calibrator, "is_fitted", False)
 
+    def _retrieve_neighbors(self, encoded_state: EncodedState) -> list:
+        """Temporal-cutoff-respecting, self-excluding kNN retrieval.
+
+        Every retrieval goes through here so the backtest engine's
+        ``set_temporal_cutoff`` is actually honored: items at or after the
+        cutoff (i.e. the future, when replaying history over a bank built
+        from the full range) never surface, and the query's own stored
+        (symbol, timestamp) copy is never its own neighbor.
+        """
+        return self.bank.query_top_k_simple(
+            encoded_state.latent,
+            k=self.knn_top_k,
+            exclude_after=self._temporal_cutoff,
+            exclude_item=(encoded_state.symbol, encoded_state.timestamp),
+        )
+
     def _attach_memory_diag(
         self, diagnostics: dict, encoded_state: EncodedState
     ) -> dict:
         diagnostics = dict(diagnostics)
         if len(self.bank) >= 1:
             try:
-                matches = self.bank.query_top_k_simple(
-                    encoded_state.latent, k=self.knn_top_k
-                )
+                matches = self._retrieve_neighbors(encoded_state)
                 diagnostics["memory_knn"] = {
                     "neighbor_count": len(matches),
                     "neighbor_symbols": [m.symbol for m in matches],

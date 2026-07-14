@@ -10,6 +10,7 @@ the stream and hands them in already resolved.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -307,6 +308,38 @@ def _backfill_gap(
             gap_start=last_ts.isoformat(),
             gap_end=bucket_bar.timestamp.isoformat(),
         )
+
+
+def _maybe_persist_memory(ctx: RuntimeContext, *, logger: object) -> None:
+    """Debounced memory persistence — runs once per tick, AFTER trading.
+
+    Saves the bank only when dirty (new finalized items) and pending
+    observations at most once per ``memory.save_debounce_sec``. The final
+    unconditional save lives in trade_engine._graceful_shutdown, so the
+    loss window on a crash is bounded by the debounce interval.
+    """
+    if not isinstance(ctx.policy, MemoryCapablePolicy):
+        return
+    interval = float(ctx.config.memory.save_debounce_sec)
+    now = time.monotonic()
+    if ctx.last_memory_persist_monotonic and now - ctx.last_memory_persist_monotonic < interval:
+        return
+    persisted = False
+    if ctx.memory_bank_dirty and ctx.memory_bank is not None:
+        try:
+            save_memory_bank(ctx.config.memory.persist_path, ctx.memory_bank)
+            ctx.memory_bank_dirty = False
+            persisted = True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("memory_bank_save_failed", error=str(exc))
+    if ctx.policy.updater is not None and ctx.config.memory.persist_pending_observations:
+        try:
+            ctx.policy.updater.save_pending(ctx.config.memory.pending_store_path)
+            persisted = True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pending_save_failed", error=str(exc))
+    if persisted:
+        ctx.last_memory_persist_monotonic = now
 
 
 def _intervention_rate(ctx: RuntimeContext) -> float:
@@ -609,20 +642,10 @@ def process_tick(
                     finalized_count=len(finalized_items),
                     bank_items=0 if ctx.memory_bank is None else len(ctx.memory_bank),
                 )
-                if ctx.memory_bank is not None:
-                    try:
-                        save_memory_bank(ctx.config.memory.persist_path, ctx.memory_bank)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("memory_bank_save_failed", symbol=symbol, error=str(exc))
-            # Persist pending observations for restart safety
-            if (
-                ctx.policy.updater is not None
-                and ctx.config.memory.persist_pending_observations
-            ):
-                try:
-                    ctx.policy.updater.save_pending(ctx.config.memory.pending_store_path)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("pending_save_failed", symbol=symbol, error=str(exc))
+                # Persistence is debounced off the decision hot path: a full
+                # 20k-item bank save is a multi-second stall, and it used to
+                # run synchronously here on every finalization.
+                ctx.memory_bank_dirty = True
 
         bar = latest_bars[symbol]
         guard_result = ctx.session_guard.evaluate(
@@ -896,6 +919,7 @@ def process_tick(
         session_peak_equity=session_peak_equity,
         peak_tracker=position_peak_tracker,
     )
+    _maybe_persist_memory(ctx, logger=logger)
     should_break = False
     if ctx.config.runtime.max_runtime_steps > 0 and step >= ctx.config.runtime.max_runtime_steps:
         runtime_metrics = ctx.metrics.snapshot()
