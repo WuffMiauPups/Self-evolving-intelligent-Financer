@@ -7,5 +7,3 @@ model:
   soma_confidence_weighting_enabled: false
 memory:
   enabled: false
-  decision_fusion:
-    enabled: false

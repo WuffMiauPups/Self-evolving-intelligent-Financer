@@ -1,9 +1,0 @@
-# ESOM regime labeling disabled: tests whether labeling memory units
-# with market regime tags (trend/mean-reversion/breakout) via the
-# self-organizing map improves retrieval relevance.
-# All other new features remain enabled.
-memory:
-  enabled: true
-  esom_regime_labeling: false
-  decision_fusion:
-    enabled: true

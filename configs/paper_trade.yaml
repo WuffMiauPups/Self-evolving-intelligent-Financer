@@ -21,13 +21,9 @@ runtime:
 model:
   checkpoint_path: checkpoints/brain.pt
 
-memory:
-  require_strong_match_for_trade: false
-  modern_hopfield_enabled: true
-  decision_fusion:
-    enabled: false
-    conflict_veto_threshold: 0.99
-    conflict_dampen_threshold: 0.99
+# (The old memory block only toggled fields deleted with the fusion /
+# Hopfield machinery in the Great Simplification; memory settings now
+# inherit entirely from default.yaml.)
 
 risk:
   kill_switch: false

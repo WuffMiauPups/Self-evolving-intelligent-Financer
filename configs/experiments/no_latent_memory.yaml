@@ -5,5 +5,3 @@ model:
   latent_gru_memory_enabled: false
 memory:
   enabled: false
-  decision_fusion:
-    enabled: false

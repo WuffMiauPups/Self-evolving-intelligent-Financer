@@ -4,7 +4,5 @@
 # All other new features remain enabled.
 memory:
   enabled: true
-  decision_fusion:
-    enabled: true
 runtime:
   market_priors_enabled: false

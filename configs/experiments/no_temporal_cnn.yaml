@@ -5,5 +5,3 @@ model:
   use_cnn_encoder: false
 memory:
   enabled: false
-  decision_fusion:
-    enabled: false

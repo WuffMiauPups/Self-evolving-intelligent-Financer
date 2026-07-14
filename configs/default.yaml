@@ -383,9 +383,6 @@ memory:
   latent_dim: null
   top_k: 5
   similarity_metric: cosine
-  min_similarity: 0.75
-  allow_unknown_state: true
-  cluster_method: incremental_prototypes
   max_items: 20000     # stratified per-symbol: 13 symbols * ~1.5K items each — small for fast retrieval at backtest time
   rebuild_on_startup: false
   persist_path: artifacts/market_memory.pt
@@ -399,131 +396,10 @@ memory:
     mean_reversion_return_threshold: 0.0015
     flat_return_threshold: 0.00075
     time_to_move_threshold: 0.002
-  min_cluster_size: 3
   runtime_update_mode: pending_only
-  require_strong_match_for_trade: false
   build_history_bars: 320
-  min_effective_matches: 2
-  attention_temperature: 1.0
-  use_hopfield_retrieval: true
-  # Modern Hopfield (Ramsauer 2020) — iterative retrieval
-  modern_hopfield_enabled: false
-  modern_hopfield_iterations: 3
-  # Deep projections — learnable W_Q/W_K/W_V
-  deep_projections_enabled: false
-  deep_projections_hidden_dim: 64
-  deep_projections_train_epochs: 100
-  deep_projections_initial_beta: 8.0   # initial inverse-temperature for Hopfield energy
-  deep_projections_mse_weight: 0.7     # weight of MSE loss in deep projection training
-  deep_projections_lr: 0.001           # learning rate for deep projection training
-  # Multi-timescale retrieval
-  multi_timescale_retrieval: false
-  retrieval_temperature_multipliers: [2.0, 1.0, 0.5]
-  retrieval_temperature_weights: [0.5, 0.3, 0.2]
-  # --- Health tracker thresholds ---
-  retrieval_health_warmup: 100         # min retrievals before health tracking activates
-  outcome_similarity_adjustment: -0.1  # similarity penalty for poor-outcome matches
-  fusion_cold_start_veto: 0.15         # veto threshold during fusion cold start
-  fusion_cold_start_support: 0.65      # support threshold during fusion cold start
-  fusion_health_warmup: 50             # min fusion evaluations before health tracking
-  veto_profit_threshold: 0.01          # return threshold for profitable veto review
-  veto_relax_factor: 0.9              # relax veto threshold after profitable vetoes
-  veto_tighten_factor: 1.1            # tighten veto threshold after loss-causing vetoes
-  veto_loss_threshold: -0.005          # return threshold for loss-causing veto review
-  topology_health_warmup: 20           # min topology operations before health tracking
-  # RAN merge — blend similar items into prototypes
-  ran_merge_enabled: false
-  ran_merge_alpha: 0.3
-  # Auto-tune temperature via LOO cross-validation
-  auto_tune_temperature: false
-  temperature_candidates: [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
-  # ESOM regime labeling from trade outcomes
-  esom_regime_labeling: false
-  # Counterfactual self-calibration
-  counterfactual_calibration_enabled: false
-  # Value-aware memory decay
-  value_aware_decay: false
-  value_protection_threshold: 0.02     # return threshold for value-aware decay protection
-  value_protection_cap: 0.5            # max protection factor for high-value items
-  outlier_filter_enabled: false
-  outlier_sigma: 3.0
-  use_esom_map: true
-  dynamic_growth_enabled: true
-  novelty_mode: quantile
-  novelty_quantile: 0.5
-  match_calibration_enabled: true
-  min_calibrated_match: 0.15
-  require_strong_match_for_memory_support: true
-  candidate_promotion_mode: support_and_similarity
-  min_candidate_support: 3
-  max_candidate_age: 128
-  merge_enabled: true
-  merge_similarity_mode: adaptive
-  merge_outcome_consistency_threshold: 0.65
-  split_enabled: true
-  split_variance_trigger: 0.75
-  prune_enabled: true
-  utility_decay: 0.995
-  min_utility: 0.025
-  max_units: 2000  # was 256 — sized for ~40-symbol universe (~50 mature units per symbol)
-  archive_pruned: true
-  calibration_enabled: true
-  match_conflict_penalty: 0.5
-  require_calibrated_strong_match_for_trade_support: true
-  topology_neighbor_k: 3
-  adaptive_topology_k: true
-  topology_k_min: 2
-  topology_k_max: 5
-  plasticity_floor: 0.05
-  health_report_enabled: true
-  symbol_specific_profiles: true
-  regime_specific_profiles: true
-  # --- Adaptive homeostatic gating ---
-  # Replaces fixed similarity/calibration thresholds with self-regulating
-  # EMA-based gating.  The bank tracks its own retrieval distribution and
-  # adjusts sensitivity dynamically — no magic numbers.
-  adaptive_gating: true
-  adaptation_rate: 0.01
   # --- Encoder versioning ---
   require_encoder_match: true
-  # --- Dynamic unit lifecycle (previously hardcoded) ---
-  conflict_history_max_size: 100
-  conflict_history_keep_size: 50
-  conflict_rate_window: 20
-  conflict_rate_threshold: 0.5
-  saturation_support_multiplier: 2.0
-  saturation_min_support_floor: 6
-  quarantine_conflict_threshold: 0.6   # conflict rate above this quarantines the unit
-  min_outcome_samples: 3               # min observations before outcome stats used
-  direction_alignment_threshold: 0.5   # threshold for directional agreement check
-  # --- Retrieval thresholds (previously hardcoded) ---
-  adaptive_coherence_floor: 0.1
-  adaptive_weak_quality_threshold: 0.3
-  cluster_top_k_cap: 3
-  size_averaging_weight: 0.5           # blend weight for cluster-size averaging
-  weak_support_size_cap: 0.25          # cap weak-support size factor
-  legacy_coherence_threshold: 0.35
-  # --- Calibration (previously hardcoded) ---
-  calibration_num_buckets: 5
-  calibration_graded_conflict_mid: 0.5
-  # --- ESOM (previously hardcoded) ---
-  esom_neighbor_agreement_threshold: 0.5
-  # --- ESOM regime thresholds ---
-  regime_strong_threshold: 0.010       # return threshold for strong regime label
-  regime_trend_threshold: 0.002        # return threshold for trend regime label
-  regime_volatility_threshold: 0.025   # volatility threshold for volatile regime label
-  # --- Async memory refresh ---
-  async_memory_refresh: true           # run rebuild/refresh on background thread
-  # --- SatSOM-inspired saturation / plasticity ---
-  saturation_enabled: true
-  maturity_update_attenuation: 0.875
-  # --- Outcome-aware updates ---
-  require_outcome_alignment_for_strong_update: true
-  # --- Conflict tracking ---
-  conflict_tracking_enabled: true
-  # --- GNG-inspired topology ---
-  graph_growth_enabled: true
-  graph_max_edge_age: 85
   # --- Pending observation persistence ---
   persist_pending_observations: true
   pending_store_path: artifacts/pending_observations.pt
@@ -537,73 +413,6 @@ memory:
   damping_min_multiplier: 0.5
   damping_min_neighbors: 5
   damping_full_at_return: 0.002
-  # --- Decision fusion layer ---
-  # advisory-only: never overrides risk manager, never promotes flat base actions.
-  decision_fusion:
-    enabled: true
-    evaluation_enabled: true       # offline evaluation via --evaluate-fusion
-    conflict_veto_threshold: 0.70
-    conflict_dampen_threshold: 0.40
-    unknown_state_policy: neutral   # "neutral" or "veto"
-    weak_match_policy: neutral      # "neutral" or "veto"
-    candidate_evidence_discount: 0.50
-    min_mature_matches_for_support: 1
-    saturation_dampen_threshold: 0.90
-    low_plasticity_discount: 0.80
-    topology_agreement_weight: 0.30
-    topology_disagreement_dampen: true
-    min_neighbor_agreement_for_support: 0.50
-    sparse_topology_policy: neutral  # "neutral" or "dampen"
-    # --- Resolve-level parameters (previously hardcoded) ---
-    veto_confidence_adjustment: 0.3
-    neutral_confidence_adjustment: 0.5
-    weak_match_max_multiplier: 0.25
-    dampen_conflict_weight: 0.3
-    dampen_misalignment_weight: 0.4
-    dampen_candidate_weight: 0.2
-    dampen_no_mature_weight: 0.2
-    dampen_saturation_weight: 0.15
-    dampen_sparse_topology_weight: 0.1
-    dampen_topo_disagreement_scale: 0.2
-    topo_boost_scale: 0.2
-    dampen_threshold: 0.5
-    multiplier_floor: 0.1
-    confidence_floor: 0.1
-    legacy_misalignment_multiplier: 0.5
-    legacy_coherence_veto_threshold: 0.35
-    adaptive_supportive_threshold: 0.7
-    unknown_state_quality_threshold: 0.2
-    topology_warning_quality_threshold: 0.3
-    factor_floor: 0.01
-    direction_misalignment_factor: 0.5
-    # --- Counterfactual calibration ---
-    counterfactual_calibration_enabled: false
-  # --- Conservative adaptive topology growth ---
-  # Bounded insertion of new candidate units for novel states.
-  # All OFF by default — enable after reviewing fusion evaluation output.
-  topology_growth:
-    enabled: true
-    min_novelty_score: 0.60
-    min_topology_sparsity: 0.30
-    max_insertions_per_refresh: 5
-    min_support_for_insertion: 2
-    split_conflict_threshold: 0.50
-    split_variance_threshold: 0.60
-    split_min_support: 6
-    max_growth_rate: 0.10
-    require_mature_neighbors_for_support: true
-    respect_quarantine: true
-    # --- Scoring weights (previously hardcoded) ---
-    insertion_novelty_weight: 0.5
-    insertion_sparsity_weight: 0.3
-    insertion_support_weight: 0.2
-    insertion_support_divisor: 10.0
-    sparsity_distance_weight: 0.5
-    sparsity_esom_weight: 0.5
-    split_conflict_weight: 0.4
-    split_variance_weight: 0.3
-    split_direction_weight: 0.3
-    split_direction_threshold: 0.60
 
 # --- Evaluation / experiment framework ---
 evaluation:

@@ -39,7 +39,7 @@ _BACKTEST_OVERRIDE_YAML = Path("runs/gui_backtest_override.yaml")
 
 
 def _prettify_preset_name(path: Path) -> str:
-    """Turn ``backtest_fusion_off.yaml`` into ``Backtest Fusion Off``."""
+    """Turn ``backtest_memory_off.yaml`` into ``Backtest Memory Off``."""
     stem = path.stem
     words = stem.replace("_", " ").split()
     return " ".join(w.capitalize() for w in words) if words else stem

@@ -194,13 +194,13 @@ If credentials are missing, the runtime can fall back to synthetic mock data whe
 
 ## Configuration
 
-Configuration is centralized in YAML files; later files override earlier ones. The config schema is strict (`extra='forbid'`), except for two documented legacy stubs that swallow keys from old preset files.
+Configuration is centralized in YAML files; later files override earlier ones. The config schema is strict (`extra='forbid'`): a YAML key without a model field is a hard load error, never a silent no-op.
 
 - `configs/default.yaml` — safe defaults: features, model dimensions, risk limits, memory, backtest settings
 - `configs/paper_trade.yaml` — paper-mode runtime with shorter loop settings
 - `configs/training.yaml` — training-specific settings
 - `configs/symbols.yaml` — symbol universe
-- `configs/backtest_*.yaml` — backtest presets (note: presets referencing the removed fusion layer are documented no-ops kept for comparison continuity)
+- `configs/backtest_*.yaml` — backtest presets (the old fusion/topology-growth presets were deleted together with the config stubs they toggled)
 
 Frequently used knobs:
 

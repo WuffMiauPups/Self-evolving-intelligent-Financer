@@ -1,9 +1,0 @@
-# LOO-CV temperature auto-tuning disabled: tests whether automatically
-# selecting the Hopfield retrieval temperature via leave-one-out cross-
-# validation improves over the fixed default temperature.
-# All other new features remain enabled.
-memory:
-  enabled: true
-  auto_tune_temperature: false
-  decision_fusion:
-    enabled: true

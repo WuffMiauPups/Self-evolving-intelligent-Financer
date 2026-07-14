@@ -1,8 +1,0 @@
-# Multi-timescale retrieval disabled: tests whether querying the memory
-# bank at multiple temperature scales (broad + focused) adds value over
-# a single-temperature retrieval.  All other new features remain enabled.
-memory:
-  enabled: true
-  multi_timescale_retrieval: false
-  decision_fusion:
-    enabled: true

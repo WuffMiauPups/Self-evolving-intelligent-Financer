@@ -3,7 +3,5 @@
 # improves stability.  All other new features remain enabled.
 memory:
   enabled: true
-  decision_fusion:
-    enabled: true
 runtime:
   regime_hysteresis_enabled: false

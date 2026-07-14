@@ -1,6 +1,6 @@
-# Backtest preset: memory bank + fusion both OFF.
+# Backtest preset: memory bank OFF.
 #
-# Pure brain policy: no retrieval, no fusion, no topology.  Equivalent to
+# Pure brain policy: no retrieval, no memory diagnostics.  Equivalent to
 # running the brain checkpoint as a stateless policy.  Useful for
 # measuring the memory system's marginal contribution.
 #
@@ -10,5 +10,3 @@
 # Kept separate by audience, not by behavior.
 memory:
   enabled: false
-  decision_fusion:
-    enabled: false

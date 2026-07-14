@@ -112,7 +112,7 @@ def main() -> int:
         args.config = ["configs/default.yaml"]
     config = load_config(*args.config)
     # Configure logging so ``logger.info(...)`` calls from memory modules
-    # (updater, memory_bank, topology_growth, etc.) are visible to whoever
+    # (updater, memory_bank, etc.) are visible to whoever
     # is driving the subprocess.  Without this, stdlib loggers have no
     # handlers and all the phase_timing / progress logs are silently
     # dropped — which makes the build look hung for ~20 min.

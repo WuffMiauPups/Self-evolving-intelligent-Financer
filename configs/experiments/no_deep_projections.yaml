@@ -1,8 +1,0 @@
-# Deep Hopfield projections disabled: tests whether learnable key/query
-# projections in the Hopfield retrieval layer improve over raw latent
-# similarity.  All other new features remain enabled.
-memory:
-  enabled: true
-  deep_projections_enabled: false
-  decision_fusion:
-    enabled: true

@@ -1,19 +1,10 @@
-# All new features enabled: the ideal hybrid configuration with every
-# advanced feature turned on.  Serves as the new baseline for measuring
+# All optional features enabled (memory, regime hysteresis, market
+# priors, separate risk heads).  Serves as the reference for measuring
 # the marginal impact of disabling individual features.
+# (The old Hopfield/ESOM/fusion toggles were deleted with that
+# machinery in the Great Simplification.)
 memory:
   enabled: true
-  modern_hopfield_enabled: true
-  multi_timescale_retrieval: true
-  ran_merge_enabled: true
-  deep_projections_enabled: true
-  esom_regime_labeling: true
-  counterfactual_calibration_enabled: true
-  value_aware_decay: true
-  auto_tune_temperature: true
-  decision_fusion:
-    enabled: true
-    counterfactual_calibration_enabled: true
 runtime:
   regime_hysteresis_enabled: true
   market_priors_enabled: true

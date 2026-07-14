@@ -1,7 +1,0 @@
-# Fusion OFF: disable the decision fusion layer.
-# Memory also disabled for fast experiment runs.
-# To test fusion-off with memory retrieval active, override memory.enabled=true.
-memory:
-  enabled: false
-  decision_fusion:
-    enabled: false

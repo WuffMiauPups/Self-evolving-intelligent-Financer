@@ -13,7 +13,7 @@ Usage:
     python scripts/run_backtest_parallel.py --configs \\
         configs/backtest_quick.yaml \\
         configs/backtest_memory_off.yaml \\
-        configs/backtest_fusion_off.yaml \\
+        configs/backtest_baseline.yaml \\
         --policy brain+memory --real-data --workers 3
 
 Each config produces a separate Latest Result + JSON row under runs/backtests/.

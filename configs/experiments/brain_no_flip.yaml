@@ -2,7 +2,5 @@
 # explicit control experiment against brain_flip.
 memory:
   enabled: false
-  decision_fusion:
-    enabled: false
 runtime:
   force_directional_flip: false

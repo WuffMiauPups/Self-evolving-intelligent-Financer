@@ -1,15 +1,17 @@
 """Config-files hygiene tests (master plan workstream 1F).
 
-The config package enforces ``extra='forbid'`` on every model except the two
-documented inert stubs (DecisionFusionConfig / TopologyGrowthConfig), so a
-YAML key without a model field is a hard load error instead of a silent
-no-op. These tests make that contract permanent:
+The config package enforces ``extra='forbid'`` on every model, so a YAML key
+without a model field is a hard load error instead of a silent no-op. These
+tests make that contract permanent:
 
 1. Every ``configs/**/*.yaml`` must load cleanly through ``load_config``
    layered over ``configs/default.yaml`` — any future dead/typo'd key in any
    preset fails this suite.
-2. The two inert stubs must keep swallowing legacy fusion/topology sub-keys
-   (old YAMLs and presets still carry them).
+2. ``MemoryConfig``'s field set is pinned to the fields that actually drive
+   behavior, so the pre-§6.2-prune dead-knob graveyard (Hopfield / ESOM /
+   dynamic units / calibration / fusion) cannot silently regrow, and legacy
+   fusion/topology blocks must now raise at load (the inert swallow-stubs
+   were deleted).
 3. A typo'd key must raise at load, not validate silently.
 
 Note: ``configs/sweep_state_only.yaml`` is NOT an AppConfig file — it is a
@@ -24,9 +26,8 @@ import pytest
 from pydantic import ValidationError
 
 from src.core.config import (
-    DecisionFusionConfig,
+    MemoryConfig,
     RiskConfig,
-    TopologyGrowthConfig,
     load_config,
 )
 from src.core.exceptions import ConfigurationError
@@ -84,47 +85,64 @@ def test_experiment_stack_loads_like_run_experiments() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. The two inert stubs intentionally swallow legacy sub-keys
+# 2. MemoryConfig field set is pinned — the dead-knob graveyard cannot regrow
 # ---------------------------------------------------------------------------
 
+# Every field must have a consumer in src/ or scripts/ (grep before adding).
+# This is the complete allowed surface after the §6.2 dead-field prune; a
+# new field here without a real consumer is a regression, not a config knob.
+MEMORY_CONFIG_ALLOWED_FIELDS = {
+    "enabled",
+    "build_from_real_checkpoint",
+    "latent_dim",
+    "top_k",
+    "similarity_metric",
+    "max_items",
+    "rebuild_on_startup",
+    "persist_path",
+    "forward_horizons",
+    "path_label_rules",
+    "runtime_update_mode",
+    "build_history_bars",
+    "require_encoder_match",
+    "persist_pending_observations",
+    "pending_store_path",
+    "save_debounce_sec",
+    "pending_max_per_symbol",
+    "influence_mode",
+    "damping_min_multiplier",
+    "damping_min_neighbors",
+    "damping_full_at_return",
+}
 
-def test_decision_fusion_stub_swallows_legacy_sub_keys() -> None:
-    stub = DecisionFusionConfig(
-        enabled=True,
-        conflict_veto_threshold=0.70,
-        conflict_dampen_threshold=0.40,
-        some_future_unknown_key="ignored",
-    )
-    assert stub.enabled is True
-    assert not hasattr(stub, "conflict_veto_threshold")
+
+def test_memory_config_field_set_is_pinned() -> None:
+    assert set(MemoryConfig.model_fields) == MEMORY_CONFIG_ALLOWED_FIELDS
 
 
-def test_topology_growth_stub_swallows_legacy_sub_keys() -> None:
-    stub = TopologyGrowthConfig(
-        enabled=False,
-        min_novelty_score=0.60,
-        max_insertions_per_refresh=5,
-    )
-    assert stub.enabled is False
-    assert not hasattr(stub, "min_novelty_score")
-
-
-def test_stub_sub_keys_swallowed_through_load_config(tmp_path: Path) -> None:
+def test_legacy_fusion_and_topology_blocks_raise_at_load(tmp_path: Path) -> None:
+    """The inert DecisionFusionConfig / TopologyGrowthConfig swallow-stubs
+    were deleted with the rest of the graveyard: a config still carrying
+    those blocks must fail loudly instead of silently no-opping."""
     overlay = tmp_path / "legacy_fusion.yaml"
     overlay.write_text(
         "memory:\n"
         "  decision_fusion:\n"
         "    enabled: false\n"
-        "    conflict_veto_threshold: 0.99\n"
-        "    dampen_misalignment_weight: 0.4\n"
         "  topology_growth:\n"
-        "    enabled: false\n"
-        "    split_conflict_threshold: 0.5\n",
+        "    enabled: false\n",
         encoding="utf-8",
     )
-    config = load_config(DEFAULT_CONFIG, overlay)
-    assert config.memory.decision_fusion.enabled is False
-    assert config.memory.topology_growth.enabled is False
+    with pytest.raises(ValidationError):
+        load_config(DEFAULT_CONFIG, overlay)
+
+
+def test_dead_memory_knob_raises_at_load(tmp_path: Path) -> None:
+    """Representative of the ~100 pruned Hopfield/ESOM/calibration knobs."""
+    overlay = tmp_path / "dead_memory.yaml"
+    overlay.write_text("memory:\n  use_hopfield_retrieval: true\n", encoding="utf-8")
+    with pytest.raises(ValidationError):
+        load_config(DEFAULT_CONFIG, overlay)
 
 
 # ---------------------------------------------------------------------------

@@ -1,21 +1,13 @@
-# Backtest baseline preset.
+# Backtest baseline preset — intentionally empty.
 #
-# An override file — most settings inherit from configs/default.yaml.
+# An override file — every setting inherits from configs/default.yaml.
 # Exists so the GUI dropdown has a named "baseline" entry alongside the
 # scenario/sweep variants, rather than displaying "default.yaml" which
 # the operator might mistake for the base config.
 #
 # Use this as the reference point when comparing other presets.
 #
-# Speed optimizations: multi_timescale_retrieval and modern_hopfield_enabled
-# are explicitly disabled here even though default.yaml also disables them,
-# to make the intent explicit and guard against default changes.  These
-# two features can triple per-bar retrieval cost when enabled.
-
-memory:
-  # Speed overrides: disable costly retrieval features that triple the
-  # per-bar retrieval cost. Quick backtest prioritizes iteration speed
-  # over absolute retrieval quality — these features add minimal value
-  # on small/weak models anyway.
-  multi_timescale_retrieval: false
-  modern_hopfield_enabled: false
+# (The old multi_timescale_retrieval / modern_hopfield_enabled speed
+# overrides were removed together with those config fields — the retrieval
+# machinery they toggled was deleted in the Great Simplification.)
+{}

@@ -27,17 +27,13 @@
 #   * The sample is small (~6 weeks) so statistical significance is
 #     limited.  Use this for "does the brain have any edge at all?"
 #     smoke tests, NOT for publication-grade performance claims.
-#   * Memory + fusion are ENABLED (full-stack backtest).  To run a
-#     brain-only comparison, select configs/backtest_memory_off.yaml.
+#   * Memory is ENABLED (full-stack backtest, inherit enabled: true from
+#     default.yaml).  To run a brain-only comparison, select
+#     configs/backtest_memory_off.yaml.
 #   * Recent data is OUT-OF-SAMPLE if the brain was trained on an
 #     older date range.  That is actually a *good* property for this
 #     smoke test — it tells you whether the brain generalizes, not
 #     just whether it memorized the training set.
-#
-# Speed optimizations: multi_timescale_retrieval and modern_hopfield_enabled
-# are explicitly disabled here even though default.yaml also disables them,
-# to make the intent explicit and guard against default changes.  These
-# two features can triple per-bar retrieval cost when enabled.
 
 data:
   # Last ~6 weeks of 5-minute bars.  Bump this forward periodically
@@ -54,13 +50,8 @@ data:
 # no confidence knob left to loosen.  If a quick backtest shows zero fills
 # on an undertrained brain, that is the EV gate being honest about noisy
 # MFE/MAE risk-head predictions, not a preset problem.
-
-memory:
-  # Full-stack backtest: memory retrieval + decision fusion both ON
-  # (inherit enabled: true from default.yaml).
-  # Speed overrides: disable costly retrieval features that triple the
-  # per-bar retrieval cost. Quick backtest prioritizes iteration speed
-  # over absolute retrieval quality — these features add minimal value
-  # on small/weak models anyway.
-  multi_timescale_retrieval: false
-  modern_hopfield_enabled: false
+#
+# (The old memory block disabling multi_timescale_retrieval /
+# modern_hopfield_enabled was removed together with those config fields —
+# the retrieval machinery they toggled was deleted in the Great
+# Simplification.)

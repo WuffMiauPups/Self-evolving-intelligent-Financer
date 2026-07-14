@@ -37,8 +37,7 @@ def _deep_merge(base: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
 
 class AppConfig(BaseModel):
     # extra='forbid' package-wide: a YAML key without a model field is a
-    # hard error, never a silent no-op. The two documented inert stubs
-    # (DecisionFusionConfig / TopologyGrowthConfig) are the only exceptions.
+    # hard error, never a silent no-op.
     model_config = ConfigDict(extra="forbid")
 
     app_name: str = "seif_trading_brain"

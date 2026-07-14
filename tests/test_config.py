@@ -13,9 +13,6 @@ def test_config_loading_and_override() -> None:
     # Frozen-brain runtime policy
     assert config.runtime.allow_online_model_updates is False
     assert config.runtime.allow_online_memory_updates is True
-    # paper_trade.yaml deliberately disables decision_fusion in the runtime
-    # path until the runtime/offline conflict semantics are aligned.
-    assert config.memory.decision_fusion.enabled is False
 
 
 def test_runtime_config_default_is_unbounded() -> None:

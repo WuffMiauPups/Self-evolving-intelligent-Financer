@@ -1,4 +1,4 @@
 # Memory OFF: disable the associative memory system.
-# Fusion still runs but operates without memory signals.
+# The brain policy runs without kNN retrieval diagnostics or damping.
 memory:
   enabled: false

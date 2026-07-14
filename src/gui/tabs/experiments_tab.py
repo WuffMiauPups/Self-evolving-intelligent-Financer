@@ -64,7 +64,6 @@ _EXPERIMENT_GROUPS = {
     ],
     "Memory": [
         ("memory_off", "Memory OFF"),
-        ("fusion_off", "Fusion OFF (legacy no-op preset)"),
         ("no_online_memory", "No online memory updates"),
     ],
     "Risk variants": [
@@ -324,7 +323,7 @@ class ExperimentsTab(QWidget):
             cb.setChecked(False)
 
     def _select_core(self) -> None:
-        core = {"full_model", "brain_only", "brain_no_flip", "memory_off", "fusion_off"}
+        core = {"full_model", "brain_only", "brain_no_flip", "memory_off"}
         for name, cb in self._checkboxes.items():
             cb.setChecked(name in core)
 

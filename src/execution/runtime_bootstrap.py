@@ -572,8 +572,7 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
                 logger.info("pending_observations_loaded", count=restored, path=effective_memory_config.pending_store_path)
         # Post-Great-Simplification: the minimal bank has no
         # organization layer (no prototypes, no ESOM map, no dynamic
-        # units), so there is nothing for a background refresher to
-        # do. ``async_memory_refresh`` is now a no-op even when True.
+        # units), so there is no background refresher.
         # Platt calibrator: resolve the artifact next to the loaded
         # checkpoint and verify it was fitted for that checkpoint
         # (fingerprint binding). Mismatch degrades to the uncalibrated

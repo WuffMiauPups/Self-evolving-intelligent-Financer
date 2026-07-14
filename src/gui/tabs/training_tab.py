@@ -252,50 +252,9 @@ class TrainingTab(QWidget):
 
         root.addWidget(arch_box)
 
-        # ─ Memory bank options (only matter when --save-memory is on) ─
-        mem_box = QGroupBox("Memory Bank Options (used when saving memory)")
-        mem_grid = QGridLayout(mem_box)
-        mem_grid.setHorizontalSpacing(10)
-        mem_grid.setVerticalSpacing(6)
-
-        self.chk_mem_ran_merge = QCheckBox("RAN merge (online learning)")
-        self.chk_mem_ran_merge.setToolTip("Blend similar items into prototypes during unit building")
-        mem_grid.addWidget(self.chk_mem_ran_merge, 0, 0)
-
-        self.chk_mem_auto_tune = QCheckBox("Auto-tune temperature (LOO)")
-        self.chk_mem_auto_tune.setToolTip("Find optimal retrieval temperature via leave-one-out CV")
-        mem_grid.addWidget(self.chk_mem_auto_tune, 0, 1)
-
-        self.chk_mem_esom_labels = QCheckBox("ESOM regime labels")
-        self.chk_mem_esom_labels.setToolTip(
-            "Legacy toggle — ESOM regime labeling was removed with the ESOM map; "
-            "this flag only writes an inert config field."
-        )
-        mem_grid.addWidget(self.chk_mem_esom_labels, 0, 2)
-
-        self.chk_mem_deep_proj = QCheckBox("Deep projections (W_Q/W_K/W_V)")
-        self.chk_mem_deep_proj.setToolTip(
-            "Legacy toggle — Hopfield retrieval (and its learnable projections) "
-            "was removed; this flag only writes an inert config field."
-        )
-        mem_grid.addWidget(self.chk_mem_deep_proj, 1, 0)
-
-        self.chk_mem_value_decay = QCheckBox("Value-aware decay")
-        self.chk_mem_value_decay.setToolTip("High-ROI patterns survive longer in memory")
-        mem_grid.addWidget(self.chk_mem_value_decay, 1, 1)
-
-        root.addWidget(mem_box)
-
-        # Wire: disable memory options when "Save memory bank" is unchecked.
-        self._mem_widgets = [
-            self.chk_mem_ran_merge,
-            self.chk_mem_auto_tune,
-            self.chk_mem_esom_labels,
-            self.chk_mem_deep_proj,
-            self.chk_mem_value_decay,
-        ]
-        self.chk_save_memory.toggled.connect(self._on_save_memory_toggled)
-        self._on_save_memory_toggled(self.chk_save_memory.isChecked())
+        # (The old "Memory Bank Options" group was removed: its toggles
+        # round-tripped MemoryConfig fields that were deleted with the
+        # Hopfield/ESOM machinery in the Great Simplification.)
 
         # ─ Training status cards ─
         status_box = QGroupBox("Training Status")
@@ -416,10 +375,6 @@ class TrainingTab(QWidget):
         if path:
             self.output_field.setText(path)
 
-    def _on_save_memory_toggled(self, checked: bool) -> None:
-        for w in self._mem_widgets:
-            w.setEnabled(checked)
-
     # ------------------------------------------------------------------
     def _on_start(self) -> None:
         if self.svc.is_running():
@@ -447,11 +402,6 @@ class TrainingTab(QWidget):
                 confidence_gating_enabled=self.chk_confidence_gating.isChecked(),
                 soma_weighting_enabled=self.chk_soma_weighting.isChecked(),
                 decouple_confidence=self.chk_decouple_conf.isChecked(),
-                ran_merge=self.chk_mem_ran_merge.isChecked(),
-                auto_tune_temperature=self.chk_mem_auto_tune.isChecked(),
-                esom_regime_labeling=self.chk_mem_esom_labels.isChecked(),
-                deep_projections=self.chk_mem_deep_proj.isChecked(),
-                value_aware_decay=self.chk_mem_value_decay.isChecked(),
             )
         except ServiceError as exc:
             QMessageBox.critical(self, "Failed to start training", str(exc))
@@ -582,18 +532,8 @@ class TrainingTab(QWidget):
             self.chk_soma_weighting,
             self.chk_decouple_conf,
             self.chk_risk_heads,
-            self.chk_mem_ran_merge,
-            self.chk_mem_auto_tune,
-            self.chk_mem_esom_labels,
-            self.chk_mem_deep_proj,
-            self.chk_mem_value_decay,
         ):
             w.setEnabled(not running)
-
-        # Memory bank options only matter when save_memory is checked.
-        if not running and not self.chk_save_memory.isChecked():
-            for w in self._mem_widgets:
-                w.setEnabled(False)
 
         # Ablation controls: disable during any training run.
         ablation_active = self._ablation_poll is not None and self._ablation_poll.isActive()

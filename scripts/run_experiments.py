@@ -65,7 +65,6 @@ ALL_EXPERIMENTS = [
     "brain_only",
     "brain_no_flip",
     "memory_off",
-    "fusion_off",
     "no_regime_encoder",
     "no_temporal_cnn",
     "no_latent_memory",
