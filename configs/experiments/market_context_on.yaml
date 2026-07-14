@@ -1,0 +1,7 @@
+# ⟲3 experiment overlay: train with cross-sectional market context (P3.1).
+# Contract-changing (feature_dim 44->52): the resulting checkpoint only loads
+# under a market_context_enabled pipeline. Promote deliberately, never by
+# default — flip features.market_context_enabled in default.yaml ONLY when a
+# checkpoint trained this way is promoted to canonical.
+features:
+  market_context_enabled: true

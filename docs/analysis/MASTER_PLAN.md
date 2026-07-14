@@ -18,6 +18,7 @@
 **Test suite:** 702 passed / 1 skipped (PySide6 not installed) as of commit `dd1b8d8`. Baseline before this effort: 374.
 
 **PHASE 1 CODE-COMPLETE (2026-07-10).** All of §4.1–§4.7 has landed and the full suite is green. The only open items are operational, not code: the ⟲1 retrain gate (§3 runbook — needs Alpaca credentials + a training run) and the unattended paper-trading week from Phase 0. Phase 2 entry stays gated on the ⟲1 SCORECARD.md incumbent row.
+*Correction (2026-07-14 audit): this banner overclaimed — parts of §4.6 (4/5), §4.7 (trainer hygiene), and several §4.1/§4.4/§4.5 verify criteria had not actually landed. All were fixed 2026-07-14; the itemized truth is in §4.9.*
 
 | ID | Scope | Status | Commit |
 |---|---|---|---|
@@ -34,7 +35,8 @@
 | 1C | Evaluation honesty: OOS enforcement, next-open±half-spread fills, CVaR95, truthful --compare, benchmark protocol + SCORECARD.md | ✅ done | `b3ff151`, `02c3151` (§4.4) |
 | 1D | Self-evolution loop: outcome ledger + decision events (`1639159`, `cf45cfa`), retrain trigger, transactional scorecard-gated promotion, KD/L2 anchors, backward-transfer floor | ✅ done | `e764010` |
 | 1G | Runtime/docs hygiene + §4.6 follow-ups: graceful shutdown, session-id nonce, bar_adjustment threading, webhook off hot path, caching-engine parity, README/cheatsheet truth pass | ✅ done | `dd1b8d8` |
-| ⟲ #1 | First honest retrain | ✅ **run 2026-07-13** — adjusted refetch clean (1.13M bars, no split artifacts); candidate `d748f28c3695` trained (best epoch 4, val BA 0.4435), normalization + split ranges + Platt sidecar verified in meta; OOS benchmark row in SCORECARD.md (BA 0.3642, excess vs buy&hold −3.96%); **promotion refused by the gate** (honest: no alpha yet), candidate staged at `checkpoints/20260713_185353/`. Gate defect found & filed: incumbent benchmarked on mismatched/in-sample window when meta lacks split ranges. |
+| ⟲ #1 | First honest retrain | ✅ **run 2026-07-13** — adjusted refetch clean (1.13M bars, no split artifacts); candidate `d748f28c3695` trained (best epoch 4, val BA 0.4435), normalization + split ranges + Platt sidecar verified in meta; OOS benchmark row in SCORECARD.md (BA 0.3642, excess vs buy&hold −3.96%); **promotion refused by the gate** (honest: no alpha yet), candidate staged at `checkpoints/20260713_185353/`. Gate defect found & filed: incumbent benchmarked on mismatched/in-sample window when meta lacks split ranges. **Then FORCE-promoted** (user-approved ⟲1 bootstrap — refusal reasons were "no alpha vs buy-and-hold" plus an invalid delta against a pre-C2 incumbent with no split ranges): `d748f28c` **is the current canonical brain** (registry status `active`). Bookkeeping caveats from the 2026-07-14 audit: the force-promote was re-run over an already-promoted brain, so `brain.pt.bak` holds `d748f28c` itself (the pre-⟲1 pre-C2 incumbent was NOT preserved) and the registry entry's `parent_fingerprint` is self-referential. |
+| 🔍 audit | Phases 0–3.1 verified vs this plan | ✅ **2026-07-14** — five-agent audit read every "done" claim against code + test bodies. Safety-critical claims all held (risk invariants, C2 parity, embargo, scorecard, Phase 2 gates/artifacts). Overclaims found and **fixed same day** (commits `e3b0c98`..`59dfb77`, suite 879→921): see §4.9. |
 
 **Operational validation still owed from Phase 0:** one unattended week of paper trading (buffers hold one bar per period, equity tracks broker, forced outage degrades and recovers, daily-loss trips on a simulated loss). Nothing blocks starting it now.
 
@@ -193,6 +195,25 @@ Phase 2+ levers (memory prior, market-context features, OOD gating) build on thi
 
 Fix: benchmark BOTH checkpoints on the intersection window — bars after `max(candidate_training_end, incumbent_training_end)`; if the incumbent has no `training_split_ranges`, either use the candidate's window for both or mark the incumbent row untrusted and skip the delta gates (absolute gates like `excess_vs_buy_hold` stay). Related code: `src/training/checkpoint_promotion.py:evaluate_promotion`, `src/evaluation/benchmark.py:run_benchmark`.
 **→ verify:** regression test in `tests/test_close_the_loop.py` with a missing-split-ranges incumbent: both benchmark rows share the same window (equal buy-hold fill counts) or delta gates are skipped with a loud log; the 2026-07-13 scenario reproduced under the fix yields a fair comparison.
+
+### 4.9 Audit gap-fix wave — ✅ **done 2026-07-14** (commits `e3b0c98`, `a6d86d5`, `8dcb56e`, `59dfb77`)
+
+The 2026-07-14 audit found the "Phase 1 code-complete" banner overclaimed several items. All fixed the same day, each with its regression test:
+
+1. **§4.7 trainer hygiene** (was largely absent): val/test epochs now run under `torch.set_grad_enabled(training)`; `encode_batch` forces eval-mode and restores caller state; training DataLoader drops size-1 remainder batches (`train_drop_last`, smoke datasets exempt); `seed_everything(7)` replaced by config-driven `training.seed`; collate `nan_to_num` counts surfaced (`count_nonfinite_columns`). → `tests/test_trainer_hygiene.py`.
+2. **§4.6.5 defaults alignment** (was never done — 38 divergent fields): Python defaults aligned to `default.yaml`; 8 deliberate divergences documented with reasons and pinned by `tests/test_defaults_alignment.py` (notably `model.decoupled_heads=False` stays load-bearing for pre-Phase-2 checkpoint reconstruction).
+3. **§4.6.4** (was detect-and-warn): `evaluate_checkpoint` now INJECTS the checkpoint's stored normalization stats into the bundle build (`normalization_override` threaded through); pre-C2 checkpoints keep the warning fallback. → `tests/test_stats_injection.py`.
+4. **§4.4.2 cost parity** (verify was missing; fields were only comment-linked): `training.transaction_cost_bps` is now BY CONTRACT `2·(backtest.fee_bps + backtest.slippage_bps)` = 6.0 (was ≈5.0); EV-gate risk costs asserted equal to backtest costs. Label-affecting: sample caches re-fingerprint on the next training run.
+5. **§4.4.4 EV-gate fail-fast** (silent zero-trade sessions were still possible): `risk.ev_gate_requires_signals` (default true) makes BrainPolicy REFUSE at construction to wrap a risk-head-less model; explicit bypass for experiments. → `tests/test_proposal_parity.py`.
+6. **§4.1.4 proposal parity test** (promised, never written): backtest-vs-runtime construction paths produce identical proposals for the same checkpoint + snapshot (`build_runtime_brain_policy` extracted). Real parity hole found and fixed while writing it: the factory never passed `default_target_fraction`.
+7. **§4.4.5 metric fixtures** (missing): hand-computed Sharpe (`√18900/30`) and Calmar (1.2) goldens; engine-floor regression (bar loop starts at `first_valid_index`).
+8. **§4.4.7 --compare**: dead fusion/veto print block deleted; no-fusion-rows + factory-only-scenarios pinned by tests.
+9. **§4.4.3 walk-forward** (weakest audit finding): in-sample folds now hard-refused at the RUNNER level (`_refuse_in_sample_folds`); `reset_model_per_fold` DELETED (defined-but-dead; per-fold retraining stays [L] future work); `compare_walk_forward()` = the paired candidate-vs-incumbent sign test on identical folds.
+10. **§4.5.3 observation writer** (trigger had no data source): every executed fill (paper + broker) appends a `DecisionObservation` to `execution.observation_stream_path` with net PnL + submit-time clamp flag. Backtests deliberately do not write.
+11. **§4.5.7 slice producer** (floor gate ran empty): `benchmark_backward_transfer_slices()` cuts the shared OOS window into `evaluation.promotion.backward_transfer_slices` chronological regime slices and feeds `evaluate_promotion(slice_metrics=…)` in the canonical gate. Truly pre-training "frozen historical" slices stay future work until incremental fine-tuning exists (full-history retraining makes them unhonest today).
+12. **§4.5.6 weight drift** (never logged): `compute_weight_drift()` per-module cosine vs the anchor, logged as `anchor_weight_drift` on every anchored retrain. **Rehearsal quotas deliberately NOT built:** the canonical retrain path trains on the full configured history, so every regime is structurally rehearsed; quota machinery enters with incremental fine-tuning, not before.
+
+Known limitations documented (not fixed, by choice): the paper/live runtime resolves checkpoints via `config.model.checkpoint_path` only (registry resolution is GUI-only), and the fills ledger JSONL is not rehydrated at boot (durability is file-level).
 
 ---
 
