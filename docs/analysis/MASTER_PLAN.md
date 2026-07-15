@@ -297,15 +297,24 @@ Removed or parked — each either served no link in the accuracy chain or duplic
 
 ---
 
-## 9. Immediate next actions (strict order)
+## 9. Immediate next actions (strict order) — refreshed 2026-07-15
 
-1. §4.1 labels & training accuracy (1–4) — *the label fix is the accuracy foundation everything retrains on.*
-2. §4.2 calibration (1–2).
-3. §4.4.1/2/4 + §2.1 scorecard — *enough evaluation honesty to measure the retrain.*
-4. **⟲ Retrain gate #1** (§3 runbook) → incumbent scorecard row.
-5. Start the unattended paper week in parallel with:
-6. §4.3 parity insurance, §4.4 remainder (walk-forward, metric math), §4.6 follow-ups.
-7. §4.5 close the loop.
-8. §4.7 hygiene/docs, then Phase 2 entry.
+*(The previous v2 list — labels → calibration → scorecard → ⟲1 → loop → hygiene — completed 2026-07-10 → 2026-07-14; history in §1 and §4.9. Ordering principle unchanged: measurement before optimization, operations before experiments.)*
+
+1. **Read the full-data noise floor** (3-seed canonical sweep launched 2026-07-15 ~15:45 UTC, ~5h). Everything below forks on it:
+   - **Floor small (< ~0.5pt val BA):** single full-path runs are interpretable → run the §9.4 experiments one seed each.
+   - **Floor large (≳ 1pt, like fast mode's 5.8pt):** every accuracy claim needs the 3-seed protocol (3× cost) — batch hypotheses, and promote **seed-averaging/ensembling itself** to the front of the experiment queue: when run-to-run variance dwarfs candidate effects, variance reduction *is* the cheapest accuracy lever available.
+
+2. **The unattended paper week** (Phase 0 sign-off, still owed). Day one (2026-07-15) already paid for itself: four defects found and fixed same day (fractional shorts, staleness < bar period, churn deadband, submit-failure map leak — commits `2b6a44a`, `96e64d7`). For the real week: **launch `scripts/run_paper.py` OUTSIDE the assistant session** (plain terminal / Task Scheduler) so it survives session restarts. Daily review checklist: fills vs deadband-reject ratio, reason-code distribution (fail if `negative_ev`/`stale_data` dominate — VOO staleness is expected on the IEX feed and is the guard working), `runs/observations.jsonl` growth, equity tracks broker. End of week: forced-outage drill + simulated daily-loss trip (the Phase 0 checklist), then **Phase 0 CLOSED**.
+
+3. **Cost-bound work before more training.** The perturbation harness already established: the signal is real but below costs. Two no-retrain tasks, in order:
+   1. **Horizon-vs-cost audit** — from cached bars, the distribution of |H-bar forward returns| vs the 6 bps round trip for H ∈ {1, 5, 15, 30, 60}: answers whether *any* configured horizon clears costs often enough to matter, or whether the 5-min timeframe itself is the ceiling. One script, one table, no training. If the timeframe is the ceiling, that decision dominates every training experiment below.
+   2. **Calibration refit from realized outcomes** (pulled forward from the §7 Phase 3 menu — it is observation-driven, not training-driven). Once the paper week's observation stream has a few hundred records, refit Platt on realized trade outcomes and verify live confidence stops pinning (today's live range: 0.488–0.515 — the EV gate can barely discriminate). Confidence → EV gate → trade selectivity is the main no-retrain cost lever.
+
+4. **Accuracy experiments, protocol per (1), claims per the §2.0 standing rule.** Order: curriculum (`training.curriculum_enabled`) → anchored negatives (needs the anchored store populated by triggered retrains) → market-context re-test (the ⟲3 candidate already exists; re-judge under the floor-appropriate protocol instead of retraining blind).
+
+5. **Phase 3 remainder stays gated** (familiarity/OOD gate, regime snapshots, Optuna) on a scorecard-verified win under the §2.0 rule. When Optuna enters, it enters *with* the multi-seed machinery — a hyperparameter search without seed control is exactly how uninterpretable claims happen.
+
+6. **Live-mode discussion happens only after** the paper week is green AND an incumbent beats buy-and-hold OOS under the §2.0 rule. Standing rule 1 (paper-first, double interlock) unchanged.
 
 *Traceability: v1 of this plan (git `00523e7`) holds the original full enumeration; CODEBASE_REVIEW.md §5/§7 items remain covered by the verify-as-you-touch rule; nothing was dropped silently — every removal is in §8.*
