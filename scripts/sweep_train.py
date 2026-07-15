@@ -99,7 +99,14 @@ def apply_overrides(config: AppConfig, overrides: dict[str, object]) -> AppConfi
     config = deepcopy(config)
     training = config.training
     for key, value in overrides.items():
-        if key == "label_epsilon":
+        if key == "seed":
+            # Sweeping seed with every other axis fixed measures the
+            # training noise floor: the spread that any real improvement
+            # must clear. Only meaningful since the seed became
+            # config-driven (§4.7) — it was hardcoded to 7 before, which
+            # silently made every "different" sweep run identical.
+            training.seed = int(value)
+        elif key == "label_epsilon":
             training.label_epsilon = float(value)
         elif key == "classification_loss":
             training.classification_loss = str(value)

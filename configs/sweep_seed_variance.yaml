@@ -1,0 +1,9 @@
+# Noise-floor sweep: identical config, three training seeds.
+#
+# Why: ⟲2 scored +0.44pt balanced accuracy and ⟲3 −0.31pt against the
+# incumbent, and we have no idea whether either delta is signal. Until
+# 2026-07-14 the training seed was hardcoded (seed_everything(7)), so
+# seed variance had never been measured — every "different" run trained
+# identically. The spread here is the bar any future claim must clear.
+sweep:
+  seed: [7, 13, 29]

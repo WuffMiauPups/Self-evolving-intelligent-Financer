@@ -14,9 +14,10 @@ tests make that contract permanent:
    were deleted).
 3. A typo'd key must raise at load, not validate silently.
 
-Note: ``configs/sweep_state_only.yaml`` is NOT an AppConfig file — it is a
-sweep-grid spec consumed by ``scripts/sweep_train.py`` (top-level ``preset``
-/ ``sweep`` keys) — so it is excluded from the load_config sweep.
+Note: ``configs/sweep_*.yaml`` files are NOT AppConfig layers — they are
+sweep-grid specs consumed by ``scripts/sweep_train.py`` (top-level
+``preset`` / ``sweep`` keys) — so they are excluded from the load_config
+sweep (see ``NOT_APP_CONFIG``).
 """
 from __future__ import annotations
 
@@ -39,6 +40,7 @@ DEFAULT_CONFIG = CONFIGS_DIR / "default.yaml"
 # YAML files under configs/ that are not AppConfig layers.
 NOT_APP_CONFIG = {
     "sweep_state_only.yaml",  # sweep-grid spec for scripts/sweep_train.py
+    "sweep_seed_variance.yaml",  # sweep-grid spec (noise-floor measurement)
 }
 
 ALL_CONFIG_FILES = sorted(

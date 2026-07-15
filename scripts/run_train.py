@@ -492,6 +492,16 @@ def main() -> int:
         default=None,
         help="Override training.epochs.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Override training.seed (RNG seed for init/shuffling). Vary it "
+            "across otherwise-identical runs to measure the noise floor that "
+            "a real improvement must clear."
+        ),
+    )
     # --- Fast experiment mode ---
     parser.add_argument(
         "--fast",
@@ -733,6 +743,8 @@ def main() -> int:
         config.training.loss_weights["latent"] = args.loss_weight_latent
     if args.epochs is not None:
         config.training.epochs = args.epochs
+    if args.seed is not None:
+        config.training.seed = args.seed
     # --- Fast experiment mode ---
     if args.fast:
         config.training.fast_mode.enabled = True

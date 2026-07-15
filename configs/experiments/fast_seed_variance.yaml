@@ -1,0 +1,7 @@
+# Fast-mode overlay for the seed-variance noise-floor sweep.
+# Every knob except training.seed is held fixed, so the spread across runs
+# IS the noise floor. fast_mode.sample_seed stays at its default (42), so
+# all runs see the IDENTICAL subsample — only init/shuffling varies.
+training:
+  fast_mode:
+    enabled: true
