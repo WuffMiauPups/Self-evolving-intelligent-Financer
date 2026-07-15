@@ -27,7 +27,14 @@ model:
 
 risk:
   kill_switch: false
-  stale_data_sec: 180
+  # MUST exceed the bar period (5Min = 300s): a bar's timestamp is its
+  # bucket START, so it ages to 300s by the time the bucket closes — that
+  # is normal data, not stale data. At 180s the 2026-07-15 paper run
+  # blocked 56% of all decisions with stale_data (the MASTER_PLAN §3 ⟲1
+  # runbook names stale_data domination as a FAILING verify criterion).
+  # 420s = one full bar + 120s slack for late delivery; a genuinely dead
+  # feed (> 7 min) still halts trading.
+  stale_data_sec: 420
   max_spread_bps: 200.0
   # Trade gating is EV-based (risk_manager computes
   # confidence * expected_gain_bps - (1-confidence) * expected_loss_bps - cost_bps).

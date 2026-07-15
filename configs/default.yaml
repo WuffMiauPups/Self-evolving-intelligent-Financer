@@ -194,7 +194,12 @@ risk:
   max_rolling_drawdown: -0.10    # -10% rolling drawdown limit
   rolling_drawdown_window: 100
   cooldown_sec: 60
-  stale_data_sec: 30
+  # MUST exceed the bar period (runtime.timeframe 5Min = 300s): a bar's
+  # timestamp is its bucket START, so it ages to a full period by bucket
+  # close — normal data, not stale. The old 30s blocked ~90% of live
+  # decisions with stale_data (found in the 2026-07-15 paper run; the
+  # AppConfig validator now refuses any value below the bar period).
+  stale_data_sec: 420
   max_spread_bps: 100.0
   duplicate_order_window_sec: 15
   # min_trade_confidence / min_trade_fraction removed (Great Simplification

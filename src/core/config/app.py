@@ -74,6 +74,36 @@ class AppConfig(BaseModel):
             self.memory.path_label_rules = dict(self.training.path_label_rules)
         return self
 
+    @model_validator(mode="after")
+    def validate_staleness_covers_bar(self) -> "AppConfig":
+        """``risk.stale_data_sec`` must exceed one bar period.
+
+        A bar's timestamp is its bucket START, so by the time the bucket
+        closes the newest bar is a full period old — that is normal data.
+        A threshold below the period silently blocks the back of every bar
+        on stale_data: the 2026-07-15 paper run lost 56% of its decisions
+        that way at 180s on 5Min bars (and default.yaml's 30s would have
+        lost ~90%). Fail loudly at load instead (workstream 1F contract).
+        """
+        # Local import: src.core.config must not import src.data at module
+        # scope (src.data.schemas imports back into core).
+        from src.data.bar_aggregator import timeframe_delta
+
+        try:
+            bar_seconds = int(timeframe_delta(self.runtime.timeframe).total_seconds())
+        except ValueError:
+            return self  # timeframe itself is validated elsewhere
+        if self.risk.stale_data_sec <= bar_seconds:
+            raise ConfigurationError(
+                f"risk.stale_data_sec={self.risk.stale_data_sec} must exceed one "
+                f"runtime.timeframe={self.runtime.timeframe} bar ({bar_seconds}s): a bar is "
+                f"already {bar_seconds}s old when its bucket closes, so the runtime would "
+                f"reject roughly "
+                f"{max(0, round(100 * (1 - self.risk.stale_data_sec / bar_seconds)))}% of "
+                f"decisions as stale_data. Use bar period + slack (e.g. {bar_seconds + 120})."
+            )
+        return self
+
 
 def load_config(*paths: str | Path) -> AppConfig:
     load_dotenv()

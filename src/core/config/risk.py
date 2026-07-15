@@ -17,7 +17,9 @@ class RiskConfig(BaseModel):
     max_position_per_symbol: int = 3
     max_concurrent_positions: int = 15
     cooldown_sec: int = 60
-    stale_data_sec: int = 30
+    # Must exceed the bar period; see AppConfig.validate_staleness_covers_bar.
+    # 420 = one 5Min bar + 120s slack for late delivery.
+    stale_data_sec: int = 420
     max_spread_bps: float = 100.0
     duplicate_order_window_sec: int = 15
     # Trading costs (physics, not decisions): fed into the EV gate so the
@@ -30,6 +32,15 @@ class RiskConfig(BaseModel):
     # such a model; flip to false only for explicit experiments that
     # accept an inert EV gate.
     ev_gate_requires_signals: bool = True
+    # Brokers cannot short fractional shares (Alpaca rejects with
+    # 42210000 "fractional orders cannot be sold short"). Found in the
+    # 2026-07-15 paper run: sub-share short targets were submitted, hard-
+    # rejected, and resubmitted every duplicate_order_window forever.
+    # False (default = Alpaca reality) quantizes short targets to whole
+    # shares in BOTH the backtest and the live path, so simulated shorts
+    # stay executable and scorecard rows do not bank fills the broker
+    # would refuse. Set True only for a venue that supports them.
+    fractional_shorts_supported: bool = False
     kill_switch: bool = False
     allowed_sessions: list[str] = Field(default_factory=list)
     max_aggregate_notional: float = 50000.0

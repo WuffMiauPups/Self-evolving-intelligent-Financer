@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import OrderedDict
 from datetime import datetime, timedelta
 
@@ -9,6 +10,15 @@ from src.execution.reason_codes import ReasonCode
 from src.risk.constraints import RiskDecision, TradeProposal
 from src.risk.portfolio_state import PortfolioState
 from src.risk.position_sizer import PositionSizer
+
+
+def _is_whole_shares(quantity: float) -> bool:
+    """Whether an order quantity is a whole number of shares.
+
+    Tolerance absorbs float noise from fraction*equity/price sizing (a
+    "50.0" position can arrive as 50.000000001).
+    """
+    return abs(quantity - round(quantity)) < 1.0e-9
 
 
 def adaptive_budget_multiplier(
@@ -70,6 +80,32 @@ class RiskManager:
             max_notional=self.config.max_position_notional,
         )
         target_qty = float(proposal.action) * target_qty_abs
+        # --- Whole-share short constraint (broker physics, not preference) ---
+        # Alpaca cannot short fractional shares (42210000 "fractional orders
+        # cannot be sold short"). Two unexecutable shapes must be prevented
+        # here — in the SHARED risk path, so the backtest never books a fill
+        # the live broker would reject:
+        #   1. a sub-share short target (|target| < 1) is impossible at all;
+        #   2. crossing from a fractional long straight into a short would
+        #      submit one fractional sell-short order — so flatten first and
+        #      let a later tick open the short from flat, whole-share.
+        short_block: str | None = None
+        if target_qty < 0.0 and not self.config.fractional_shorts_supported:
+            whole_short = math.floor(abs(target_qty))
+            if whole_short < 1.0:
+                # Sub-share short: unexecutable at any size.
+                target_qty = 0.0
+                short_block = "fractional_short_unsupported"
+            else:
+                target_qty = -whole_short
+                # The ORDER (not just the target) must be whole when it
+                # crosses into a short: selling 2.4 to go from +0.4 to -2 is
+                # still a fractional sell-short. A whole-share long -> short
+                # flip (e.g. +50 -> -20 = sell 70) is fine and must stay a
+                # flip, so that the halt gates below can judge it as one.
+                if not _is_whole_shares(abs(target_qty - current_qty)):
+                    target_qty = 0.0
+                    short_block = "flatten_before_short"
         delta_qty = target_qty - current_qty
         side = "buy" if delta_qty > 0 else "sell"
         order_qty = abs(delta_qty)
@@ -201,6 +237,13 @@ class RiskManager:
 
         if order_qty < 1.0e-6:
             reasons.append("no_position_change")
+            # Name the cause when nothing is left to do BECAUSE the short was
+            # impossible — otherwise the decision reads as a bare
+            # "no_position_change" and the operator cannot tell a satisfied
+            # target from an unexecutable one. (A flatten-before-short still
+            # has a real order to place, so it is tagged on approval below.)
+            if short_block is not None:
+                reasons.append(short_block)
 
         if reasons:
             return RiskDecision(
@@ -215,6 +258,10 @@ class RiskManager:
         self._recent_orders[recent_key] = now
         self._recent_orders[(proposal.symbol, "_any")] = now
         approval_tags: list[str] = []
+        if short_block is not None:
+            # The order that IS being placed (e.g. flattening a fractional
+            # long so a whole-share short can open from flat next tick).
+            approval_tags.append(short_block)
         if resized:
             approval_tags.append("resized_to_cap")
         if budget_multiplier < 1.0:
