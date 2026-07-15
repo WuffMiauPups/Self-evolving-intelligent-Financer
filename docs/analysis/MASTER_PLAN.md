@@ -51,6 +51,23 @@ labels (what the model learns)  →  training (how it learns)  →  calibration 
       →  measurement (whether improvement is real)  →  the loop (whether improvement compounds)
 ```
 
+### 2.0 The noise floor — measured 2026-07-15, and it dwarfs every claim so far
+
+**Three fast-mode trainings, identical but for `training.seed`, scored val balanced accuracy 0.3865 / 0.4444 / 0.4132 — a 5.8pt spread. Test split: 8.1pt. Long recall swung 0.18 → 0.48.** Reproduce: `python scripts/sweep_train.py --real-data --sweep-config configs/sweep_seed_variance.yaml --config configs/default.yaml --config configs/training.yaml --config configs/experiments/fast_seed_variance.yaml --rank-by val_report.balanced_accuracy`.
+
+Every accuracy claim this plan has recorded is smaller than that spread:
+
+| Claim | Delta | vs floor |
+|---|---|---|
+| ⟲2 "classification improved, non-degradation verified" (§6.1) | +0.44pt | ~13× below |
+| ⟲3 "market context is NEGATIVE" (§3) | −0.31pt | ~19× below |
+
+Both conclusions are **withdrawn as unsupported** — not reversed (we cannot claim market context helps either), just not evidence. The measurement could not even be taken until 2026-07-14, because `seed_everything(7)` was hardcoded: every "different" run trained identically (§4.9 item 1).
+
+Caveats, stated so this number is not over-claimed in turn: the sweep is fast mode (6 months, 50k samples, 5 symbols) and full-data runs should be quieter; n=3; val-BA is not the OOS scorecard surface. **The floor on the full-data path is unmeasured** — measuring it is the entry cost of any future accuracy claim.
+
+**Standing rule (amends §2.1):** an improvement claim requires a delta that clears the noise floor **on the same data path**, demonstrated across seeds — not one row beating one row. A single-seed scorecard row is a sample, not a result.
+
 ### 2.1 The scorecard — accuracy is a number, not a feeling
 
 **Task SC — build the benchmark protocol** *(part of 1C, task 4.4.6; do it first within 1C)*. A single command (`scripts/run_benchmark.py` or a `run_backtest.py --benchmark` mode) that:
@@ -96,7 +113,7 @@ Phase 2+ levers (memory prior, market-context features, OOD gating) build on thi
 |---|---|---|
 | ⟲ 1 | §4.1 + §4.2 | ✅ run 2026-07-13 (see §1 ledger: gate-refused, then user force-promoted `d748f28c` as bootstrap incumbent) |
 | ⟲ 2 | model-head disentanglement (§6, Phase 2) | ✅ run 2026-07-14 (§6.1: classification +0.44pt, trading worse → refused; `4575582c` staged) |
-| ⟲ 3 | FeatureContract bump for market-context features (§7, Phase 3) | ✅ **run 2026-07-14, NEGATIVE** — isolated run (`checkpoints/retrain3_market_context/`, contract 44→52, honest 6bps labels, config seed, val BA 0.4418). Same-window OOS vs incumbent (cutoff 2026-03-18): **BA 0.3617 vs 0.3648 (−0.31pt), expectancy −0.17 vs −0.10, excess vs buy&hold −6.2% vs −5.5%** → NOT promoted; `features.market_context_enabled` stays **false**; fingerprint `9b3ff04c6a7c` (re-stamped — this run exposed the encoder-fingerprint collision, fixed same day: contract + weights digest now enter the hash). Cross-sectional market context as trained does not add OOS accuracy; next levers: curriculum/anchored-negative experiment knobs (§6.5), or richer context features, before burning another full retrain. |
+| ⟲ 3 | FeatureContract bump for market-context features (§7, Phase 3) | ✅ **run 2026-07-14 — INCONCLUSIVE (not "negative")** — isolated run (`checkpoints/retrain3_market_context/`, contract 44→52, honest 6bps labels, val BA 0.4418). Same-window OOS vs incumbent (cutoff 2026-03-18): BA 0.3617 vs 0.3648 (−0.31pt), expectancy −0.17 vs −0.10, excess vs buy&hold −6.2% vs −5.5% → NOT promoted (correct: it did not clear the bar), `features.market_context_enabled` stays **false**. **But the −0.31pt is ~19× below the 5.8pt seed noise floor measured 2026-07-15 (§2.0), so "market context hurts" is withdrawn — this run is one sample of an unknown distribution.** Deciding market context needs a multi-seed comparison, not another single run. Fingerprint `9b3ff04c6a7c` (re-stamped — this run exposed the encoder-fingerprint collision, fixed same day). |
 
 ---
 
@@ -236,7 +253,7 @@ Known limitations documented (not fixed, by choice): the paper/live runtime reso
 
 *Entry criterion: SCORECARD.md has the ⟲1 incumbent row. Full task detail: v1 of this plan (git history) + RESEARCH_ROADMAP.md Phase 2. Summary, accuracy-first order:*
 
-1. **Model-head disentanglement** — ✅ **code done + ⟲2 run 2026-07-14** (commit 897b1fe; candidate `4575582c9cd9`). Same-window OOS vs incumbent: balanced accuracy 0.3677 vs 0.3633 (**+0.44pt, non-degradation verified**), sharpe −1.25 vs −3.49, val BA best 0.4466 vs 0.4435 — but excess vs buy&hold −5.2% and expectancy delta −0.09 → **gate refused, incumbent stays**. Candidate staged at `checkpoints/20260714_062943/`; scorecard row appended; bank rebuilt back to incumbent fingerprint. Takeaway: classification improved, trading didn't — sizing is now a fixed default fraction by design, so the P&L gap belongs to items 2 (memory damping) and 4 (measured risk / sizing).
+1. **Model-head disentanglement** — ✅ **code done + ⟲2 run 2026-07-14** (commit 897b1fe; candidate `4575582c9cd9`). Same-window OOS vs incumbent: balanced accuracy 0.3677 vs 0.3633 (+0.44pt — ~13× BELOW the 5.8pt seed noise floor measured 2026-07-15 (§2.0); the "non-degradation verified" claim is **withdrawn as unsupported**), sharpe −1.25 vs −3.49, val BA best 0.4466 vs 0.4435 — but excess vs buy&hold −5.2% and expectancy delta −0.09 → **gate refused, incumbent stays**. Candidate staged at `checkpoints/20260714_062943/`; scorecard row appended; bank rebuilt back to incumbent fingerprint. Takeaway: classification improved, trading didn't — sizing is now a fixed default fraction by design, so the P&L gap belongs to items 2 (memory damping) and 4 (measured risk / sizing).
 2. **Memory correctness then bounded influence** — ✅ **done 2026-07-14** (commits 7811872, e830092, 41daf93, a701cf4). Correctness: temporal cutoff enforced in retrieval (+ self-exclusion), O(N) extend, build provenance stamped, saves debounced off the hot path, pending queues bounded, unstamped-bank fallback removed. Influence: damping-only size multiplier ∈ [0.5, 1.0], off by default, every rail test-pinned. Credit gate: `scripts/run_memory_credit.py` (paired same-seed OOS folds). **First real credit run: NOT EARNED** (1/4 folds positive, mean ΔTotalReturn −1.3bps, p=0.94 — `runs/memory_credit.json`) → influence stays off, re-run after items 1/4 improve the brain/bank. Pruning: MemoryConfig 123→21 fields (allow-list pinned in hygiene tests), fusion/topology stubs + 14 zombie presets deleted, GUI dead toggles removed.
 3. **Strategy arbitration layer** — ✅ **done 2026-07-14** (commit dd4d198). StrategyArbiter: brain + momentum + mean-reversion registry; `strategy_id` threaded proposal → OrderIntent → FillRecord (broker path attributed via client_order_id map); per-strategy `budget_fractions` soft caps; PnL-EMA outcome-weighted allocation with a weight floor (throttled, never starved); memory delegation preserved. **OFF by default** (`arbitration.enabled`) — enable only after `run_backtest.py --use-arbitration` produces a scorecard row beating the brain-only incumbent.
 4. **Measured risk** — ✅ **done 2026-07-14** (commits 6ea2493, 3480fa9, 1464656). Perturbed-R² harness (`scripts/run_perturbation.py`), cap-sweep harness with knee selection (`scripts/run_cap_sweep.py`, plus a found bug: RiskConfig accepted ≤0 caps), outcome-adaptive drawdown budget (deterministic multiplier ∈ [budget_min_multiplier, 1.0], risk-reducing exempt, add-to-trim clamp, logged per decision, off by default). **First real measurements** (incumbent d748f28c, OOS window): perturbation curve HEALTHY — sharpe degrades monotonically −3.57 → −11.67 as signal → noise, so returns are signal-driven, no leakage, not structure-dominated (the model genuinely loses less than noise; the edge is real but below costs). Cap sweep FLAT 3k–48k — max_position_notional never binds; sizing is dominated by the model's small learned fractions, so cap tuning is not currently a lever (artifacts: `runs/perturbation_curve.json`, `runs/cap_sweep_max_position_notional.json`).

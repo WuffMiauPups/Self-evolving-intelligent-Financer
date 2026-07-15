@@ -5,6 +5,21 @@ after the checkpoint's train/val end, next-bar-open fills, real costs,
 vs tradeable baselines. "Accuracy improved" = a new row beats the
 incumbent on balanced accuracy AND net expectancy.
 
+**⚠ Read every delta below against the NOISE FLOOR (measured 2026-07-15).**
+Three fast-mode trainings identical except `training.seed` scored val
+balanced accuracy **0.3865 / 0.4444 / 0.4132 — a 5.8pt spread from the RNG
+alone** (test split: 8.1pt; long recall 0.18→0.48). The ⟲2 (+0.44pt) and
+⟲3 (−0.31pt) row deltas are an order of magnitude SMALLER than that, so
+neither is evidence of anything. Full-data runs should be quieter than
+fast mode, but the floor is unmeasured there — until it is, a single-seed
+row cannot support an "improved"/"regressed" claim. Compare multi-seed
+distributions, not single rows.
+
+**⚠ Rows dated ≤ 2026-07-15 bank unexecutable short fills.** They predate
+the whole-share short constraint (Alpaca cannot short fractional shares);
+sub-share shorts were simulated as filled but the live broker rejects them.
+Absolute returns on these rows are optimistic for short-heavy windows.
+
 Determinism (verified 2026-07-14 by byte-identical back-to-back runs):
 a row is deterministic over the tuple (checkpoint weights+meta, bar
 cache content, OOS cutoff TIMESTAMP, config, code version). Caveats:
