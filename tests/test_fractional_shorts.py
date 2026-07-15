@@ -131,6 +131,37 @@ def test_short_from_flat_after_flatten_is_whole_share() -> None:
     assert decision.target_position == pytest.approx(-2.0)
 
 
+def test_fractional_buy_crossing_short_to_long_covers_first() -> None:
+    """The live 2026-07-15 17:03 loop: short 3 NVDA, model wants long 3.933
+    -> a 6.933-share fractional buy crossing zero; Alpaca rejects fractional
+    side-flips (40310000) and the intent retried every duplicate window.
+    Must cover to flat (whole) instead; the long opens from flat later."""
+    manager = _manager()
+    portfolio = _with_position(_portfolio(), "QQQ", qty=-3.0, price=100.0)
+    decision = manager.evaluate(
+        _proposal(target_fraction=0.003933, action=1, price=100.0), portfolio, evaluation_time=T
+    )
+    assert decision.approved is True
+    assert decision.target_position == pytest.approx(0.0), "must cover to flat, not cross"
+    assert decision.side == "buy"
+    assert decision.quantity == pytest.approx(3.0)
+    assert "flatten_before_long" in decision.reasons
+
+
+def test_whole_share_short_to_long_flip_stays_a_flip() -> None:
+    """Whole-share side flips are broker-valid (only FRACTIONAL orders
+    cannot flip side): short 3 -> long 5 = one buy of 8.0."""
+    manager = _manager()
+    portfolio = _with_position(_portfolio(), "QQQ", qty=-3.0, price=100.0)
+    decision = manager.evaluate(
+        _proposal(target_fraction=0.005, action=1, price=100.0), portfolio, evaluation_time=T
+    )
+    assert decision.approved is True
+    assert decision.target_position == pytest.approx(5.0)
+    assert decision.quantity == pytest.approx(8.0)
+    assert "flatten_before_long" not in decision.reasons
+
+
 def test_fractional_long_targets_are_untouched() -> None:
     """Longs may be fractional — only shorts carry the constraint."""
     manager = _manager()

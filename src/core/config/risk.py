@@ -39,10 +39,12 @@ class RiskConfig(BaseModel):
     # such a model; flip to false only for explicit experiments that
     # accept an inert EV gate.
     ev_gate_requires_signals: bool = True
-    # Brokers cannot short fractional shares (Alpaca rejects with
-    # 42210000 "fractional orders cannot be sold short"). Found in the
-    # 2026-07-15 paper run: sub-share short targets were submitted, hard-
-    # rejected, and resubmitted every duplicate_order_window forever.
+    # Brokers cannot short fractional shares (Alpaca 42210000 "fractional
+    # orders cannot be sold short") NOR flip position side with a
+    # fractional order (Alpaca 40310000, observed on a 6.933-share buy
+    # against a 3-share short). Both found in the 2026-07-15 paper run:
+    # unexecutable orders were hard-rejected and resubmitted every
+    # duplicate_order_window forever.
     # False (default = Alpaca reality) quantizes short targets to whole
     # shares in BOTH the backtest and the live path, so simulated shorts
     # stay executable and scorecard rows do not bank fills the broker

@@ -106,6 +106,20 @@ class RiskManager:
                 if not _is_whole_shares(abs(target_qty - current_qty)):
                     target_qty = 0.0
                     short_block = "flatten_before_short"
+        elif (
+            target_qty > 1.0e-9
+            and current_qty < -1.0e-9
+            and not self.config.fractional_shorts_supported
+            and not _is_whole_shares(target_qty - current_qty)
+        ):
+            # Mirror image, observed live 2026-07-15 17:03: a FRACTIONAL buy
+            # crossing from short to long flips side in one fractional order —
+            # Alpaca rejects it (40310000 "insufficient qty available") and
+            # the unchanged intent then resubmitted every duplicate window.
+            # Cover to flat (whole, since shorts are whole); the fractional
+            # long opens from flat on a later tick.
+            target_qty = 0.0
+            short_block = "flatten_before_long"
         delta_qty = target_qty - current_qty
         side = "buy" if delta_qty > 0 else "sell"
         order_qty = abs(delta_qty)
