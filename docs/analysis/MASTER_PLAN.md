@@ -261,16 +261,57 @@ Known limitations documented (not fixed, by choice): the paper/live runtime reso
 
 **PHASE 2 CODE-COMPLETE 2026-07-14.** All five items landed (suite 864 passed). Influence features ship measured-and-gated: memory damping off (credit gate negative), arbitration off (needs a winning scorecard row), curriculum/anchored/adaptive-budget off (experiment knobs for ⟲3+). Phase 3 entry still requires scorecard-VERIFIED improvement rows from items 1–2 — the machinery exists; the wins don't yet.
 
-Each item: **→ verify** = a scorecard row (or paired-run delta) demonstrating non-degradation; memory influence additionally requires counterfactual-credit > 0 on OOS folds.
+Each item: **→ verify** = a scorecard row (or paired-run delta) demonstrating non-degradation; memory influence additionally requires counterfactual-credit > 0 on OOS folds. *(2026-07-15 amendment: any such delta must also clear the §2.0 noise floor under the floor-appropriate protocol.)*
+
+**Re-entry criteria for the gated-off influence features (2026-07-15):**
+- **Memory damping** (off; credit −1.3 bps, p=0.94): re-run `scripts/run_memory_credit.py` only after the next §2.0-verified brain improvement or a bank rebuilt from a materially better encoder — re-measuring against an unchanged brain re-measures the same thing.
+- **Arbitration** (off; measured −12.52% vs brain-only −0.88% OOS): the failure mode is known — equal initial weights let the momentum primitive (−25% standalone) burn money before the PnL-EMA throttles it. Re-test only WITH: primitive `budget_fractions` ≤ 0.1, a warm-up in which primitives influence allocation but not orders, and the same OOS window as the incumbent row. If that re-test still loses to brain-only, delete the primitives rather than tuning further (do-NOT-list ethos).
+- **Adaptive budget / curriculum / anchored negatives** (off): experiment knobs, enter through the §9.4 queue under the floor protocol; anchored negatives additionally need the store populated by ≥1 triggered retrain (producer shipped 2026-07-14, store currently empty).
 
 ---
 
-## 7. Phases 3–4 — research adoption (see RESEARCH_ROADMAP.md §4, phases 3–4)
+## 7. Phases 3–4 — research adoption, detailed (refreshed 2026-07-15; supersedes the thin menu)
 
-Kept as a gated menu; no detail duplicated here. Entry criteria:
+Task detail lives HERE now; RESEARCH_ROADMAP.md §4 keeps the research rationale and citations. The do-NOT-do list (ROADMAP §5) is binding on everything below. Gating: **§7.0 and §7.1 are UNGATED** (measurement and operations, not model research — they produce the evidence and safety the gated work needs). §7.2 items stay gated as marked. All accuracy claims are subject to the §2.0 noise-floor rule.
 
-- **Phase 3** (OOD/familiarity gate, regime snapshots, market-context features → ⟲3, Optuna/Hyperband with anti-snooping audits, bootstrap-only synthetic stress, calibration refit from realized outcomes): enter when Phase 2 items 1–2 have scorecard-verified rows.
-- **Phase 4** (PBT-lite, small SOM regime map, differentiable Hopfield retrieval, meta-gradients, capacity growth, Caruana ensemble): each item enters only behind experiment isolation after beating (a) plain fine-tune and (b) equal-budget random search. The 20-item **do-NOT-do list** in RESEARCH_ROADMAP.md §5 is binding.
+### 7.0 Measurement first (ungated — §9 steps 1 & 3 point here)
+
+1. **[running] Full-data noise floor.** 3-seed canonical sweep (launched 2026-07-15 ~15:45 UTC). When it lands: record the spread in §2.0 next to the fast-mode 5.8pt, and write the resulting experiment protocol (single-run vs 3-seed) into §2.0 as the standing rule. Known caveat to state with the number: each sweep run tops bars up to "now", so seeds see windows differing by ~1–2h of bars out of 4.5y.
+   **→ verify:** §2.0 updated with the spread + protocol; sweep summaries committed under runs/.
+2. **[S] Horizon-vs-cost audit** — does ANY configured horizon clear costs, or is the 5-min timeframe itself the ceiling? From cached bars, per symbol and per H ∈ {1, 5, 15, 30, 60} bars: P(|H-bar forward return| > 6 bps) and the mean |move| conditional on clearing. Spread caveat: historical bars carry spread=0, so use the 6 bps fee+slippage floor and say so — the true bar is higher, which only strengthens a negative verdict. Output: a table + explicit verdict in `docs/analysis/HORIZON_COST_AUDIT.md`.
+   **→ verify:** deterministic script committed with the table; a written go/no-go on "timeframe is the ceiling" that §7.2 experiments must respect.
+3. **[M] Platt refit from realized outcomes.** Live confidence pins at 0.488–0.515 — the EV gate can barely discriminate, so trade selectivity (the main no-retrain cost lever) is idle. Data path exists as of 2026-07-15: join `runs/decisions.jsonl` (confidence, `client_order_id`) with `runs/observations.jsonl` (`decision_id` = client_order_id, realized net PnL). Needs ≥ ~300 resolved non-flat trades — the paper week supplies them. Refit the direction-aware Platt on realized outcomes; write a per-checkpoint sidecar through the existing fingerprint binding; canonical sidecar only via the normal gate.
+   **→ verify:** reliability curve before/after; live confidence range measurably widens; `negative_ev` share of rejections changes (today it is near-constant because confidence is).
+4. **[S] EV-input quality audit.** The perturbation and cap-sweep results suggest the risk head's MFE/MAE are weak; measure it directly. `DecisionEvent` does not record the EV legs — add `expected_gain_bps`/`expected_loss_bps` (additive, forward-compatible), then rank-correlate predicted vs realized MFE/MAE over an OOS decision log.
+   **→ verify:** correlation reported in the audit doc; if ≈0, record the decision that the EV gate is effectively cost-only until the risk head improves — which re-scopes §4.4.4's meaning honestly.
+
+### 7.1 Operational hardening (ungated — from paper-run evidence, 2 incidents in 2 days)
+
+1. **[S] Failed-submit backoff.** Both live retry loops (42210000 fractional short, 40310000 fractional side-flip) were root-caused and fixed same-day, but the PATTERN — a terminal `submit_failed` intent resubmitted every `duplicate_order_window` forever — will recur with the next broker rule we haven't met (e.g. 40310000 for insufficient buying power). Generic guard: after a terminal submit failure for (symbol, side), suppress identical intents for a cooldown (~5 min), loud log + counter in runtime status.
+   **→ verify:** unit test: submit_failed → identical intent blocked with `submit_failed_cooldown` until the window passes; a DIFFERENT side/size intent is not blocked.
+2. **[S] VOO decision.** Permanently stale on the IEX feed (all 397 staleness blocks in the 30-min review were VOO). Either drop it from the runtime universe (SPY/QQQ already cover the segment) or accept the standing quarantine. One-line config change either way; record the choice here.
+   **→ verify:** post-change reason-code distribution shows staleness ≈ 0 or the acceptance is documented.
+3. **[S] Unattended-week logistics.** The runtime must be launched OUTSIDE the assistant session (survives restarts — proven twice on 2026-07-15). Daily checklist and end-of-week drills: §9.2.
+
+### 7.2 Phase 3 items (gated as marked; roadmap numbering kept)
+
+1. **[M] Familiarity/OOD gate** — *gate: a §2.0-verified win first; then build v0 before v1.* v0 (cheap, no new training): familiarity = kNN distance percentile against the existing memory bank, consumed through the SAME shrink-only damping rails as §6.2 (multiplier ∈ [floor, 1.0], never grow/flip/veto). v1 (roadmap's masked-reconstruction readout + MAE pretraining) only if v0 shows credit — do not build the readout before the cheap variant earns it.
+   **→ verify:** paired same-seed OOS folds (the `run_memory_credit.py` harness pattern), credit > 0 required before default-on.
+2. **[M] Regime snapshots** — *gate: none for the offline half.* Per-session K-means centroids over regime features + MMD/Mahalanobis matching (NOT alpha-shape IoU — do-NOT #6). First consumer is already built and waiting: real regime labels for the §4.5.7 backward-transfer slices (today chronological). Second consumer: a novelty event that tightens risk caps (shrink-only, same rails). Never hard-swap models on a regime signal (do-NOT #9).
+   **→ verify:** slices separate known regimes (2022 bear vs 2024 bull land in different clusters); novelty fires on a held-out shocked window; slice-gate test updated to regime labels.
+3. **Market context — code DONE (P3.1), verdict OPEN.** Re-test is an experiment under the §9.4 queue with the floor-appropriate protocol; the ⟲3 candidate already exists as one sample. No new plumbing.
+4. **[M] Episodic embedding training** — *gate: memory counterfactual credit > 0 (currently NEGATIVE, −1.3 bps, p=0.94).* Parked until the credit gate flips; building retrieval-training before retrieval earns credit is inverted.
+5. **[M] Sweep upgrade (Optuna TPE + ASHA)** — *gate: multi-seed machinery first (§2.0), which is now partially built (seed axis, 2026-07-15).* Prereq with data ALREADY in hand: fidelity audit — Spearman rank correlation of fast-mode vs full-run results across the 3 shared seeds; if fast-mode ranks don't track full ranks, ASHA pruning on fast fidelity is invalid and the search must run at full fidelity. Anti-snooping: objective = train/val walk-forward only; OOS scorecard touched exactly once per promoted candidate.
+   **→ verify:** fidelity correlation reported before any pruned search; every promoted config confirmed by a full multi-seed run clearing §2.0.
+6. **[M] Bootstrap-only synthetic stress** — regime-conditioned block bootstrap for rare-regime oversampling + adverse-fill backtest mode; stylized-facts-gated; informational in promotion output, NEVER a promotion criterion (do-NOT #2 half-applies: no GANs at all).
+   **→ verify:** bootstrapped paths pass the stylized-facts detector; promotion report shows baseline-vs-adverse deltas.
+7. **[L] Memory plasticity schedules** — *gate: same as item 4 (credit > 0).* Parked.
+8. **[L] Regime-tagged specialist archive** — *gate: item 2 shipped + a §2.0-verified win.* Specialists as distillation teachers only, never live swaps. Parked.
+9. **[S] Governance leftovers** — most of this shipped in Phase 1/2 (promotion registry + notes, learned-proposes tests). Remaining: per-retrain error-analysis artifact. Low priority; do with the next retrain, not before.
+
+### 7.3 Phase 4 — menu unchanged, one pull-forward rule
+
+Each item (PBT-lite, SOM regime map, differentiable Hopfield retrieval, meta-gradients, capacity growth, generative strategy discovery, Caruana ensemble, cross-play pool) stays behind experiment isolation and must beat (a) plain fine-tune and (b) equal-budget random search. **One exception to the ordering:** if the full-data noise floor (§7.0.1) comes back large, the **Caruana/seed-ensemble item is pulled forward** into the §9.4 experiment queue — averaging or ensembling across seeds is then the cheapest variance-reduction (= accuracy) mechanism available, and it needs no new research machinery. The do-NOT list stays binding; in particular no GAN generators, no per-bar test-time training, no wholesale ESOM/Hopfield restoration.
 
 ---
 
