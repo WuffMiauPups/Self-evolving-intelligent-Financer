@@ -22,6 +22,13 @@ class RiskConfig(BaseModel):
     stale_data_sec: int = 420
     max_spread_bps: float = 100.0
     duplicate_order_window_sec: int = 15
+    # Churn deadband (2026-07-15 paper run): with no floor on order size,
+    # re-deciding every tick against an unchanged 5-min bar produced dust
+    # rebalances (0.008 NVDA ≈ $1.69) and 60-second oscillations — spread
+    # and fees paid for sub-dollar position adjustments. Orders below this
+    # notional are rejected UNLESS they fully flatten a position (dust
+    # must always be closeable). 0 disables the gate.
+    min_trade_notional: float = 100.0
     # Trading costs (physics, not decisions): fed into the EV gate so the
     # risk manager can reject trades whose expected value doesn't cover costs.
     fee_bps: float = 1.0
@@ -123,6 +130,13 @@ class RiskConfig(BaseModel):
         # should fail at load (found by the §6.4 cap-sweep harness).
         if value <= 0.0:
             raise ConfigurationError(f"risk.{info.field_name} must be > 0")
+        return value
+
+    @field_validator("min_trade_notional")
+    @classmethod
+    def validate_min_trade_notional(cls, value: float) -> float:
+        if value < 0.0:
+            raise ConfigurationError("risk.min_trade_notional must be >= 0 (0 disables)")
         return value
 
     @model_validator(mode="after")

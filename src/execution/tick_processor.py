@@ -926,6 +926,12 @@ def process_tick(
             except Exception:
                 pass  # journal must never raise into trade loop
         if not result.accepted:
+            # A failed submission never reaches the fill-capture path that
+            # consumes these entries — pop them or they leak one entry per
+            # failed submit (observed in the 2026-07-15 fractional-short
+            # retry loop: 8+ orphaned entries in 10 minutes).
+            ctx.strategy_by_client_order_id.pop(client_order_id, None)
+            ctx.clamped_by_client_order_id.pop(client_order_id, None)
             ctx.metrics.increment_reason("order_rejection", result.reason_code or "unknown")
             continue
         # PaperExecutor updates the portfolio synchronously inside

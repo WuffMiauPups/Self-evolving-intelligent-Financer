@@ -208,6 +208,10 @@ risk:
   # and approves only when the result is positive. fee_bps + slippage_bps below
   # feed the cost side; expected_gain_bps / expected_loss_bps come from the
   # model's risk head (MFE / MAE predictions in bps).
+  # Churn deadband: orders below this notional are rejected unless they
+  # fully flatten a position (2026-07-15 paper run: dust rebalances of
+  # $1.69 every duplicate window). 0 disables.
+  min_trade_notional: 100.0
   fee_bps: 1.0
   slippage_bps: 2.0
   # Refuse to build a brain policy around a checkpoint without a risk head

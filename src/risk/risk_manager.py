@@ -244,6 +244,15 @@ class RiskManager:
             # has a real order to place, so it is tagged on approval below.)
             if short_block is not None:
                 reasons.append(short_block)
+        elif (
+            self.config.min_trade_notional > 0.0
+            and order_qty * proposal.price < self.config.min_trade_notional
+            and abs(target_qty) > 1.0e-9
+        ):
+            # Churn deadband: dust rebalances pay spread and fees for
+            # sub-dollar adjustments (2026-07-15 paper run). Full flattens
+            # (target 0) are exempt so dust positions stay closeable.
+            reasons.append("below_min_trade_notional")
 
         if reasons:
             return RiskDecision(
