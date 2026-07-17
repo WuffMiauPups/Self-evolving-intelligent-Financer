@@ -359,6 +359,10 @@ training:
   # (§4.4.2): 2 * (backtest.fee_bps + backtest.slippage_bps) — asserted
   # by tests/test_label_quality.py::test_label_cost_matches_backtest_costs.
   transaction_cost_bps: 6.0
+  # 9.4 arm-3 precondition: drop samples whose outcome window crosses a
+  # session close (the overnight gap is not a tradeable move). Label-
+  # affecting -> in the sample-cache fingerprint.
+  session_aware_labels: true
   platt_calibration_enabled: true     # Fit Platt scaling on validation set after training
   # 7.0.4 fix: divide mfe/mae targets by the symbol's train-split median
   # |excursion| so the risk head must learn timing, not vol level; scales

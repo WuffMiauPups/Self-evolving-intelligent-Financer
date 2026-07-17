@@ -83,6 +83,32 @@ class TrainingDataBundle:
     risk_target_scales: dict[str, dict[str, float]] | None = None
 
 
+# Session-boundary slack beyond the nominal H-bar span (§7.0.2 audit rule):
+# late bar delivery within a session is fine; an overnight gap is not.
+_SESSION_LABEL_SLACK_SEC = 1800.0
+
+
+def _filter_session_boundary_indices(
+    bars, eligible_indices: list[int], *, max_horizon: int, bar_seconds: float
+) -> tuple[list[int], int]:
+    """Drop indices whose outcome window crosses a session close.
+
+    A sample at bar i carries labels computed from bars i+1..i+max_horizon;
+    if that window spans more than max_horizon*bar_period + 30 min of wall
+    time, it contains the overnight gap — the labeled "move" is mostly gap,
+    not tradeable path (§9.4 arm-3 precondition). Returns (kept, dropped).
+    """
+    max_span_sec = max_horizon * bar_seconds + _SESSION_LABEL_SLACK_SEC
+    kept = [
+        index
+        for index in eligible_indices
+        if (
+            bars[index + max_horizon].timestamp - bars[index].timestamp
+        ).total_seconds() <= max_span_sec
+    ]
+    return kept, len(eligible_indices) - len(kept)
+
+
 def _absorb_shard_samples(
     columns_by_split: dict[str, ColumnarSamples],
     shard_samples_by_split: dict[str, list[TrainingSample]],
@@ -299,12 +325,23 @@ def build_real_data_training_bundle(
         if eligible_stop <= eligible_start:
             continue
         eligible_indices = list(range(eligible_start, eligible_stop))
+        dropped_session_boundary = 0
+        if config.training.session_aware_labels:
+            eligible_indices, dropped_session_boundary = _filter_session_boundary_indices(
+                bars,
+                eligible_indices,
+                max_horizon=max_horizon,
+                bar_seconds=float(config.backtest.seconds_per_bar),
+            )
+            if not eligible_indices:
+                continue
         eligible_timestamps = [bars[index].timestamp for index in eligible_indices]
         logger.info(
             "training_symbol_prepare",
             symbol=symbol,
             bar_count=len(bars),
             eligible_samples=len(eligible_indices),
+            dropped_session_boundary=dropped_session_boundary,
         )
         symbol_splits = build_symbol_splits(
             symbol=symbol,

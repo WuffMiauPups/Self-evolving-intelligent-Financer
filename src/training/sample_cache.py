@@ -119,6 +119,7 @@ def _training_config_fingerprint(cfg: AppConfig) -> dict[str, Any]:
         # changing any of these alters cached labels, so omitting them
         # served stale samples across config changes.
         "transaction_cost_bps": float(t.transaction_cost_bps),
+        "session_aware_labels": bool(t.session_aware_labels),
         "adaptive_label_epsilon": bool(t.adaptive_label_epsilon),
         "adaptive_epsilon_multiplier": float(t.adaptive_epsilon_multiplier),
         "adaptive_epsilon_min": float(t.adaptive_epsilon_min),

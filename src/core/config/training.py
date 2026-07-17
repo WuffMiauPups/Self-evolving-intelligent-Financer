@@ -218,7 +218,14 @@ class TrainingConfig(BaseModel):
     restore_best_model: bool = True
     # --- Platt calibration ---
     platt_calibration_enabled: bool = True
-    # --- Per-symbol risk-target normalization (§7.0.4 fix) ---
+    # --- Session-aware label masking (§9.4 arm-3 precondition) ---
+    # An H-bar label window that crosses a session close includes the
+    # overnight gap: the "move" is mostly gap, not tradeable path (~8% of
+    # samples at H=6, 22–42% at H=15–30 — §7.0.2). When on, samples whose
+    # full outcome window (max horizon) spans more than H×bar_period+30min
+    # are dropped from eligibility. Label-affecting: part of the sample-
+    # cache fingerprint, so flipping re-fingerprints caches.
+    session_aware_labels: bool = True
     # The risk head's MFE/MAE predictions measured as a symbol-level vol
     # prior (per-symbol rank correlation ≈ 0): predicting each symbol's
     # typical excursion LEVEL minimizes loss without any timing skill.
