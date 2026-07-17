@@ -67,6 +67,11 @@ data:
     manifest_path: artifacts/historical/manifest.json
 
 runtime:
+  # VOO deliberately absent (§7.1.2): permanently stale on the IEX feed
+  # (all 397 staleness blocks in the 2026-07-15 review were VOO) and
+  # SPY/QQQ already cover the beta. It STAYS in data.symbols above so
+  # training data, cache fingerprints, and the checkpoint contract are
+  # untouched — do not "fix" the asymmetry by re-adding it here.
   symbols:
     - AAPL
     - MSFT
@@ -77,7 +82,6 @@ runtime:
     - TSLA
     - SPY
     - QQQ
-    - VOO
     - PLTR
     - MSTR
     - NFLX
