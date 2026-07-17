@@ -356,6 +356,25 @@ def _maybe_persist_memory(ctx: RuntimeContext, *, logger: object) -> None:
         ctx.last_memory_persist_monotonic = now
 
 
+def _bucket_already_decided(
+    ctx: RuntimeContext, *, symbol: str, bucket_ts: datetime
+) -> bool:
+    """True when this (symbol, bar bucket) already dispatched a proposal.
+
+    ``runtime.decide_once_per_bar``: the model is trained on completed
+    bars and its output is constant within a forming bucket, so per-poll
+    re-deciding only manufactures identical no-ops (64% of all rejections
+    in the 2026-07-17 session). Only the PROPOSAL path is gated — broker
+    sync, fill capture, halts, and the data lane run every poll.
+    """
+    if not ctx.config.runtime.decide_once_per_bar:
+        return False
+    if ctx.last_decision_bucket.get(symbol) != bucket_ts:
+        return False
+    ctx.metrics.increment("bar_gate_skips")
+    return True
+
+
 def _submit_cooldown_active(
     ctx: RuntimeContext, *, symbol: str, side: str, now: datetime, logger: object
 ) -> bool:
@@ -751,6 +770,15 @@ def process_tick(
                 warmup_logged.add(symbol)
             continue
         warmup_logged.discard(symbol)
+        # Once-per-bar gate: skip the whole proposal path while the
+        # symbol's bucket hasn't advanced past its last dispatched
+        # decision. Memory finalization loses nothing — new finalized
+        # items only exist when a bucket completes, i.e. when the gate
+        # opens again.
+        if _bucket_already_decided(
+            ctx, symbol=symbol, bucket_ts=ctx.buffers[symbol].last_bar().timestamp
+        ):
+            continue
         if isinstance(ctx.policy, MemoryCapablePolicy):
             finalized_items = ctx.policy.prepare_symbol_history(symbol, ctx.buffers[symbol].snapshot())
             if finalized_items:
@@ -815,6 +843,10 @@ def process_tick(
     ):
         if not ctx.health.safe_to_trade:
             break
+        # Once-per-bar gate bookkeeping: the bucket counts as decided only
+        # when its proposal actually reaches dispatch (a tick that broke
+        # before this point retries the bucket next poll).
+        ctx.last_decision_bucket[symbol] = ctx.buffers[symbol].last_bar().timestamp
         memory_support = diagnostics.get("memory_support")
         if memory_support is not None:
             logger.info("memory_retrieval", symbol=symbol, **memory_support)

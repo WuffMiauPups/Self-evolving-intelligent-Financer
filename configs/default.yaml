@@ -88,6 +88,11 @@ runtime:
   timeframe: 5Min
   warmup_bars: 48
   decision_interval_sec: 2.0
+  # At most one proposal per (symbol, bar bucket): the model's output is
+  # constant within a forming bar, so per-poll re-deciding only produced
+  # identical no-ops (64% of all rejections on 2026-07-17). Poll cadence
+  # for fills/halts/data is unaffected. false = per-poll re-deciding.
+  decide_once_per_bar: true
   # 0 = unbounded (default). Set a positive integer only for bounded debug runs.
   max_runtime_steps: 0
   state_reset_gap_sec: 300

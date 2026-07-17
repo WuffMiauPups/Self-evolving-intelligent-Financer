@@ -13,6 +13,13 @@ class RuntimeConfig(BaseModel):
     timeframe: str = "5Min"
     warmup_bars: int = 48
     decision_interval_sec: float = 2.0
+    # At most one proposal per (symbol, bar bucket). The model is trained
+    # on completed bars and its output is constant within a bucket, so
+    # re-deciding on every poll of the same forming bar produced ~150
+    # identical no-ops per bar per symbol (2026-07-17: 64% of all
+    # rejections). The poll cadence (fills, halts, data lane) is
+    # unaffected. False restores per-poll re-deciding as an experiment.
+    decide_once_per_bar: bool = True
     # 0 (or any non-positive value) means UNBOUNDED — the paper/live trade loop
     # runs until manually stopped, fatal error, kill switch, or stream exhaustion.
     # Set a positive value only for explicit bounded debug/test runs.

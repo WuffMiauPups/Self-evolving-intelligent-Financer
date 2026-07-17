@@ -108,6 +108,11 @@ class RuntimeContext:
     # Broker-adapter state, not risk policy — expires by TIME only; fills
     # never clear entries (tick_processor owns both ends).
     submit_failed_until: dict[tuple[str, str], datetime] = field(default_factory=dict)
+    # symbol -> bucket timestamp of the last DISPATCHED decision
+    # (runtime.decide_once_per_bar): marked in Phase C after the proposal
+    # actually went through risk, so a tick interrupted mid-dispatch
+    # retries the bucket on the next poll.
+    last_decision_bucket: dict[str, datetime] = field(default_factory=dict)
     daily_anchor_equity: float = 0.0
     daily_anchor_date: date | None = None
     # Debounced memory persistence (tick_processor._maybe_persist_memory):
