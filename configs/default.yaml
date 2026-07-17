@@ -487,6 +487,9 @@ arbitration:
 evaluation:
   seed: 42
   output_dir: experiments
+  # 7.2.2 regime snapshots: K for the per-session K-means (starts equal to
+  # model.regime_count=6 by decision, deliberately its own knob).
+  regime_snapshot_k: 6
   walk_forward:
     train_bars: 5000
     val_bars: 1000
@@ -505,8 +508,12 @@ evaluation:
     min_expectancy_delta: 0.0
     min_excess_vs_buy_hold: 0.0
     backward_transfer_floor: 0.05
-    # Slice producer (4.5.7): the shared OOS window is cut into this many
-    # chronological regime slices for the backward-transfer gate; slices
-    # with fewer decisions than the minimum (either checkpoint) are skipped.
+    # Slice producer (4.5.7): the shared OOS window is cut into slices for
+    # the backward-transfer gate; slices with fewer decisions than the
+    # minimum (either checkpoint) are skipped.
     backward_transfer_slices: 4
     backward_transfer_min_decisions: 50
+    # 7.2.2: "regime" groups sessions by K-means regime cluster
+    # (K = evaluation.regime_snapshot_k) instead of a calendar cut;
+    # falls back to chronological when clustering is impossible.
+    backward_transfer_slicing: regime

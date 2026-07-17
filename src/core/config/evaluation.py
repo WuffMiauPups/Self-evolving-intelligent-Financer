@@ -64,6 +64,12 @@ class PromotionConfig(BaseModel):
     # Slices with fewer decisions than this (either checkpoint) are skipped
     # — a handful of trades cannot evidence forgetting.
     backward_transfer_min_decisions: int = 50
+    # §7.2.2: how the OOS window is cut. "regime" groups sessions by
+    # K-means regime cluster (K = evaluation.regime_snapshot_k) — real
+    # regime labels instead of a calendar cut; falls back to
+    # "chronological" (equal-duration buckets) when clustering is not
+    # possible (fewer sessions than clusters).
+    backward_transfer_slicing: str = "regime"
 
     @model_validator(mode="after")
     def validate_promotion(self) -> "PromotionConfig":
@@ -73,6 +79,10 @@ class PromotionConfig(BaseModel):
             raise ConfigurationError("evaluation.promotion.backward_transfer_slices must be non-negative")
         if self.backward_transfer_min_decisions < 1:
             raise ConfigurationError("evaluation.promotion.backward_transfer_min_decisions must be positive")
+        if self.backward_transfer_slicing not in {"chronological", "regime"}:
+            raise ConfigurationError(
+                "evaluation.promotion.backward_transfer_slicing must be one of: chronological, regime"
+            )
         return self
 
 
@@ -85,3 +95,12 @@ class EvaluationConfig(BaseModel):
     promotion: PromotionConfig = Field(default_factory=PromotionConfig)
     seed: int = 42
     output_dir: str = "experiments"
+    # §7.2.2 regime snapshots: K for the per-session K-means (starts equal
+    # to model.regime_count=6 by decision, but deliberately its own knob).
+    regime_snapshot_k: int = 6
+
+    @model_validator(mode="after")
+    def validate_evaluation(self) -> "EvaluationConfig":
+        if self.regime_snapshot_k < 2:
+            raise ConfigurationError("evaluation.regime_snapshot_k must be at least 2")
+        return self

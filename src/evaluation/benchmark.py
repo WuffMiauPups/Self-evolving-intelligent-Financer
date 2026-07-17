@@ -300,16 +300,65 @@ def benchmark_backward_transfer_slices(
     window_start, window_end = min(all_bar_timestamps), max(all_bar_timestamps)
     horizon = int(config.training.effective_primary_horizon)
     cost_band = float(config.training.transaction_cost_bps) / 10_000.0
-    candidate_slices = slice_decision_log(
-        logs["candidate"], window_start=window_start, window_end=window_end, n_slices=n_slices
-    )
-    incumbent_slices = slice_decision_log(
-        logs["incumbent"], window_start=window_start, window_end=window_end, n_slices=n_slices
-    )
+    # §7.2.2: regime-labeled slices by default — sessions grouped by
+    # K-means regime cluster (one shared clustering, so both logs bucket
+    # identically); chronological equal-duration cut as fallback/opt-in.
+    regime_labels: dict[str, int] | None = None
+    if str(promotion.backward_transfer_slicing) == "regime":
+        from src.evaluation.regime_snapshots import build_regime_snapshot
+
+        snapshot = build_regime_snapshot(
+            bars_oos,
+            k=int(config.evaluation.regime_snapshot_k),
+            seed=int(config.evaluation.seed),
+            short_window=int(config.features.windows["short"]),
+            medium_window=int(config.features.windows["medium"]),
+            long_window=int(config.features.windows["long"]),
+            epsilon=float(config.features.epsilon),
+        )
+        if snapshot is None:
+            logger.warning("backward_transfer_regime_fallback_chronological")
+        else:
+            regime_labels = snapshot.labels_by_date
+    if regime_labels is not None:
+        from src.evaluation.regime_snapshots import slice_decision_log_by_regime
+
+        candidate_by_name, dropped_candidate = slice_decision_log_by_regime(
+            logs["candidate"], regime_labels
+        )
+        incumbent_by_name, dropped_incumbent = slice_decision_log_by_regime(
+            logs["incumbent"], regime_labels
+        )
+        if dropped_candidate or dropped_incumbent:
+            logger.info(
+                "backward_transfer_unlabeled_decisions_dropped",
+                candidate=dropped_candidate,
+                incumbent=dropped_incumbent,
+            )
+        # Align by slice NAME: a cluster can be empty for one log only
+        # (unlike the chronological cut, whose buckets pair positionally).
+        candidate_map = dict(candidate_by_name)
+        incumbent_map = dict(incumbent_by_name)
+        names = sorted(set(candidate_map) | set(incumbent_map))
+        paired = [
+            (name, candidate_map.get(name, []), incumbent_map.get(name, []))
+            for name in names
+        ]
+    else:
+        candidate_slices = slice_decision_log(
+            logs["candidate"], window_start=window_start, window_end=window_end, n_slices=n_slices
+        )
+        incumbent_slices = slice_decision_log(
+            logs["incumbent"], window_start=window_start, window_end=window_end, n_slices=n_slices
+        )
+        paired = [
+            (name, candidate_records, incumbent_records)
+            for (name, candidate_records), (_, incumbent_records) in zip(
+                candidate_slices, incumbent_slices
+            )
+        ]
     slice_metrics: dict[str, tuple[float, float]] = {}
-    for (name, candidate_records), (_, incumbent_records) in zip(
-        candidate_slices, incumbent_slices
-    ):
+    for name, candidate_records, incumbent_records in paired:
         if min(len(candidate_records), len(incumbent_records)) < min_decisions:
             logger.info(
                 "backward_transfer_slice_skipped",
