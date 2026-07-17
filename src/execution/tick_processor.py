@@ -44,6 +44,7 @@ from src.monitoring.positions_status import (
 from src.monitoring.runtime_status import RuntimeStatusSnapshot, RuntimeStatusWriter
 from src.risk.constraints import action_annotation
 from src.risk.ledger import FillRecord, Ledger
+from src.risk.position_guard import GUARD_DIAGNOSTICS, check_position_exits
 from src.risk.portfolio_state import PortfolioState, apply_fill
 from src.risk.risk_manager import RiskManager
 from src.strategies.base import BatchTradingPolicy, MemoryCapablePolicy, TradingPolicy
@@ -836,6 +837,38 @@ def process_tick(
         batched_results = [
             ctx.policy.propose(entry[1]) for entry in eligible_batch
         ]
+
+    # --- Position guard: deterministic P&L exits (risk.position_stop_
+    # loss_pct / take_profit_pct). Prepended so exits dispatch BEFORE any
+    # new model order; the exit fill's cooldown then blocks an instant
+    # re-entry. Gated like model decisions: synced portfolio, a live bar
+    # for the symbol (session guard needs one), once per bar bucket.
+    if sync_ok:
+        for guard_snapshot, guard_proposal, guard_reason in check_position_exits(
+            ctx.portfolio, ctx.config.risk, timestamp=tick_time
+        ):
+            symbol = guard_snapshot.symbol
+            bar = latest_bars.get(symbol)
+            buffer = ctx.buffers.get(symbol)
+            if bar is None or buffer is None or len(buffer) == 0:
+                logger.warning(
+                    "position_guard_symbol_unstreamed",
+                    symbol=symbol,
+                    reason=guard_reason,
+                    note="position not in the live symbol set — close it manually",
+                )
+                continue
+            if ctx.last_decision_bucket.get(symbol) == buffer.last_bar().timestamp:
+                continue  # this bar already dispatched for the symbol
+            logger.warning(
+                "position_guard_exit",
+                symbol=symbol,
+                reason=guard_reason,
+                pnl_pct=guard_proposal.metadata.get("pnl_pct"),
+            )
+            ctx.metrics.increment_reason("position_guard", guard_reason)
+            eligible_batch.insert(0, (symbol, guard_snapshot, bar))
+            batched_results.insert(0, (guard_proposal, dict(GUARD_DIAGNOSTICS)))
 
     # --- Phase C: per-symbol decision dispatch ---------------------
     for (symbol, snapshot, bar), (proposal, diagnostics) in zip(

@@ -29,6 +29,15 @@ class RiskConfig(BaseModel):
     # notional are rejected UNLESS they fully flatten a position (dust
     # must always be closeable). 0 disables the gate.
     min_trade_notional: float = 100.0
+    # --- Position guard (deterministic P&L exits, shared path) ---
+    # Every synced bar, held positions are checked against these unrealized
+    # P&L thresholds (vs entry price, sign-adjusted for shorts); a breach
+    # originates a FLATTEN proposal that rides the normal risk-reducing
+    # path (halt-exempt, deadband-exempt, EV-gate-free). The model cannot
+    # veto it, and cooldown_sec then blocks an instant re-entry.
+    # 0 disables (default: the model + account-level limits own exits).
+    position_stop_loss_pct: float = 0.0    # e.g. 0.05 = flatten at -5%
+    position_take_profit_pct: float = 0.0  # e.g. 0.08 = flatten at +8%
     # Trading costs (physics, not decisions): fed into the EV gate so the
     # risk manager can reject trades whose expected value doesn't cover costs.
     fee_bps: float = 1.0
@@ -139,6 +148,17 @@ class RiskConfig(BaseModel):
     def validate_min_trade_notional(cls, value: float) -> float:
         if value < 0.0:
             raise ConfigurationError("risk.min_trade_notional must be >= 0 (0 disables)")
+        return value
+
+    @field_validator("position_stop_loss_pct", "position_take_profit_pct")
+    @classmethod
+    def validate_position_guard(cls, value: float, info) -> float:
+        if value < 0.0:
+            raise ConfigurationError(f"risk.{info.field_name} must be >= 0 (0 disables)")
+        if value >= 1.0:
+            raise ConfigurationError(
+                f"risk.{info.field_name} is a fraction (0.05 = 5%), got {value}"
+            )
         return value
 
     @model_validator(mode="after")

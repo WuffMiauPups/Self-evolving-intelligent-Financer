@@ -14,6 +14,7 @@ from src.features.feature_pipeline import FeaturePipeline
 from src.risk.constraints import action_annotation
 from src.risk.ledger import Ledger
 from src.risk.portfolio_state import PortfolioState
+from src.risk.position_guard import check_position_exits
 from src.risk.risk_manager import RiskManager
 from src.strategies.base import BatchTradingPolicy, MemoryCapablePolicy, TradingPolicy
 
@@ -161,9 +162,20 @@ class BacktestEngine:
                 # Fallback for policies that don't implement BatchTradingPolicy
                 # (e.g. BaselineMomentumPolicy).  Preserves correctness.
                 results = [policy.propose(snapshot) for snapshot in snapshots]
-            for sym_idx, symbol in enumerate(symbols):
-                snapshot = snapshots[sym_idx]
-                proposal, _ = results[sym_idx]
+            # Position guard (shared with the live path, §10.4): P&L exits
+            # dispatch BEFORE model proposals so the exit fill's cooldown
+            # governs any re-entry, exactly as it does live.
+            guard_entries = [
+                (exit_snapshot.symbol, exit_snapshot, exit_proposal)
+                for exit_snapshot, exit_proposal, _reason in check_position_exits(
+                    portfolio, self.config.risk, timestamp=timestamp
+                )
+            ]
+            entries = guard_entries + [
+                (symbol, snapshots[sym_idx], results[sym_idx][0])
+                for sym_idx, symbol in enumerate(symbols)
+            ]
+            for symbol, snapshot, proposal in entries:
                 decision_log.append(
                     {
                         "symbol": symbol,

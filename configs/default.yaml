@@ -221,6 +221,13 @@ risk:
   # fully flatten a position (2026-07-15 paper run: dust rebalances of
   # $1.69 every duplicate window). 0 disables.
   min_trade_notional: 100.0
+  # Position guard: deterministic unrealized-P&L exits checked every synced
+  # bar in BOTH backtest and runtime. A breach flattens via the normal
+  # risk-reducing path (halt-exempt, EV-gate-free); cooldown_sec blocks an
+  # instant re-entry. 0 disables. Fractions: 0.05 = 5%. Pick values from a
+  # backtest sweep before enabling live.
+  position_stop_loss_pct: 0.0
+  position_take_profit_pct: 0.0
   fee_bps: 1.0
   slippage_bps: 2.0
   # Refuse to build a brain policy around a checkpoint without a risk head

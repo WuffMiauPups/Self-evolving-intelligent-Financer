@@ -149,6 +149,7 @@ The deterministic `RiskManager` is the only component that can approve an order:
 - **Daily-loss limits** work in broker mode: daily PnL is equity-based and anchored to the broker's previous close (`last_equity`), so limits act on real account swings.
 - **Risk-reducing exemption**: orders that reduce or close an existing position are exempt from kill-switch and loss-limit halts, so the system can always de-risk.
 - **Resize instead of reject**: oversized proposals are resized down to the notional cap and approved with reason `resized_to_cap`.
+- **Position guard** (`risk.position_stop_loss_pct` / `risk.position_take_profit_pct`, off by default): every synced bar, held positions are checked against unrealized-P&L thresholds vs entry (sign-adjusted for shorts); a breach originates a flatten that rides the normal risk-reducing path — halt-exempt, deadband-exempt, outside the EV gate — and the exit cooldown blocks an instant re-entry. Identical in backtest and live, so stop values can be tuned offline before being enabled.
 - Plus: stale-data rejection, max aggregate notional, leverage cap, rolling drawdown limit, max concurrent positions, cooldowns, duplicate-order protection, idempotent client order IDs, and a kill switch.
 
 ## Operational Safety Flow
@@ -217,6 +218,7 @@ Frequently used knobs:
 - `runtime.state_reset_gap_sec`, `runtime.allowed_sessions`, `runtime.require_market_open`, `runtime.max_data_staleness_sec`, `runtime.block_on_data_gap`
 - `execution.submit_failure_cooldown_sec` — cooldown before re-submitting a `(symbol, side)` the broker terminally refused
 - `risk.fee_bps`, `risk.slippage_bps`, `risk.max_spread_bps`, `risk.max_position_notional`, `risk.max_daily_loss`, `risk.min_trade_notional`
+- `risk.position_stop_loss_pct`, `risk.position_take_profit_pct` — deterministic P&L exits for held positions (0 disables)
 - `memory.enabled`, `memory.persist_path`, `memory.max_items`, `memory.forward_horizons`, `memory.require_encoder_match`
 - `data.symbols`, `data.timeframe`, `data.start_date`, `data.end_date`, `data.cache_dir`, `data.force_refresh`
 - `broker.live_enabled`, `broker.confirm_live`, `broker.require_account_match`
