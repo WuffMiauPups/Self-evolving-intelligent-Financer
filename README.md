@@ -53,7 +53,7 @@ docs/analysis/    Codebase review, master plan, scorecard
 4. Market data arrives through the Alpaca adapter (or mock client). Polled bars are aggregated into the configured timeframe (default `5Min`) buckets; gaps are backfilled from the historical API.
 5. Bars are stored in per-symbol buffers and converted into Torch tensors by the feature pipeline. Every snapshot is validated against the checkpoint's feature contract, and the checkpoint's persisted normalization statistics are applied before inference.
 6. Session and timestamp guards run before proposal generation and again before order submission.
-7. The policy model produces a proposal: direction, confidence, and target position fraction. If a fitted Platt calibrator is present next to the checkpoint (and its fingerprint matches), the confidence is calibrated before risk evaluation.
+7. Once per symbol per bar bucket (`runtime.decide_once_per_bar`, on by default), the policy model produces a proposal: direction, confidence, and target position fraction. Re-polls of the same forming bar are skipped so the model is never re-run on unchanged data, while fill capture, halts, and the data lane still run every poll. If a fitted Platt calibrator is present next to the checkpoint (and its fingerprint matches), the confidence is calibrated before risk evaluation.
 8. If memory is enabled, the encoded latent state is stored and nearest-neighbor diagnostics are attached to the decision record. Memory is informational only.
 9. The deterministic risk manager approves, resizes, or rejects the proposal. Oversized orders are resized to the notional cap and tagged `resized_to_cap` instead of being rejected.
 10. The order router only accepts intents that carry explicit risk approval and refuses duplicate or quarantined orders. With Alpaca credentials, `broker.paper=true` routes to Alpaca's paper endpoint.
@@ -73,7 +73,7 @@ Earlier experimental machinery — dendritic branches, soma gating, regime proto
 
 1. Real Alpaca bars are fetched into the local adjustment-aware cache (v2.0) keyed by symbol and timeframe; synthetic bars remain available for deterministic smoke tests.
 2. Multi-symbol datasets are built with time-based train/val/test splits and split-boundary embargo so labels never leak across splits.
-3. Direction labels (short/flat/long) use a cost-aware flat band: the band is derived from `training.transaction_cost_bps` (5.0 in `configs/default.yaml`) and scales with the square root of the label horizon, so "flat" means "not worth trading after costs".
+3. Direction labels (short/flat/long) use a cost-aware flat band: the band is derived from `training.transaction_cost_bps` (6.0 in `configs/default.yaml`, held by contract at `2 × (backtest.fee_bps + backtest.slippage_bps)`) and scales with the square root of the label horizon, so "flat" means "not worth trading after costs". With `training.session_aware_labels` (on by default), samples whose outcome window crosses a session close are dropped, so overnight gaps are never labeled as tradeable moves.
 4. Class imbalance is handled by one mechanism: balanced class weights. Focal loss and the weighted sampler exist but are opt-in and off by default.
 5. The trainer selects the best epoch on `val_balanced_accuracy` and restores those weights at the end of training (`training.restore_best_model`).
 6. Checkpoints persist the model config, feature contract, normalization statistics, per-symbol training date ranges, and an encoder fingerprint.
@@ -121,7 +121,8 @@ Backtests enforce the checkpoint's persisted training ranges: if the requested e
 Runtime execution persists machine-readable outcomes under `runs/`:
 
 - `runs/fills.jsonl` — the fill ledger (one row per fill, including broker-captured fills with realized PnL)
-- `runs/decisions.jsonl` — one row per model decision with the proposal, the risk decision, the **executed** action, and whether the order was resized (`resized_to_cap`)
+- `runs/decisions.jsonl` — one row per model decision with the proposal, the risk decision, the **executed** action, the risk head's expected gain/loss (bps) exactly as the EV gate consumed them, and whether the order was resized (`resized_to_cap`)
+- `runs/observations.jsonl` — one row per executed fill (realized net PnL and the submit-time clamp flag); the data source the retrain drift trigger reads
 
 These files are the ground truth for outcome-driven analysis: they record what actually happened after risk clamping, not the model's raw intent.
 
@@ -209,9 +210,13 @@ Frequently used knobs:
 - `model.separate_risk_heads` — enable the trained risk head feeding the EV gate
 - `training.transaction_cost_bps` — cost assumption for the label flat band and calibration
 - `training.platt_calibration_enabled` — fit/apply the confidence calibrator
+- `training.session_aware_labels` — drop training samples whose outcome window crosses a session close
+- `training.risk_target_per_symbol_norm` — per-symbol normalization of the risk head's MFE/MAE targets (off by default; experiment)
+- `runtime.decide_once_per_bar` — generate at most one proposal per symbol per bar bucket
 - `runtime.force_directional_flip` — retired experiment; default `false` and identical in backtest and live
 - `runtime.state_reset_gap_sec`, `runtime.allowed_sessions`, `runtime.require_market_open`, `runtime.max_data_staleness_sec`, `runtime.block_on_data_gap`
-- `risk.fee_bps`, `risk.slippage_bps`, `risk.max_spread_bps`, `risk.max_position_notional`, `risk.max_daily_loss`
+- `execution.submit_failure_cooldown_sec` — cooldown before re-submitting a `(symbol, side)` the broker terminally refused
+- `risk.fee_bps`, `risk.slippage_bps`, `risk.max_spread_bps`, `risk.max_position_notional`, `risk.max_daily_loss`, `risk.min_trade_notional`
 - `memory.enabled`, `memory.persist_path`, `memory.max_items`, `memory.forward_horizons`, `memory.require_encoder_match`
 - `data.symbols`, `data.timeframe`, `data.start_date`, `data.end_date`, `data.cache_dir`, `data.force_refresh`
 - `broker.live_enabled`, `broker.confirm_live`, `broker.require_account_match`
@@ -260,6 +265,10 @@ python scripts/run_benchmark.py --checkpoint checkpoints/brain.pt
 
 Appends a deterministic result row to `docs/analysis/SCORECARD.md`.
 
+### Promotion gate
+
+Promoting a retrained checkpoint is a statistical decision, not a file copy. A candidate must beat the incumbent scorecard row on balanced accuracy and expectancy and beat buy-and-hold out of sample, and no backward-transfer slice may degrade beyond a configured floor. Slices are regime-labeled by default (`evaluation.promotion.backward_transfer_slicing`): per-session K-means over regime features groups the out-of-sample window into regimes, with a chronological fallback. An optional adverse-fill stress mode reports baseline-vs-adverse deltas but is never itself a promotion criterion. The canonical `checkpoints/brain.pt`, registry, and memory bank move only through this gate.
+
 ### Build memory (offline)
 
 ```bash
@@ -276,6 +285,23 @@ python scripts/run_paper.py --checkpoint checkpoints/brain.pt
 ```
 
 Paper-first and safe by default. Runtime events stream to stdout and `logs/seif_runtime.log`; see `docs/LIVE_LOG_CHEATSHEET.md` for the per-tick log lines worth watching.
+
+### Unattended paper run (Windows)
+
+```bash
+scripts\launch_paper_week.bat
+```
+
+Runs `scripts/preflight_monday.py` — a GO/NO-GO gate over the paper interlock, hardening flags (VOO drop, submit-failure cooldown, once-per-bar gate, staleness floor), credentials, and checkpoint/memory-bank fingerprint integrity — and only then starts the paper loop in a persistent, titled console. Keep the window open for the duration of the run; a closed console kills the trader.
+
+### Live dashboard
+
+```bash
+python scripts/trading_dashboard.py
+# then open http://127.0.0.1:8787
+```
+
+A dependency-free local page that reads the `runs/` artifacts and shows equity, open positions, recent fills, the rejection-reason mix, and model-signal state, refreshing every few seconds. Read-only.
 
 ### GUI
 
@@ -299,7 +325,7 @@ If any live safety condition is missing or inconsistent, startup aborts before t
 - No order is routed unless a deterministic risk decision succeeded and the resulting `OrderIntent` is explicitly risk-approved.
 - Memory is diagnostics-only; it cannot originate, veto, or resize trades.
 - Risk-reducing orders remain possible during halts so positions can always be closed.
-- Live submit retries are bounded and recovery-aware; the router checks broker state by `client_order_id` before retrying.
+- Live submit retries are bounded and recovery-aware; the router checks broker state by `client_order_id` before retrying, and an order shape the broker terminally refuses puts its `(symbol, side)` on a cooldown (`execution.submit_failure_cooldown_sec`) instead of resubmitting every window.
 - This is research infrastructure, not an unattended live-deployment system.
 
 ## Limitations
