@@ -218,6 +218,17 @@ class TrainingConfig(BaseModel):
     restore_best_model: bool = True
     # --- Platt calibration ---
     platt_calibration_enabled: bool = True
+    # --- Per-symbol risk-target normalization (§7.0.4 fix) ---
+    # The risk head's MFE/MAE predictions measured as a symbol-level vol
+    # prior (per-symbol rank correlation ≈ 0): predicting each symbol's
+    # typical excursion LEVEL minimizes loss without any timing skill.
+    # When on, mfe/mae regression targets are divided by the symbol's
+    # train-split median |excursion| (a post-cache trainer transform —
+    # raw sample caches unchanged) so the head must predict deviation
+    # from typical, and inference de-normalizes via scales persisted in
+    # checkpoint meta. OFF by default: flipping is a §9.4 experiment
+    # under the §2.0 three-seed protocol.
+    risk_target_per_symbol_norm: bool = False
     # --- Fast experiment mode ---
     fast_mode: FastModeConfig = Field(default_factory=FastModeConfig)
 

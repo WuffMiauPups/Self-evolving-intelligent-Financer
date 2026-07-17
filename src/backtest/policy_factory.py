@@ -169,6 +169,7 @@ def build_brain_policy(
         device=_resolve_backtest_device(config),
         feature_contract=artifacts.feature_contract,
         normalization=artifacts.normalization,
+        risk_target_scales=getattr(artifacts, "risk_target_scales", None),
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
         force_directional_flip=config.runtime.force_directional_flip,
         # Parity with build_runtime_brain_policy (§4.1.4): a non-default
@@ -212,6 +213,7 @@ def build_brain_memory_policy(
         device=device,
         feature_contract=artifacts.feature_contract,
         normalization=artifacts.normalization,
+        risk_target_scales=getattr(artifacts, "risk_target_scales", None),
         max_state_gap_sec=config.runtime.state_reset_gap_sec,
         force_directional_flip=config.runtime.force_directional_flip,
         default_target_fraction=config.runtime.default_target_fraction,

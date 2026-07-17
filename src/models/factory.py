@@ -34,6 +34,22 @@ class LoadedModelArtifacts:
         return compute_encoder_fingerprint(self.meta) if self.meta else None
 
     @property
+    def risk_target_scales(self) -> dict[str, dict[str, float]] | None:
+        """Per-symbol mfe/mae target scales (§7.0.4 normalization).
+
+        ``None`` = checkpoint trained on raw excursions (all current
+        checkpoints); the policy then applies no de-normalization.
+        """
+        scales = self.meta.get("risk_target_scales")
+        if not isinstance(scales, dict) or not scales:
+            return None
+        return {
+            str(symbol): {str(t): float(v) for t, v in targets.items()}
+            for symbol, targets in scales.items()
+            if isinstance(targets, dict)
+        }
+
+    @property
     def normalization(self) -> NormalizationStats | None:
         """Train-split z-score stats persisted at save time (C2 fix).
 

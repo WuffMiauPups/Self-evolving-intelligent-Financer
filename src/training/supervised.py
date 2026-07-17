@@ -460,6 +460,10 @@ def run_supervised_training(
                     if bundle.normalization_stats is not None
                     else None
                 ),
+                # §7.0.4: per-symbol mfe/mae target scales — inference
+                # multiplies the risk head's outputs back by these; absent
+                # (None) means the checkpoint trained on raw excursions.
+                "risk_target_scales": bundle.risk_target_scales,
                 "training_split_ranges": {
                     split_name: {
                         symbol: {

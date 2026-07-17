@@ -127,6 +127,10 @@ class BrainPolicy:
     # input is normalized with these before the forward, exactly as in
     # training. None = pre-fix checkpoint (raw inputs, undefined behavior).
     normalization: NormalizationStats | None = None
+    # §7.0.4: per-symbol mfe/mae de-normalization scales from checkpoint
+    # meta (training.risk_target_per_symbol_norm). None = checkpoint
+    # trained on raw excursions — EV legs pass through unchanged.
+    risk_target_scales: dict[str, dict[str, float]] | None = None
     max_state_gap_sec: int | None = None
     force_directional_flip: bool = False
     default_target_fraction: float = 0.05
@@ -156,6 +160,24 @@ class BrainPolicy:
                 "or set risk.ev_gate_requires_signals=false to accept an "
                 "inert EV gate for an explicit experiment."
             )
+
+    def _denormalize_ev(
+        self, symbol: str, gain_bps: float, loss_bps: float
+    ) -> tuple[float, float]:
+        """Undo §7.0.4 per-symbol risk-target normalization on the EV legs.
+
+        A checkpoint trained with ``risk_target_per_symbol_norm`` predicts
+        excursions in per-symbol units (typical ≈ 1.0); multiplying back by
+        the symbol's train-split scale restores raw fractions so the EV
+        gate's contract is unchanged. Pre-normalization checkpoints
+        (``risk_target_scales is None``) and unknown symbols pass through.
+        """
+        if self.risk_target_scales is None:
+            return gain_bps, loss_bps
+        scales = self.risk_target_scales.get(symbol)
+        if not scales:
+            return gain_bps, loss_bps
+        return gain_bps * float(scales.get("mfe", 1.0)), loss_bps * float(scales.get("mae", 1.0))
 
     def _amp_enabled(self) -> bool:
         """Resolve whether autocast is active for this policy's device.
@@ -367,6 +389,9 @@ class BrainPolicy:
             )
 
         expected_gain_bps, expected_loss_bps = _extract_ev_signals_single(output.risk_predictions)
+        expected_gain_bps, expected_loss_bps = self._denormalize_ev(
+            snapshot.symbol, expected_gain_bps, expected_loss_bps
+        )
 
         return self._build_proposal(
             snapshot=snapshot,
@@ -651,6 +676,9 @@ class BrainPolicy:
             branch_confidence_dict = {
                 name: float(values[i]) for name, values in branch_confidence_tensors.items()
             }
+            gain_bps, loss_bps = self._denormalize_ev(
+                snapshot.symbol, gain_bps_list[i], loss_bps_list[i]
+            )
             results.append(self._build_proposal(
                 snapshot=snapshot,
                 logit_values=logits_flat[i * 3 : (i + 1) * 3],
@@ -661,7 +689,7 @@ class BrainPolicy:
                 soma_weights=soma_weights_all[i],
                 regime_weights=regime_weights_all[i] if regime_weights_all is not None else [],
                 state_reset_reason=state_reset_reasons[i],
-                expected_gain_bps=gain_bps_list[i],
-                expected_loss_bps=loss_bps_list[i],
+                expected_gain_bps=gain_bps,
+                expected_loss_bps=loss_bps,
             ))
         return results

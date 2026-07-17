@@ -360,6 +360,12 @@ training:
   # by tests/test_label_quality.py::test_label_cost_matches_backtest_costs.
   transaction_cost_bps: 6.0
   platt_calibration_enabled: true     # Fit Platt scaling on validation set after training
+  # 7.0.4 fix: divide mfe/mae targets by the symbol's train-split median
+  # |excursion| so the risk head must learn timing, not vol level; scales
+  # persist in checkpoint meta and inference de-normalizes. Post-cache
+  # trainer transform (raw sample caches unchanged). OFF by default -
+  # flipping is a 9.4 experiment under the 2.0 three-seed protocol.
+  risk_target_per_symbol_norm: false
   # --- RL fine-tuning (reserved scaffold) ---
   rl_finetune_enabled: false
   rl_finetune_episodes: 100

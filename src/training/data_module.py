@@ -77,6 +77,10 @@ class TrainingDataBundle:
     # re-applied at inference (see NormalizationStats) — otherwise the
     # deployed model receives raw-scale inputs it never saw in training.
     normalization_stats: NormalizationStats | None = None
+    # §7.0.4: per-symbol mfe/mae target scales (train-split median |value|)
+    # when training.risk_target_per_symbol_norm is on. Persisted in
+    # checkpoint meta; inference de-normalizes the risk head's outputs.
+    risk_target_scales: dict[str, dict[str, float]] | None = None
 
 
 def _absorb_shard_samples(
@@ -584,6 +588,18 @@ def _finalize_training_bundle(
             ],
         )
 
+    # --- §7.0.4: per-symbol risk-target normalization (post-cache, like the
+    # feature z-scoring above — raw cached samples stay untouched). Applied
+    # BEFORE diagnostics so target summaries reflect what training sees.
+    risk_target_scales = None
+    if config.training.risk_target_per_symbol_norm and "train" in samples_by_split:
+        from src.training.risk_target_norm import normalize_risk_targets
+
+        risk_target_scales = normalize_risk_targets(
+            samples_by_split["train"],
+            *[samples_by_split[k] for k in ("val", "test") if k in samples_by_split],
+        )
+
     # Diagnostics + class-weight + weighted-sampler currently consume
     # ``list[TrainingSample]``-style iteration: they call ``len(samples)``
     # and then ``for sample in samples``.  ``ColumnarSamples`` implements
@@ -750,4 +766,5 @@ def _finalize_training_bundle(
         class_weights=class_weights,
         samples_by_split=samples_by_split,
         normalization_stats=normalization_stats,
+        risk_target_scales=risk_target_scales,
     )
