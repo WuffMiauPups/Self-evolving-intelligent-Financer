@@ -207,6 +207,18 @@ class BacktestEngine:
                     if spread > 0.0:
                         half = spread / 2.0
                         reference_price += half if (decision.side or "buy") == "buy" else -half
+                    if self.config.backtest.adverse_fills:
+                        # §7.2.6 stress mode: push the fill against the
+                        # trade by a fraction of the fill bar's range,
+                        # bounded by the bar's own high/low. Informational
+                        # runs only — never a promotion criterion.
+                        adverse = (
+                            float(fill_bar.high) - float(fill_bar.low)
+                        ) * float(self.config.backtest.adverse_fill_range_fraction)
+                        if (decision.side or "buy") == "buy":
+                            reference_price = min(reference_price + adverse, float(fill_bar.high))
+                        else:
+                            reference_price = max(reference_price - adverse, float(fill_bar.low))
                     fill_timestamp = fill_bar.timestamp
                 else:
                     reference_price = snapshot.last_price

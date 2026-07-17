@@ -65,12 +65,24 @@ class BacktestConfig(BaseModel):
     fill_timing: str = "next_open"
     bars_per_year: int = 19656  # 252 trading days * 78 five-min bars
     seconds_per_bar: float = 300.0
+    # §7.2.6 stress mode: next-open fills are pushed AGAINST the trade by
+    # this fraction of the fill bar's high-low range (bounded by the bar).
+    # Informational runs only — NEVER a promotion criterion. Off by default.
+    adverse_fills: bool = False
+    adverse_fill_range_fraction: float = 0.25
 
     @field_validator("fill_timing")
     @classmethod
     def _validate_fill_timing(cls, value: str) -> str:
         if value not in {"next_open", "same_close"}:
             raise ConfigurationError("backtest.fill_timing must be one of: next_open, same_close")
+        return value
+
+    @field_validator("adverse_fill_range_fraction")
+    @classmethod
+    def _validate_adverse_fraction(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ConfigurationError("backtest.adverse_fill_range_fraction must be within [0, 1]")
         return value
 
 

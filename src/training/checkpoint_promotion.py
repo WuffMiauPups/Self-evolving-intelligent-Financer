@@ -117,6 +117,9 @@ class PromotionDecision:
     candidate_metrics: dict[str, float]
     parent_metrics: dict[str, float]
     delta: dict[str, float] = field(default_factory=dict)
+    # §7.2.6: baseline-vs-adverse stress deltas, recorded VERBATIM when the
+    # runner supplies them. Informational only — never read by gate logic.
+    stress_metrics: dict[str, float] | None = None
 
 
 def evaluate_promotion(
@@ -127,6 +130,7 @@ def evaluate_promotion(
     candidate_benchmark: Any | None = None,
     incumbent_benchmark: Any | None = None,
     slice_metrics: Mapping[str, tuple[float, float]] | None = None,
+    stress_metrics: Mapping[str, float] | None = None,
 ) -> PromotionDecision:
     """Evaluate whether a candidate checkpoint should be promoted.
 
@@ -254,6 +258,7 @@ def evaluate_promotion(
         candidate_metrics=dict(candidate_metrics),
         parent_metrics=dict(parent_metrics or {}),
         delta=delta,
+        stress_metrics=dict(stress_metrics) if stress_metrics is not None else None,
     )
 
 

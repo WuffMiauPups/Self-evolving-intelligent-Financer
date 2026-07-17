@@ -1,0 +1,41 @@
+{
+  "checkpoint": "checkpoints/brain.pt",
+  "target_clusters": [
+    1,
+    2
+  ],
+  "n_sessions": 60,
+  "adverse_fill_range_fraction": 0.25,
+  "baseline": {
+    "total_return": 0.0012192018738714783,
+    "sharpe_ratio": 0.9667325264823348,
+    "max_drawdown": -0.004540334618201025,
+    "expectancy": 0.05221287268585684,
+    "fill_count": 2648.0
+  },
+  "adverse": {
+    "total_return": -0.006537167062590554,
+    "sharpe_ratio": -5.115187242110461,
+    "max_drawdown": -0.00846421652251339,
+    "expectancy": -0.24038523534910894,
+    "fill_count": 2644.0
+  },
+  "stress_metrics": {
+    "stress_baseline_total_return": 0.0012192018738714783,
+    "stress_baseline_sharpe_ratio": 0.9667325264823348,
+    "stress_baseline_max_drawdown": -0.004540334618201025,
+    "stress_baseline_expectancy": 0.05221287268585684,
+    "stress_baseline_fill_count": 2648.0,
+    "stress_adverse_total_return": -0.006537167062590554,
+    "stress_adverse_sharpe_ratio": -5.115187242110461,
+    "stress_adverse_max_drawdown": -0.00846421652251339,
+    "stress_adverse_expectancy": -0.24038523534910894,
+    "stress_adverse_fill_count": 2644.0,
+    "stress_delta_total_return": -0.0077563689364620325,
+    "stress_delta_sharpe_ratio": -6.081919768592796,
+    "stress_delta_max_drawdown": -0.003923881904312365,
+    "stress_delta_expectancy": -0.2925981080349658,
+    "stress_delta_fill_count": -4.0
+  },
+  "note": "informational only \u2014 never a promotion criterion (\u00a77.2.6)"
+}

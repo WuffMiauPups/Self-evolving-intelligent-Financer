@@ -245,6 +245,11 @@ backtest:
   # --- Annualization / simulation timing ---
   bars_per_year: 19656                # 252 days * 78 five-min bars
   seconds_per_bar: 300.0
+  # 7.2.6 stress mode: next-open fills pushed against the trade by this
+  # fraction of the fill bar's range. Informational runs only - never a
+  # promotion criterion.
+  adverse_fills: false
+  adverse_fill_range_fraction: 0.25
 
 training:
   use_real_historical_data: true
