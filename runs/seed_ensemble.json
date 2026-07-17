@@ -1,0 +1,52 @@
+{
+  "oos_cutoff": "2026-03-20 17:20:00+00:00",
+  "members": [
+    "checkpoints/sweep_20260717_142927/brain_run001.pt",
+    "checkpoints/sweep_20260717_142927/brain_run002.pt",
+    "checkpoints/sweep_20260717_142927/brain_run003.pt"
+  ],
+  "incumbent": "checkpoints/brain.pt",
+  "rows": {
+    "seed_run001": {
+      "total_return": -0.03228482704991331,
+      "sharpe_ratio": -2.361311849389407,
+      "expectancy": -1.2558473739193055,
+      "max_drawdown": -0.0678503152925033,
+      "fill_count": 2575.0,
+      "balanced_accuracy": 0.365893362317773
+    },
+    "seed_run002": {
+      "total_return": -0.03167409695811341,
+      "sharpe_ratio": -2.3221396747632936,
+      "expectancy": -1.2339989851377222,
+      "max_drawdown": -0.04933112193767919,
+      "fill_count": 2566.0,
+      "balanced_accuracy": 0.3654825053739674
+    },
+    "seed_run003": {
+      "total_return": -0.00022900813395387853,
+      "sharpe_ratio": 0.0032539854731440917,
+      "expectancy": -0.01493856059695986,
+      "max_drawdown": -0.032028969900466664,
+      "fill_count": 1533.0,
+      "balanced_accuracy": 0.3651624155020971
+    },
+    "ensemble": {
+      "total_return": -0.02874076769705547,
+      "sharpe_ratio": -2.237345649718693,
+      "expectancy": -1.2282163794946808,
+      "max_drawdown": -0.06246780291325871,
+      "fill_count": 2341.0,
+      "balanced_accuracy": 0.36092871542930033
+    },
+    "incumbent": {
+      "total_return": -0.0055498204474895285,
+      "sharpe_ratio": -2.2719097858898123,
+      "expectancy": -0.13697901610327878,
+      "max_drawdown": -0.011620800953617283,
+      "fill_count": 4058.0,
+      "balanced_accuracy": 0.36606868171835377
+    }
+  },
+  "evidence_tier": "suggestive (single shared OOS window; \u00a72.0 governs claims)"
+}
