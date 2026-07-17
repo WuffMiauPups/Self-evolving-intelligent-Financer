@@ -102,6 +102,12 @@ class RuntimeContext:
     # at submit, consumed by the fill capture path so the outcome stream
     # records whether the EXECUTED action was clamped.
     clamped_by_client_order_id: dict[str, bool] = field(default_factory=dict)
+    # (symbol, side) -> cooldown expiry after a terminal submit_failed
+    # (§7.1.1): an order shape the broker deterministically refuses would
+    # otherwise be re-submitted every duplicate_order_window forever.
+    # Broker-adapter state, not risk policy — expires by TIME only; fills
+    # never clear entries (tick_processor owns both ends).
+    submit_failed_until: dict[tuple[str, str], datetime] = field(default_factory=dict)
     daily_anchor_equity: float = 0.0
     daily_anchor_date: date | None = None
     # Debounced memory persistence (tick_processor._maybe_persist_memory):

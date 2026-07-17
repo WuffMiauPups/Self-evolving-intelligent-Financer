@@ -79,6 +79,12 @@ class ExecutionConfig(BaseModel):
 
     max_submit_retries: int = 2
     retry_backoff_sec: float = 0.5
+    # Failed-submit backoff (§7.1.1): after a terminal submit_failed, the
+    # same (symbol, side) intent is skipped for this long instead of being
+    # re-submitted every duplicate_order_window — the next broker rule we
+    # haven't met (e.g. insufficient buying power) must degrade to a
+    # bounded cadence, not a hot loop.  0 disables.
+    submit_failure_cooldown_sec: float = 300.0
     order_journal_enabled: bool = True
     order_journal_path: str = "runs/order_journal.jsonl"
     order_journal_max_bytes: int = 50_000_000

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from src.core.config import AppConfig
 from src.core.logging import get_logger
@@ -354,6 +354,59 @@ def _maybe_persist_memory(ctx: RuntimeContext, *, logger: object) -> None:
             logger.warning("pending_save_failed", error=str(exc))
     if persisted:
         ctx.last_memory_persist_monotonic = now
+
+
+def _submit_cooldown_active(
+    ctx: RuntimeContext, *, symbol: str, side: str, now: datetime, logger: object
+) -> bool:
+    """True while (symbol, side) sits inside the failed-submit cooldown (§7.1.1).
+
+    A terminal ``submit_failed`` means the broker deterministically refuses
+    this order shape (fractional short, side-flip, insufficient buying
+    power, ...); resubmitting the identical intent every
+    ``duplicate_order_window`` is a hot loop, not a retry.  Expiry is
+    time-based only — fills clear nothing.
+    """
+    until = ctx.submit_failed_until.get((symbol, side))
+    if until is None:
+        return False
+    if now >= until:
+        ctx.submit_failed_until.pop((symbol, side), None)
+        return False
+    logger.info(
+        "submit_failed_cooldown",
+        symbol=symbol,
+        side=side,
+        cooldown_until=until.isoformat(),
+    )
+    ctx.metrics.increment("submit_failed_cooldown_skips")
+    return True
+
+
+def _note_submit_failure(
+    ctx: RuntimeContext, *, result: object, now: datetime, logger: object
+) -> None:
+    """Arm the (symbol, side) cooldown on a terminal ``submit_failed`` result.
+
+    Only ``submit_failed`` arms it — broker-side "rejected"/duplicate
+    statuses keep their existing handling.  ``submit_failure_cooldown_sec``
+    of 0 disables the mechanism.
+    """
+    if getattr(result, "status", None) != "submit_failed":
+        return
+    cooldown_sec = float(ctx.config.execution.submit_failure_cooldown_sec)
+    if cooldown_sec <= 0:
+        return
+    until = now + timedelta(seconds=cooldown_sec)
+    ctx.submit_failed_until[(result.symbol, result.side)] = until
+    logger.warning(
+        "submit_failure_cooldown_set",
+        symbol=result.symbol,
+        side=result.side,
+        cooldown_sec=cooldown_sec,
+        cooldown_until=until.isoformat(),
+        reason_code=result.reason_code,
+    )
 
 
 def _intervention_rate(ctx: RuntimeContext) -> float:
@@ -845,6 +898,12 @@ def process_tick(
             continue
 
         side = decision.side or "buy"
+        # Failed-submit backoff (§7.1.1): checked before order construction
+        # so a known-refused (symbol, side) shape never re-enters the router.
+        if _submit_cooldown_active(
+            ctx, symbol=symbol, side=side, now=utc_now(), logger=logger
+        ):
+            continue
         client_order_id, sequence = ctx.router.next_client_order_id(
             session_id=ctx.runtime_session_id,
             symbol=symbol,
@@ -933,6 +992,7 @@ def process_tick(
             ctx.strategy_by_client_order_id.pop(client_order_id, None)
             ctx.clamped_by_client_order_id.pop(client_order_id, None)
             ctx.metrics.increment_reason("order_rejection", result.reason_code or "unknown")
+            _note_submit_failure(ctx, result=result, now=utc_now(), logger=logger)
             continue
         # PaperExecutor updates the portfolio synchronously inside
         # ``execute()``, so its fills only need the risk manager told.
