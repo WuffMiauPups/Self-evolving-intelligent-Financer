@@ -94,6 +94,26 @@ def expand_grid(grid: dict[str, list[object]]) -> list[dict[str, object]]:
     return [dict(zip(keys, combo)) for combo in combos]
 
 
+def isolate_sweep_artifacts(config: AppConfig, sweep_id: str, run_index: int) -> AppConfig:
+    """Redirect every WRITABLE artifact path into the sweep's own dir.
+
+    A sweep must NEVER touch canonical artifacts (§10 rule 3). Beyond the
+    checkpoint, ``save_memory_after_training`` (default true) would write
+    each run's memory bank to the canonical ``memory.persist_path`` —
+    observed 2026-07-17: a sweep left a mismatched-fingerprint bank at
+    ``artifacts/market_memory.pt`` while paper trading ran, forcing the
+    live runtime to refuse-and-rebuild on its next load. The fingerprint
+    guard contained it (no correctness risk), but the sweep had no
+    business writing there. Isolate the bank + pending store alongside
+    the checkpoint.
+    """
+    run_dir = f"checkpoints/{sweep_id}"
+    config.training.checkpoint_dir = run_dir
+    config.memory.persist_path = f"{run_dir}/market_memory_run{run_index:03d}.pt"
+    config.memory.pending_store_path = f"{run_dir}/pending_run{run_index:03d}.pt"
+    return config
+
+
 def apply_overrides(config: AppConfig, overrides: dict[str, object]) -> AppConfig:
     """Apply sweep overrides to a config copy."""
     config = deepcopy(config)
@@ -250,8 +270,9 @@ def main() -> int:
 
         try:
             run_config = apply_overrides(base_config, combo)
-            # Use a unique checkpoint path per run
-            run_config.training.checkpoint_dir = f"checkpoints/{sweep_id}"
+            # Isolate ALL writable artifacts (checkpoint + memory bank +
+            # pending store) into the sweep dir — never the canonical paths.
+            run_config = isolate_sweep_artifacts(run_config, sweep_id, i + 1)
             checkpoint_name = f"brain_run{i + 1:03d}.pt"
             # sweep manages its own per-run paths via checkpoint_dir override
             # + post-rename below, so opt out of run_supervised_training's
