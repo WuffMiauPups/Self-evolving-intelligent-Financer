@@ -171,6 +171,11 @@ class BacktestEngine:
                         "bar_index": index,
                         "action": int(proposal.action),
                         "confidence": float(proposal.confidence),
+                        # EV-gate inputs (§7.0.4): recorded so predicted
+                        # MFE/|MAE| can be rank-correlated against realized
+                        # excursions offline.  Additive keys.
+                        "expected_gain_bps": float(getattr(proposal, "expected_gain_bps", 0.0)),
+                        "expected_loss_bps": float(getattr(proposal, "expected_loss_bps", 0.0)),
                     }
                 )
                 decision = self.risk_manager.evaluate(

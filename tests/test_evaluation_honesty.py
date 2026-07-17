@@ -258,8 +258,20 @@ def test_decision_log_is_emitted() -> None:
     report = engine.run({"AAPL": bars}, BuyAndHoldPolicy())
     assert report.decision_log
     first = report.decision_log[0]
-    assert set(first) == {"symbol", "timestamp", "bar_index", "action", "confidence"}
+    assert set(first) == {
+        "symbol",
+        "timestamp",
+        "bar_index",
+        "action",
+        "confidence",
+        "expected_gain_bps",
+        "expected_loss_bps",
+    }
     assert first["action"] == 1
+    # §7.0.4 additive fields: the record carries the proposal's EV legs
+    # (BuyAndHold ships heuristic non-zero legs so it can pass the EV gate).
+    assert isinstance(first["expected_gain_bps"], float)
+    assert isinstance(first["expected_loss_bps"], float)
 
 
 # ── Walk-forward honesty (§4.4.3) ───────────────────────────────────────

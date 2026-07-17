@@ -35,6 +35,11 @@ class DecisionEvent:
     resized: bool = False
     order_status: str | None = None
     client_order_id: str | None = None
+    # EV-gate inputs (§7.0.4): the risk head's predicted MFE / |MAE| in bps
+    # exactly as the EV gate consumed them.  Additive fields — old lines
+    # simply lack the keys and ``read_all`` (raw dicts) stays tolerant.
+    expected_gain_bps: float = 0.0
+    expected_loss_bps: float = 0.0
 
     def to_json_line(self) -> str:
         payload = {
@@ -51,6 +56,8 @@ class DecisionEvent:
             "resized": bool(self.resized),
             "order_status": self.order_status,
             "client_order_id": self.client_order_id,
+            "expected_gain_bps": float(self.expected_gain_bps),
+            "expected_loss_bps": float(self.expected_loss_bps),
         }
         return json.dumps(payload, separators=(",", ":"), default=str)
 

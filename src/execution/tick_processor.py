@@ -453,6 +453,8 @@ def _write_decision_event(
                 client_order_id=(
                     None if result is None else getattr(result, "client_order_id", None)
                 ),
+                expected_gain_bps=float(getattr(proposal, "expected_gain_bps", 0.0)),
+                expected_loss_bps=float(getattr(proposal, "expected_loss_bps", 0.0)),
             )
         )
     except Exception:  # noqa: BLE001 - observability must never block trading
