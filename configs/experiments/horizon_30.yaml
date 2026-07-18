@@ -1,0 +1,16 @@
+# §9.4 arm-3 (horizon-extension) candidate overlay: primary direction horizon
+# 15 -> 30 bars (75 -> 150 min). THE ONLY CHANGE vs the H=15 baseline
+# (configs/default.yaml + configs/training.yaml, which already sets primary=15).
+#
+# Why just this one key: the HORIZON_COST_AUDIT (§7.0.2) shows the tradeable-
+# move breakeven hit rate falls 57.7% -> 55.6% moving the primary bet from
+# H=15 to H=30 — i.e. a longer bet needs less directional accuracy to clear
+# the 6bps round trip. 30 is already in training.auxiliary_horizons=[30,60],
+# so the 30-bar future return is computed and targets.py honours it as the
+# direction label (targets.py:102, `primary_horizon in outcome.future_returns`).
+# forward_horizons, auxiliary_horizons, and the max-horizon (=60) session mask
+# are all UNCHANGED, so this isolates the direction-target horizon and nothing
+# else. Named metric (arm 3): OOS net expectancy, each arm scored at its own
+# native horizon (benchmark holds effective_primary_horizon bars).
+training:
+  primary_direction_horizon: 30
