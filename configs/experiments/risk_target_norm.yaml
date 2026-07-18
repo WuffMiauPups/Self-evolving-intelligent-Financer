@@ -1,0 +1,11 @@
+# §9.4 arm-4 candidate overlay: per-symbol risk-target normalization.
+# THE ONLY CHANGE vs the knob-OFF baseline (configs/default.yaml +
+# configs/training.yaml). Divides the mfe/mae training targets by each
+# symbol's train-split median |excursion| (src/training/risk_target_norm.py,
+# a post-cache trainer-time transform → no cache-fingerprint churn), so the
+# risk head must learn per-symbol TIMING around 1.0 instead of the trivially
+# feature-derivable cross-sectional excursion LEVEL. Scales persist in
+# checkpoint meta; inference de-normalizes. Named metric (arm 4): per-symbol
+# EV-audit Spearman moving OFF ≈0 (scripts/audit_ev_inputs.py, §7.0.4).
+training:
+  risk_target_per_symbol_norm: true
