@@ -18,10 +18,10 @@ The idea (news, policy headlines, geopolitics as bot input) is the most plausibl
 
 ## 2. Phases
 
-### N0 — Point-in-time news archive *(ungated; start now — data accrues while everything else runs)*
+### N0 — Point-in-time news archive *(✅ SHIPPED + LIVE 2026-07-19, commit f139208)*
 
-`scripts/collect_news.py`: (a) one-time historical backfill for the 13-symbol universe + market-wide, 2022-01 → now; (b) an incremental poller (REST, ~60 s cadence is plenty at our latency assumption) appending to `runs/news/news_YYYYMM.jsonl`. Each row: article id, `published_at`, `ingested_at`, symbols, headline, summary, source, url. Dedup by article id; append-only; no interpretation of any kind in this phase. Runs on the paper-week box (tiny CPU/network footprint) via the same hidden-launcher pattern as the sweep.
-**→ verify:** backfill covers ≥ 2022 for the universe with monotone timestamps; the poller's measured `ingested_at − published_at` distribution is reported (this IS the latency model N1/N2 use); a torn-line-tolerant loader with tests, matching the ledger style.
+`scripts/collect_news.py`: (a) one-time historical backfill for the 13-symbol universe + market-wide, 2022-01 → now; (b) an incremental poller (REST, ~60 s cadence is plenty at our latency assumption) appending to `runs/news/news_YYYYMM.jsonl`. Each row: article id, `published_at`, `ingested_at`, symbols, headline, summary, source, url — plus `mode` ("backfill"/"poll"): only poll rows may feed the latency model, backfill rows were ingested years after publication. Dedup by article id; append-only; no interpretation of any kind in this phase. Runs on the paper-week box (tiny CPU/network footprint) via `scripts/launch_news_collector_hidden.vbs`; the poller resumes from the newest archived timestamp, so machine-off gaps self-heal.
+**→ verify:** ✅ backfill 2026-07-19 = **117,552 articles, every month 2022-01→2026-07 present** (median ~2,127/month; `--summary` prints the per-month view); poller live at 60 s cadence (latency distribution accrues in `logs/news_poller.log` — weekend sample is thin, the paper week supplies the real distribution); torn-line-tolerant loader + 6 tests in `tests/test_news_archive.py` (ledger style). Implementation note baked into the collector: alpaca-py paginates news INTERNALLY (`NewsRequest.limit` is a TOTAL cap; `NewsSet.next_page_token` is always None), so fetching is a publication-time cursor loop, not token paging.
 
 ### N1 — Event study, offline, BEFORE any runtime wiring *(the §7.0.2 pattern: one script, one table, one go/no-go)*
 
