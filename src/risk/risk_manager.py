@@ -172,6 +172,38 @@ class RiskManager:
 
         if (self.config.kill_switch or self._kill_switch) and not risk_reducing:
             reasons.append("kill_switch")
+        # --- Horizon-aligned holding period (§7.1.6). The model predicts
+        # H-bar outcomes; re-deciding every bar pays the round trip without
+        # collecting the predicted move (measured: §9.4 arm 3 — the per-bar
+        # EV gate traded 2x more at H=30 with no better accuracy). While a
+        # directional position is younger than horizon_hold_sec, proposals
+        # that would CHANGE it are rejected. Risk always overrides:
+        # position-guard exits pass, and risk-reducing proposals pass when a
+        # halt state (kill switch / daily-loss breach) is active. Positions
+        # adopted from broker reconciliation carry their adoption time as
+        # entry_time, so a restart starts a fresh (conservative) window.
+        if (
+            self.config.horizon_hold_sec > 0.0
+            and current_position is not None
+            and abs(current_qty) > 1.0e-9
+            and order_qty >= 1.0e-6
+            and proposal.strategy_id != "position_guard"
+        ):
+            held_sec = (now - current_position.entry_time).total_seconds()
+            if held_sec < self.config.horizon_hold_sec:
+                halt_active = (
+                    self.config.kill_switch
+                    or self._kill_switch
+                    or portfolio.daily_pnl <= -abs(self.config.max_daily_loss)
+                    or (
+                        self.config.max_daily_loss_pct is not None
+                        and portfolio.equity > 0
+                        and portfolio.daily_pnl
+                        <= -(portfolio.equity * self.config.max_daily_loss_pct)
+                    )
+                )
+                if not (risk_reducing and halt_active):
+                    reasons.append("horizon_hold_active")
         if proposal.request_id in self._processed_request_ids:
             reasons.append("duplicate_request_id")
         age = now - proposal.timestamp

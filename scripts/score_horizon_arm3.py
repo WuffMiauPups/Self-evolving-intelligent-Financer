@@ -44,6 +44,14 @@ def main() -> int:
                         help="Seed order matching run001/run002/run003")
     parser.add_argument("--append-scorecard", action="store_true",
                         help="Append the 6 rows to docs/analysis/SCORECARD.md")
+    parser.add_argument(
+        "--h30-hold-bars", type=int, default=0,
+        help=(
+            "7.1.6 combined arm: hold the H=30 candidate's positions for this "
+            "many bars (sets risk.horizon_hold_sec = N x backtest.seconds_per_bar "
+            "on the h30 config only). 0 = plain arm-3 scoring."
+        ),
+    )
     args = parser.parse_args()
 
     base = _matching_config("h15")
@@ -81,6 +89,12 @@ def main() -> int:
     rows: dict[str, dict[int, object]] = {"h15": {}, "h30": {}}
     for arm, d in arms.items():
         cfg = _matching_config(arm)
+        if arm == "h30" and args.h30_hold_bars > 0:
+            cfg.risk.horizon_hold_sec = float(
+                args.h30_hold_bars * cfg.backtest.seconds_per_bar
+            )
+            print(f"[h30] horizon hold ON: {args.h30_hold_bars} bars "
+                  f"= {cfg.risk.horizon_hold_sec:.0f}s")
         horizon = cfg.training.effective_primary_horizon
         for idx, seed in enumerate(args.seeds, start=1):
             ck = d / f"brain_run00{idx}.pt"

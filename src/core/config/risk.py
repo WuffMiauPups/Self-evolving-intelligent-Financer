@@ -38,6 +38,18 @@ class RiskConfig(BaseModel):
     # 0 disables (default: the model + account-level limits own exits).
     position_stop_loss_pct: float = 0.0    # e.g. 0.05 = flatten at -5%
     position_take_profit_pct: float = 0.0  # e.g. 0.08 = flatten at +8%
+    # --- Horizon-aligned holding period (§7.1.6, experiment knob) ---
+    # The model predicts H-bar outcomes but the engines may re-decide the
+    # position every bar — each early flip pays the round trip without
+    # collecting the predicted move (measured: §9.4 arm 3). When > 0, a
+    # directional position is re-decidable only after this many seconds
+    # (set to H bars x bar period, e.g. 30 x 300 = 9000 for an H=30 model).
+    # Risk always overrides: position-guard exits are exempt, and
+    # risk-reducing proposals under an active halt (kill switch /
+    # daily-loss) are exempt so de-risking is never blocked. Wall-clock
+    # seconds, so a hold spanning the overnight gap releases at the next
+    # open. Enforced in the SHARED risk path (both engines). 0 disables.
+    horizon_hold_sec: float = 0.0
     # Trading costs (physics, not decisions): fed into the EV gate so the
     # risk manager can reject trades whose expected value doesn't cover costs.
     fee_bps: float = 1.0
@@ -148,6 +160,13 @@ class RiskConfig(BaseModel):
     def validate_min_trade_notional(cls, value: float) -> float:
         if value < 0.0:
             raise ConfigurationError("risk.min_trade_notional must be >= 0 (0 disables)")
+        return value
+
+    @field_validator("horizon_hold_sec")
+    @classmethod
+    def validate_horizon_hold_sec(cls, value: float) -> float:
+        if value < 0.0:
+            raise ConfigurationError("risk.horizon_hold_sec must be >= 0 (0 disables)")
         return value
 
     @field_validator("position_stop_loss_pct", "position_take_profit_pct")

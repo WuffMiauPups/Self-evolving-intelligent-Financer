@@ -228,6 +228,12 @@ risk:
   # backtest sweep before enabling live.
   position_stop_loss_pct: 0.0
   position_take_profit_pct: 0.0
+  # Horizon-aligned holding (7.1.6, experiment knob): when > 0, a directional
+  # position is re-decidable only after this many seconds (set to H bars x
+  # bar period, e.g. 30 x 300 = 9000 for an H=30 model). Position-guard
+  # exits and risk-reducing proposals under an active halt are exempt.
+  # Enforced in the shared risk path (both engines). 0 disables.
+  horizon_hold_sec: 0.0
   fee_bps: 1.0
   slippage_bps: 2.0
   # Refuse to build a brain policy around a checkpoint without a risk head
