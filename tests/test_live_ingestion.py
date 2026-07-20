@@ -346,3 +346,165 @@ def test_hydration_preserves_entry_time_for_same_side_position() -> None:
     first_entry = portfolio.positions["AAPL"].entry_time
     hydrate_portfolio_positions(portfolio, [broker_position])
     assert portfolio.positions["AAPL"].entry_time == first_entry
+
+
+# ---------------------------------------------------------------------------
+# Fill-capture vs hydration race (observed live 2026-07-20): a closing
+# fill's PnL was booked 0.0 because hydration consumed the fill's position
+# effect before the order reached a terminal state.
+# ---------------------------------------------------------------------------
+
+
+AAPL_ENTRY = 325.825404
+AAPL_EXIT = 326.500809
+AAPL_QTY = 5.481
+_SELL_ID = "seif-x-AAPL-s-202607201835-0001"
+
+
+def _filled_sell_order() -> dict:
+    """What Alpaca's closed-order lookup serves once the sell has filled."""
+    return {
+        "id": "oid-1",
+        "client_order_id": _SELL_ID,
+        "symbol": "AAPL",
+        "filled_qty": AAPL_QTY,
+        "filled_avg_price": AAPL_EXIT,
+        "side": "sell",
+        "status": "filled",
+        "updated_at": T0 + timedelta(seconds=6),
+    }
+
+
+def _run_scripted_sync(ctx, script: list[tuple[list[dict], list[dict]]]) -> None:
+    """Drive the REAL _sync_live_state once per scripted (positions, orders) poll.
+
+    Models a broker whose positions endpoint runs ahead of the orders
+    endpoint: each step is what the two endpoints return on that poll.
+    """
+    for positions, orders in script:
+        ctx.client = SimpleNamespace(
+            get_account=lambda: {"cash": 100_000.0, "equity": 100_000.0, "last_equity": 100_000.0},
+            get_positions=lambda p=positions: [dict(x) for x in p],
+            get_open_orders=lambda o=orders: list(o),
+            get_order_by_client_order_id=lambda cid: dict(_filled_sell_order()),
+        )
+        assert _sync_live_state(ctx, logger=LOGGER) is not None
+
+
+def _race_ctx(tmp_path=None):
+    """Ctx holding a long AAPL book with the sell order tracked in flight."""
+    ctx = _ctx()
+    from src.risk.portfolio_state import apply_fill
+
+    apply_fill(
+        ctx.portfolio, symbol="AAPL", signed_delta=AAPL_QTY, fill_price=AAPL_ENTRY, timestamp=T0
+    )
+    ctx.router.open_orders_by_client_id[_SELL_ID] = OrderState(
+        client_order_id=_SELL_ID,
+        symbol="AAPL",
+        side="sell",
+        quantity=AAPL_QTY,
+        filled_qty=0.0,
+        remaining_qty=AAPL_QTY,
+        status="accepted",
+        updated_at=T0,
+        order_id="oid-1",
+        terminal=False,
+    )
+    if tmp_path is not None:
+        ctx.config.execution = SimpleNamespace(
+            observation_stream_enabled=True,
+            observation_stream_path=str(tmp_path / "observations.jsonl"),
+        )
+    return ctx
+
+
+def test_partial_fill_hydration_race_books_full_close_pnl(tmp_path) -> None:
+    """THE 2026-07-20 regression: partial fill seen by the positions endpoint
+    while the order is still open -> hydration must NOT consume the position;
+    the terminal capture one tick later books the FULL close PnL."""
+    partial = {
+        "id": "oid-1",
+        "client_order_id": _SELL_ID,
+        "symbol": "AAPL",
+        "side": "sell",
+        "qty": AAPL_QTY,
+        "filled_qty": 4.0,
+        "remaining_qty": AAPL_QTY - 4.0,
+        "status": "partially_filled",
+        "updated_at": T0 + timedelta(seconds=3),
+        "terminal": False,
+    }
+    ctx = _race_ctx(tmp_path=tmp_path)
+    # Tick 1: broker positions ALREADY FLAT (fill executed), order still
+    # open as partially_filled -> non-terminal, nothing capturable yet.
+    # Tick 2: order gone from the open list -> disappeared -> captured.
+    _run_scripted_sync(ctx, [([], [partial]), ([], [])])
+
+    expected_pnl = (AAPL_EXIT - AAPL_ENTRY) * AAPL_QTY
+    assert len(ctx.ledger.fills) == 1
+    assert ctx.ledger.fills[0].realized_pnl == pytest.approx(expected_pnl, abs=1e-6)
+    assert ctx.portfolio.realized_pnl == pytest.approx(expected_pnl, abs=1e-6)
+    # Book converged to broker truth (flat) the same tick the fill captured.
+    assert ctx.portfolio.get_position("AAPL") is None
+    # The arm-1 outcome stream got a RESOLVED row, not an excluded 0.0.
+    from src.training.replay_buffer import load_observations
+
+    observations = load_observations(ctx.config.execution.observation_stream_path)
+    assert len(observations) == 1
+    assert observations[0].realized_pnl == pytest.approx(expected_pnl, abs=1e-6)
+
+
+def test_endpoint_lag_without_partial_also_preserved(tmp_path) -> None:
+    """Variant: no partial fill — the positions endpoint just updates a poll
+    before the orders endpoint drops the order."""
+    still_open = {
+        "id": "oid-1",
+        "client_order_id": _SELL_ID,
+        "symbol": "AAPL",
+        "side": "sell",
+        "qty": AAPL_QTY,
+        "filled_qty": 0.0,
+        "remaining_qty": AAPL_QTY,
+        "status": "accepted",
+        "updated_at": T0,
+        "terminal": False,
+    }
+    ctx = _race_ctx(tmp_path=tmp_path)
+    _run_scripted_sync(ctx, [([], [still_open]), ([], [])])
+    expected_pnl = (AAPL_EXIT - AAPL_ENTRY) * AAPL_QTY
+    assert ctx.portfolio.realized_pnl == pytest.approx(expected_pnl, abs=1e-6)
+    assert ctx.portfolio.get_position("AAPL") is None
+
+
+def test_hydration_skip_only_applies_while_order_in_flight() -> None:
+    """No in-flight order -> hydration overwrites exactly as before."""
+    ctx = _ctx()
+    from src.risk.portfolio_state import apply_fill
+
+    apply_fill(ctx.portfolio, symbol="AAPL", signed_delta=10.0, fill_price=100.0, timestamp=T0)
+    assert ctx.router.symbols_with_open_orders() == set()
+    hydrate_portfolio_positions(
+        ctx.portfolio, [], skip_symbols=ctx.router.symbols_with_open_orders()
+    )
+    assert ctx.portfolio.get_position("AAPL") is None  # broker flat wins
+
+
+def test_router_symbols_with_open_orders_lifecycle() -> None:
+    router = OrderRouter(paper_executor=None)
+    state = OrderState(
+        client_order_id="cid-1",
+        symbol="NVDA",
+        side="buy",
+        quantity=1.0,
+        filled_qty=0.0,
+        remaining_qty=1.0,
+        status="accepted",
+        updated_at=T0,
+        terminal=False,
+    )
+    router.open_orders_by_client_id["cid-1"] = state
+    assert router.symbols_with_open_orders() == {"NVDA"}
+    transitions, disappeared = router.sync_open_orders([])  # order vanished
+    assert disappeared == ["cid-1"]
+    assert router.symbols_with_open_orders() == set()

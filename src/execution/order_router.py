@@ -110,6 +110,17 @@ class OrderRouter:
             disappeared.append(missing_id)
         return transitions, disappeared
 
+    def symbols_with_open_orders(self) -> set[str]:
+        """Symbols with an order still tracked as in flight.
+
+        Fill capture uses this to defer position hydration: while an order
+        is in flight, the local book is the accounting truth for its symbol
+        (see ``hydrate_portfolio_positions``).  Terminal and disappeared
+        orders are released by ``sync_open_orders`` BEFORE fills are
+        captured, so a completed order's symbol re-hydrates the same tick.
+        """
+        return {state.symbol for state in self.open_orders_by_client_id.values()}
+
     def quarantine_symbol(
         self,
         symbol: str,

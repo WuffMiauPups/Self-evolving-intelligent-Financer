@@ -158,11 +158,36 @@ def run_startup_reconciliation(
 def hydrate_portfolio_positions(
     portfolio: PortfolioState,
     positions: list[dict[str, Any]],
+    *,
+    skip_symbols: set[str] | None = None,
 ) -> dict[str, PositionState]:
+    """Overwrite local positions from broker truth.
+
+    ``skip_symbols``: symbols whose LOCAL state must be preserved untouched
+    this pass — used for symbols with an order still in flight.  The broker
+    position already reflects a fill the moment it executes, but the fill is
+    only captured (and its PnL realized) when the ORDER reaches a terminal
+    state, which can be one or more polls later (partial fills, or the
+    positions endpoint updating ahead of the orders endpoint).  Hydrating
+    such a symbol in between consumes the fill's position effect without
+    realizing anything, so the eventual ``apply_fill`` finds no position and
+    returns 0.0 — observed live 2026-07-20 (AAPL close booked
+    realized_pnl=0.0 instead of ~+$3.67).  While an order is in flight the
+    local book, maintained by ``apply_fill`` at capture time, is the
+    accounting truth for that symbol; hydration resumes the same tick the
+    order completes.
+    """
     previous = dict(portfolio.positions)
+    skip = skip_symbols or set()
     hydrated_positions: dict[str, PositionState] = {}
     portfolio.positions.clear()
+    for symbol in skip:
+        if symbol in previous:
+            portfolio.positions[symbol] = previous[symbol]
+            hydrated_positions[symbol] = previous[symbol]
     for position in positions:
+        if str(position["symbol"]) in skip:
+            continue
         raw_entry = position.get("created_at")
         if raw_entry is not None and not isinstance(raw_entry, datetime):
             try:

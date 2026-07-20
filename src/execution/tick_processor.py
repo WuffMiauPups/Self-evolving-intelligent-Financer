@@ -71,8 +71,10 @@ def _sync_live_state(ctx: RuntimeContext, *, logger: object) -> list[object] | N
 
     Order matters: fills are captured against the *pre-hydration*
     position book (so close-out PnL is computed from the entry prices we
-    tracked), then positions are overwritten from the broker, then cash/
-    equity/daily-PnL sync from the account snapshot.
+    tracked), then positions are overwritten from the broker — EXCEPT
+    symbols with an order still in flight, which keep the local book until
+    their fill is captured — then cash/equity/daily-PnL sync from the
+    account snapshot.
 
     Returns the order transitions, or ``None`` when the broker was
     unreachable — the caller must skip trading for the tick but keep the
@@ -106,7 +108,19 @@ def _sync_live_state(ctx: RuntimeContext, *, logger: object) -> list[object] | N
     ctx.sync_failure_count = 0
     transitions, disappeared = ctx.router.sync_open_orders(open_orders)
     _capture_broker_fills(ctx, transitions=transitions, disappeared=disappeared, logger=logger)
-    hydrate_portfolio_positions(ctx.portfolio, positions)
+    # Capture-before-hydrate must hold ACROSS ticks, not just within this
+    # one: the broker position reflects a fill the moment it executes, but
+    # the fill is only capturable once the ORDER is terminal — one or more
+    # polls later for partial fills or when the positions endpoint updates
+    # ahead of the orders endpoint. Hydrating such a symbol in between
+    # consumes the fill's position effect unrealized, and the eventual
+    # apply_fill then books 0.0 (observed live 2026-07-20, AAPL). Symbols
+    # with an order still in flight keep their locally-tracked position;
+    # sync_open_orders released completed orders above, so those symbols
+    # re-hydrate from broker truth in this same call.
+    hydrate_portfolio_positions(
+        ctx.portfolio, positions, skip_symbols=ctx.router.symbols_with_open_orders()
+    )
     _sync_account_state(ctx, account=account)
     return transitions
 
