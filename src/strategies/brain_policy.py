@@ -236,6 +236,15 @@ class BrainPolicy:
             long_logit = float(logit_values[int(Action.LONG)])
             action_index = int(Action.LONG) if long_logit >= short_logit else int(Action.SHORT)
         action = ACTION_TO_SIGN[Action(action_index)]
+        # §7.0.4 addendum (2026-07-20): MFE/MAE are PRICE-PATH up/down
+        # excursions, so the extracted legs mean "gain/loss for a LONG".
+        # The gate's contract is "gain/loss FOR THE PROPOSED TRADE" — a
+        # short's gain is the down-move. Swap exactly once, here, where the
+        # resolved action is known; both propose() and propose_batch()
+        # funnel through this method. Pre-fix, 6,425 OOS short proposals
+        # passed the pre-cost EV inequality at 0.3% vs 48.4% corrected.
+        if action == -1:
+            expected_gain_bps, expected_loss_bps = expected_loss_bps, expected_gain_bps
         if action == 0:
             target_fraction = 0.0
         elif abs(target_fraction) < 1e-6:

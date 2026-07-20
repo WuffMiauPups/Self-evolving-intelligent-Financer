@@ -15,6 +15,15 @@ AS-CONSUMED mapping and under the DIRECTION-CORRECTED mapping
 
 Measurement only — no model or gate changes here.
 
+NOTE (2026-07-21): this script was written PRE-fix, when proposals carried
+price-relative legs for both sides. After the leg fix (short proposals now
+carry TRADE-relative legs at the gate), a fresh run's "as consumed" column
+reflects the corrected mapping, and the "direction_corrected" column
+DOUBLE-swaps shorts — it is vestigial post-fix. The script is kept as the
+pre-fix record and as a regression detector: post-fix, short
+`ev_as_consumed_positive_share` should sit near the pre-fix corrected value
+(~48% pre-cost), not near 0.3%.
+
 Usage:
     python scripts/audit_ev_direction.py --real-data
 """

@@ -156,11 +156,21 @@ def main() -> int:
             skipped_tail += 1
             continue
         realized_mfe, realized_mae = excursions
+        pred_gain = float(record.get("expected_gain_bps", 0.0))
+        pred_loss = float(record.get("expected_loss_bps", 0.0))
+        # Since the 2026-07-21 EV-leg fix, SHORT proposals carry
+        # TRADE-relative legs (gain = predicted down-move). This audit's
+        # baseline (2026-07-17 artifact) correlates PRICE-relative
+        # predictions vs price-path excursions, so un-swap shorts back to
+        # price-relative here — keeping every run of this script comparable
+        # with the recorded §7.0.4 baseline.
+        if int(record.get("action", 0)) == -1:
+            pred_gain, pred_loss = pred_loss, pred_gain
         rows.append(
             {
                 "symbol": symbol,
-                "pred_gain": float(record.get("expected_gain_bps", 0.0)),
-                "pred_loss": float(record.get("expected_loss_bps", 0.0)),
+                "pred_gain": pred_gain,
+                "pred_loss": pred_loss,
                 "real_mfe": realized_mfe,
                 "real_mae": realized_mae,
             }
