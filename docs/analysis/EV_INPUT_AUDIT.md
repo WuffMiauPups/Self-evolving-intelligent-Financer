@@ -28,3 +28,34 @@ Per-symbol detail: AAPL +0.001/+0.022, AMZN +0.001/+0.021, GOOGL −0.005/+0.066
 - The §7.0.3 Platt refit (realized-outcome calibration) carries MORE weight: with EV legs uninformative, calibrated confidence is the only live lever that can make the EV inequality discriminate.
 - Any future risk-head improvement claim must show **per-symbol** rank correlation moving, not pooled (pooled can be inflated by cross-sectional vol alone). This audit is the baseline; the script is deterministic given cache + checkpoint.
 - Live decisions now record the EV legs (`DecisionEvent.expected_gain_bps/expected_loss_bps`, additive fields) so the paper week accumulates the live-side dataset for the same comparison against fills.
+
+---
+
+## 2026-07-20 addendum — direction-split audit: the short side's EV legs are SWAPPED
+
+**Trigger:** paper-week day 1 measured 92 live short intents with only 6 executed (longs: 73/206), at near-identical confidence (0.489 vs 0.509) but wildly asymmetric EV legs (shorts gain 97 / loss 198 bps; longs 450 / 221). A secondary blocker was `fractional_short_unsupported` (56/92 — Alpaca requires whole-share shorts, so shorts are only feasible on low-priced names; the session's executed shorts were exactly 1.000-share GOOGL/SPY).
+
+**Run:** `python scripts/audit_ev_direction.py --real-data` (incumbent `d748f28c`, same OOS window/protocol as above; artifact `runs/ev_direction_audit.json`; 13,413 directional decisions).
+
+| | LONG (n=6,988) | SHORT (n=6,425) |
+|---|---|---|
+| mean confidence | 0.4336 | 0.3681 |
+| predicted MFE / \|MAE\| (bps) | 230.3 / 103.9 | 126.8 / 221.1 |
+| realized MFE / \|MAE\| (bps) | 47.6 / 62.2 | 45.2 / 53.1 |
+| EV **as consumed** (mean, share > 0) | +40.8, **76.9%** | **−92.6, 0.3%** |
+| EV **direction-corrected** | +40.8, 76.9% (unchanged) | **+1.7, 48.4%** |
+| Spearman predMFE~realMFE / pred\|MAE\|~real\|MAE\| | +0.131 / +0.226 | +0.136 / +0.163 |
+
+**Mechanism (code-verified, not inferred):** MFE/MAE are *price-path* excursions — `max_favorable = relative_path.max()`, `max_adverse = relative_path.min()` (`src/memory/outcomes.py`), trained direction-agnostically (`targets.py`). At inference `_extract_ev_signals_*` (`src/strategies/brain_policy.py`) maps `gain = MFE`, `loss = |MAE|` **unconditionally**, and the EV gate (`risk_manager.py`) is direction-blind. For a SHORT proposal the legs are therefore inverted: the gate charges the short's win (the down-move) as its loss. The day-1 numbers decode exactly: as-consumed short EV 0.489×97 − 0.511×198 = −53.5 (measured −53.5); corrected ≈ +47.
+
+**Findings:**
+1. **The risk head is symmetrically direction-coherent.** Conditional on a long it predicts up/down ≈ 230/104; conditional on a short, 127/221 — a clean ~2.2:1 mirror. There IS directional signal in the head's levels; the original audit's "vol prior" verdict described the per-symbol *timing* dimension, not this conditional-on-intent dimension.
+2. **The gate structurally vetoes half the model's directional opinion.** 6,425 OOS short proposals pass the (pre-cost) EV inequality at 0.3% as consumed vs 48.4% corrected. Every backtest and scorecard row ever produced shares this defect (same policy path), so historical comparisons remain internally consistent — but the short side has never actually been evaluated, anywhere.
+3. **Not a training-data artifact.** Train targets are near-symmetric: MFE 145.5 vs |MAE| 137.3 bps (ratio 1.06, from the incumbent's own `target_diagnostics`). The "rising market taught a bullish prior" hypothesis is refuted.
+4. **Realized excursions mildly vindicate the short side.** Conditional on short intents, realized down-moves exceed up-moves (53.1 vs 45.2 bps); conditional on long intents it is the reverse tilt (down 62.2 vs up 47.6) — the long book's negative expectancy is consistent with this. Corrected short EV (+1.7 mean) is still ~break-even pre-cost — the point is not that shorts are good, it is that they were never evaluated.
+5. **Levels remain ~3–4× over-predicted** (230/221 predicted vs 48/53 realized) — the original audit's inflation finding stands unchanged.
+
+**Consequences:**
+- The leg mapping is an execution-layer correctness bug (same class as the 2026-07-20 zero-PnL race), NOT a training knob — fixing it is not barred by the §9 step-5 stopping rule, but it changes live behavior (the system would begin taking shorts), so it ships with tests + a backtest impact measurement and is deployed deliberately, not silently.
+- **§9.4 arm 1 must be direction-aware end to end:** §4.2's direction-aware Platt already exists at the calibration layer; the refit on realized outcomes must fit and evaluate per side (short-side confidence is also systematically lower, 0.368 vs 0.434). Fixing the legs without per-side calibration — or vice versa — leaves the short side broken.
+- The whole-share short constraint (§ broker physics) remains a real, separate throttle on short participation for high-priced names regardless of the above.
