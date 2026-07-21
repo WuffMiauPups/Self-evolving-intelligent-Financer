@@ -177,7 +177,66 @@ refused stale sidecar as active; calibrator save() is non-atomic;
 force-directional-flip runtimes would apply calibration out-of-support
 (flag false everywhere).
 
-## 6. Tooling lesson (third fills-ledger artifact this week)
+## 6. Post-fix live session (2026-07-21 16:11-19:22 UTC, session 20260721p5324)
+
+First session on the fixed semantics. 468 post-fix decisions, all tagged
+`confidence_semantics=p_resolved_class`; the stale canonical sidecar was
+refused in the LIVE path (`platt_calibrator_stale_semantics` on
+`checkpoints\platt_calibration.json`) — note memory IS enabled, so
+calibration was previously being APPLIED to live confidence, making the
+guard consequential rather than theoretical.
+
+| direction | n | conf median | EV-pass |
+|---|---|---|---|
+| LONG  | 178 | **0.864** | 98% |
+| FLAT  | 230 | 0.613 | 100% |
+| SHORT |  60 | **0.510** | 80% |
+
+**The model is confident long and coin-flip short**, held over 468
+decisions. Pre-fix this was invisible: every proposal got ~0.49, so the
+gate treated a 0.86-conviction long and a 0.51-guess short identically.
+This independently corroborates §1's OOS finding (long-side rank signal
+3/3 seeds, short-side null 3/3) from a completely different measurement.
+Backtest prediction P1 long-side confirmed and exceeded (77%→84%
+predicted, 85%→98% live). P1 short-side is NOT cleanly testable live —
+the pre/post symbol mixes differ (pre: NVDA/AAPL/MSTR/NFLX; post:
+TSLA/QQQ/AAPL/SPY), and spread/legs are per-symbol.
+
+### 6.1 The real short-side ceiling: SIZING, not price
+
+Investigating a false-alarm divergence produced the sharper finding:
+
+| direction | median target_fraction | notional @ ~$97.7k equity |
+|---|---|---|
+| LONG  | 2.03%  | **$1,987** |
+| SHORT | 0.134% | **$131** |
+
+**The model requests shorts ~15x smaller than its longs** — not
+confidence-scaled (sizing is decoupled from confidence); the sizing head
+simply emits tiny magnitudes on bearish states. At $131, only **2 of 13**
+symbols can host a whole-share short (NFLX $67 → 1.95sh, MSTR $102 →
+1.28sh; PLTR $134 misses at 0.98sh; everything else 0.18–0.63sh). That is
+exactly and only why the day's two live shorts were NFLX and MSTR.
+
+Consequence: the whole-share broker constraint is NOT the binding limit —
+the model's own short sizing is. Any universe below ~$130/share unlocks
+short expression; above it, shorts are structurally unreachable regardless
+of signal quality. This is independent of the confidence fix and is now a
+second, stronger argument for pivot option (c) (cost-viable universe).
+Open question worth a measurement before acting: WHY the sizing head is
+asymmetric — it may be a training-target artifact rather than a view.
+
+### 6.2 Monitoring lesson: measure rates within a direction
+
+Two false alarms this session, both from the same mistake — measuring a
+reason-code as a share of ALL decisions when the per-direction proposal
+MIX is set by `argmax(logits)`, which no gate change touches and which
+drifts with market regime. `scripts/check_postfix_signature.py` now
+measures within a direction, treats a whole-share block on an unaffordable
+symbol as arithmetic rather than divergence, and dedupes standing
+conditions so they announce once.
+
+## 7. Tooling lesson (third fills-ledger artifact this week)
 
 1. Line-count cursor re-read the tail (fixed: timestamp cursor).
 2. `fills.jsonl` is not time-ordered (fixed: high-water-mark max()).
