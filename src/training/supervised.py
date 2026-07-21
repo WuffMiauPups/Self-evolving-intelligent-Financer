@@ -544,6 +544,7 @@ def run_supervised_training(
     if config.training.platt_calibration_enabled:
         from src.training.checkpoints import load_checkpoint_payload
         from src.training.platt_calibration import (
+            CONFIDENCE_SEMANTICS,
             PlattCalibrator,
             direction_aware_outcomes,
             platt_calibration_path_for_checkpoint,
@@ -564,10 +565,19 @@ def run_supervised_training(
                         full_features=batch_on_device["features"],
                         temporal_tensor=batch_on_device.get("temporal_tensor"),
                     )
-                all_confidences.extend(output.confidence.cpu().numpy().flatten().tolist())
-                all_predicted_actions.extend(
-                    output.action_logits.argmax(dim=-1).cpu().numpy().flatten().tolist()
-                )
+                # Fit on P(argmax class) computed FROM THE LOGITS, not on
+                # output.confidence: for decoupled heads the two coincide,
+                # but a legacy (non-decoupled) model's confidence head is a
+                # stability regressor — fitting on it while stamping
+                # p_resolved_class would mint a falsely-certified artifact
+                # (2026-07-21 semantics fix, CONFIDENCE_AUDIT.md). No-flip
+                # runtimes resolve the argmax class, so P(argmax) is exactly
+                # the quantity proposals carry.
+                probs = torch.softmax(output.action_logits.float(), dim=-1)
+                predicted = output.action_logits.argmax(dim=-1)
+                chosen_probs = probs.gather(-1, predicted.unsqueeze(-1)).squeeze(-1)
+                all_confidences.extend(chosen_probs.cpu().numpy().flatten().tolist())
+                all_predicted_actions.extend(predicted.cpu().numpy().flatten().tolist())
                 reg_targets = batch.get("regression_targets", {})
                 if "primary_return" in reg_targets:
                     all_primary_returns.extend(
@@ -585,7 +595,13 @@ def run_supervised_training(
                 per_trade_cost=config.training.transaction_cost_bps / 10_000.0,
             )
             calibrator = PlattCalibrator()
-            calibrator.fit(np.array(all_confidences)[traded_mask], net_outcomes[traded_mask])
+            # Attestation is sound: all_confidences is P(argmax class) from
+            # the logits (see the collection loop above).
+            calibrator.fit(
+                np.array(all_confidences)[traded_mask],
+                net_outcomes[traded_mask],
+                semantics=CONFIDENCE_SEMANTICS,
+            )
             if calibrator.is_fitted:
                 # Bind the artifact to the checkpoint it calibrates and write
                 # it next to that checkpoint — isolated runs keep it inside

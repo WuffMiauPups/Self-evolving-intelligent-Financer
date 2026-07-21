@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from src.training.platt_calibration import (
+    CONFIDENCE_SEMANTICS,
     PLATT_CALIBRATION_FILENAME,
     PlattCalibrator,
     direction_aware_outcomes,
@@ -91,7 +92,13 @@ def test_shorts_80pct_correct_calibrate_near_08_not_02() -> None:
 def _fit_dummy_calibrator(fingerprint: str | None = None) -> PlattCalibrator:
     rng = np.random.default_rng(3)
     calibrator = PlattCalibrator()
-    calibrator.fit(rng.uniform(0.4, 0.9, 64), rng.normal(0.0, 0.01, 64))
+    # semantics attestation (2026-07-21 fix): test fits stand in for
+    # genuine P(resolved class) inputs.
+    calibrator.fit(
+        rng.uniform(0.4, 0.9, 64),
+        rng.normal(0.0, 0.01, 64),
+        semantics=CONFIDENCE_SEMANTICS,
+    )
     assert calibrator.is_fitted
     calibrator.encoder_fingerprint = fingerprint
     calibrator.checkpoint_filename = "brain.pt"
@@ -182,18 +189,44 @@ def test_load_for_checkpoint_mismatch_falls_back_to_passthrough(
     assert any("fingerprint_mismatch" in record.getMessage() for record in caplog.records)
 
 
-def test_load_for_checkpoint_legacy_file_loads_with_warning(tmp_path: Path, caplog) -> None:
+def test_load_for_checkpoint_legacy_file_refused_stale_semantics(tmp_path: Path, caplog) -> None:
+    """Contract change 2026-07-21 (CONFIDENCE_AUDIT.md): artifacts without a
+    ``confidence_semantics`` stamp were fitted on the legacy sigmoid-head
+    quantity and must NOT apply to post-fix P(resolved class) proposals —
+    regardless of the old no-fingerprint tolerance."""
     checkpoint = tmp_path / "brain.pt"
-    # Legacy pre-binding artifact: no fingerprint keys at all.
     legacy_path = platt_calibration_path_for_checkpoint(checkpoint)
     legacy_path.write_text(
         json.dumps({"a": 2.0, "b": -0.5, "is_fitted": True, "n_samples": 128})
     )
     with caplog.at_level(logging.WARNING, logger="src.training.platt_calibration"):
         loaded = load_calibrator_for_checkpoint(checkpoint, expected_fingerprint="fp-new")
+    assert not loaded.is_fitted
+    assert loaded.calibrate(0.7) == 0.7  # passthrough, not stale calibration
+    assert any("stale_semantics" in record.getMessage() for record in caplog.records)
+
+
+def test_load_for_checkpoint_stamped_but_unfingerprinted_loads_with_warning(
+    tmp_path: Path, caplog
+) -> None:
+    """The old no-fingerprint tolerance survives one level down: it applies
+    only to artifacts that pass the semantics guard."""
+    checkpoint = tmp_path / "brain.pt"
+    platt_calibration_path_for_checkpoint(checkpoint).write_text(
+        json.dumps(
+            {
+                "a": 2.0,
+                "b": -0.5,
+                "is_fitted": True,
+                "n_samples": 128,
+                "confidence_semantics": "p_resolved_class",
+            }
+        )
+    )
+    with caplog.at_level(logging.WARNING, logger="src.training.platt_calibration"):
+        loaded = load_calibrator_for_checkpoint(checkpoint, expected_fingerprint="fp-new")
     assert loaded.is_fitted
     assert loaded.a == 2.0
-    assert loaded.b == -0.5
     assert loaded.encoder_fingerprint is None
     assert any("legacy" in record.getMessage() for record in caplog.records)
 

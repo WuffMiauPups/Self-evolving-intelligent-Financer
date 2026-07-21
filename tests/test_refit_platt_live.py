@@ -26,8 +26,17 @@ def _load_module():
     return module
 
 
-def _decision(order_id: str, confidence: float) -> dict:
-    return {"client_order_id": order_id, "confidence": confidence, "approved": True}
+def _decision(order_id: str, confidence: float, *, semantics: str | None = "current") -> dict:
+    """Post-fix ledger row by default; pass ``semantics=None`` for a pre-fix
+    row (they lack the key entirely)."""
+    from src.core.constants import CONFIDENCE_SEMANTICS
+
+    row = {"client_order_id": order_id, "confidence": confidence, "approved": True}
+    if semantics == "current":
+        row["confidence_semantics"] = CONFIDENCE_SEMANTICS
+    elif semantics is not None:
+        row["confidence_semantics"] = semantics
+    return row
 
 
 def _observation(order_id: str, realized: float) -> dict:
@@ -49,6 +58,29 @@ def test_join_excludes_opening_fills_and_unmatched() -> None:
     assert stats["unmatched_observations"] == 1
     assert confidences.tolist() == [0.49, 0.50]
     assert outcomes.tolist() == [1.25, -0.80]
+
+
+def test_join_excludes_pre_fix_semantics_rows() -> None:
+    """Semantics boundary (2026-07-21): rows written before the confidence
+    fix recorded the legacy sigmoid-head quantity and MUST NOT enter a fit
+    on P(resolved class) rows — mixing the two random variables would mint
+    a falsely-stamped calibrator that the loader gate then accepts."""
+    module = _load_module()
+    decisions = [
+        _decision("pre1", 0.51, semantics=None),        # pre-fix: no marker
+        _decision("pre2", 0.49, semantics="something"),  # foreign marker
+        _decision("post1", 0.62),                        # post-fix
+    ]
+    observations = [
+        _observation("pre1", +1.0),
+        _observation("pre2", -1.0),
+        _observation("post1", +2.0),
+    ]
+    confidences, outcomes, stats = module.join_resolved_trades(decisions, observations)
+    assert stats["pre_fix_semantics_excluded"] == 2
+    assert stats["resolved_trades"] == 1
+    assert confidences.tolist() == [0.62]
+    assert outcomes.tolist() == [2.0]
 
 
 def test_fit_on_synthetic_outcomes_improves_calibration_and_widens_range() -> None:

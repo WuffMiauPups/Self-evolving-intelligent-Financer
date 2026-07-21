@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from dataclasses import dataclass, field
 
@@ -236,6 +237,27 @@ class BrainPolicy:
             long_logit = float(logit_values[int(Action.LONG)])
             action_index = int(Action.LONG) if long_logit >= short_logit else int(Action.SHORT)
         action = ACTION_TO_SIGN[Action(action_index)]
+        # Confidence semantics fix (2026-07-21, CONFIDENCE_AUDIT.md): the
+        # proposal's confidence is P(resolved action class) from the action
+        # logits — the quantity the EV gate consumes as win probability.
+        # Pre-fix, legacy checkpoints emitted a sigmoid head trained as an
+        # MFE/volatility/stability regressor (never P(win); measured rank
+        # vs realized outcomes: rho -0.009 over 1,313 OOS round trips) and
+        # decoupled checkpoints emitted the ARGMAX-class probability, which
+        # names the wrong class under a forced flip. Computed exactly once,
+        # here, where the resolved action is known; the raw head value
+        # stays visible in diagnostics as head_confidence.
+        head_confidence = confidence
+        peak = max(logit_values)
+        exps = [math.exp(value - peak) for value in logit_values]
+        confidence = exps[action_index] / sum(exps)
+        if not math.isfinite(confidence):
+            # Non-finite logits (fp16 overflow under autocast saturates to
+            # inf; inf - inf = NaN through the softmax) must fail CLOSED:
+            # NaN would sail through the EV gate because `NaN <= 0` is
+            # False. Zero confidence makes the gate's EV strictly
+            # -loss - cost < 0, vetoing the garbage proposal.
+            confidence = 0.0
         # §7.0.4 addendum (2026-07-20): MFE/MAE are PRICE-PATH up/down
         # excursions, so the extracted legs mean "gain/loss for a LONG".
         # The gate's contract is "gain/loss FOR THE PROPOSED TRADE" — a
@@ -274,6 +296,7 @@ class BrainPolicy:
             "state_reset_reason": state_reset_reason,
             "expected_gain_bps": expected_gain_bps,
             "expected_loss_bps": expected_loss_bps,
+            "head_confidence": head_confidence,
         }
         return proposal, diagnostics
 
@@ -376,7 +399,9 @@ class BrainPolicy:
                 call=self._diag_call_counter,
                 symbol=snapshot.symbol,
                 action_logits=[float(x) for x in logit_values],
-                confidence=confidence,
+                # Raw head output — proposals carry P(resolved class); the
+                # field name says so to avoid mixing the two quantities.
+                head_confidence=confidence,
                 target_fraction=target_fraction,
                 soma_activation=soma_activation,
                 branch_confidences=branch_confidence_dict,
@@ -653,7 +678,9 @@ class BrainPolicy:
                 action_logits_per_symbol=[
                     logits_flat[i * 3 : (i + 1) * 3] for i in range(batch_size)
                 ],
-                confidences=confidences,
+                # Raw head outputs — proposals carry P(resolved class); the
+                # field name says so to avoid mixing the two quantities.
+                head_confidences=confidences,
                 target_fractions=target_fractions,
                 soma_activations=soma_activations,
                 branch_confidences_first_symbol={

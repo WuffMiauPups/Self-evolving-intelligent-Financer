@@ -40,6 +40,11 @@ class DecisionEvent:
     # simply lack the keys and ``read_all`` (raw dicts) stays tolerant.
     expected_gain_bps: float = 0.0
     expected_loss_bps: float = 0.0
+    # Which quantity ``confidence`` carries (2026-07-21 semantics fix,
+    # CONFIDENCE_AUDIT.md). Rows written before the fix lack the key —
+    # they recorded the legacy sigmoid-head output and MUST be excluded
+    # from any calibration fit on P(resolved class) rows.
+    confidence_semantics: str | None = None
 
     def to_json_line(self) -> str:
         payload = {
@@ -58,6 +63,7 @@ class DecisionEvent:
             "client_order_id": self.client_order_id,
             "expected_gain_bps": float(self.expected_gain_bps),
             "expected_loss_bps": float(self.expected_loss_bps),
+            "confidence_semantics": self.confidence_semantics,
         }
         return json.dumps(payload, separators=(",", ":"), default=str)
 

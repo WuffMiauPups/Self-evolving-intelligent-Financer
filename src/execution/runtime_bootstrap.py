@@ -608,6 +608,17 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
         )
     base_policy = build_runtime_brain_policy(config, artifacts, device_ctx.device)
     policy: object = base_policy
+    if config.training.platt_calibration_enabled and not config.memory.enabled:
+        # Calibration is applied by MemoryAwarePolicy._finish_proposal, so
+        # with memory disabled the bare policy path never loads or applies
+        # any calibrator — say so loudly instead of silently no-oping
+        # (found 2026-07-21: the enabled flag was a no-op for the entire
+        # memory-off paper run while a fitted sidecar sat on disk).
+        logger.warning(
+            "platt_enabled_but_not_applied",
+            reason="memory_disabled_bare_policy_path",
+            note="proposals carry UNCALIBRATED P(resolved class)",
+        )
     memory_bank: MemoryBank | None = None
     if config.memory.enabled:
         encoder = ModelStateEncoder(

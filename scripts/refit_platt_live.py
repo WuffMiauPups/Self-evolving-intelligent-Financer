@@ -12,6 +12,13 @@ loss. Only observations with |realized_pnl| > 0 enter the fit, and the
 fit refuses below ``--min-samples`` (default 300) resolved trades — the
 paper week supplies them.
 
+Semantics boundary (2026-07-21, CONFIDENCE_AUDIT.md): ledger rows written
+before the confidence fix recorded the legacy sigmoid-head quantity;
+post-fix rows carry P(resolved class) and are tagged
+``confidence_semantics``. The two are incommensurable — the join keeps
+ONLY tagged rows, the exclusion count is surfaced in stats, and the
+min-samples gate counts post-fix trades alone.
+
 The refit artifact is written to an ISOLATED path
 (``runs/platt_live_refit.json``), fingerprint-stamped for the current
 checkpoint. The canonical sidecar next to the checkpoint moves only
@@ -63,13 +70,23 @@ def join_resolved_trades(
 
     Join key: decision.client_order_id == observation.decision_id.
     Opening fills (realized_pnl == 0.0) are unresolved and excluded —
-    counting them as losses would poison the win labels.
+    counting them as losses would poison the win labels. Decisions whose
+    ``confidence_semantics`` is not the current quantity (pre-fix rows
+    lack the key entirely) are excluded — fitting across the semantics
+    boundary would mix two different random variables.
     """
+    from src.core.constants import CONFIDENCE_SEMANTICS
+
     confidence_by_order: dict[str, float] = {}
+    stale_semantics = 0
     for decision in decisions:
         order_id = decision.get("client_order_id")
-        if order_id:
-            confidence_by_order[str(order_id)] = float(decision.get("confidence", 0.0))
+        if not order_id:
+            continue
+        if decision.get("confidence_semantics") != CONFIDENCE_SEMANTICS:
+            stale_semantics += 1
+            continue
+        confidence_by_order[str(order_id)] = float(decision.get("confidence", 0.0))
 
     confidences: list[float] = []
     outcomes: list[float] = []
@@ -88,6 +105,7 @@ def join_resolved_trades(
         outcomes.append(realized)
     stats = {
         "decisions_with_orders": len(confidence_by_order),
+        "pre_fix_semantics_excluded": stale_semantics,
         "observations": len(observations),
         "unresolved_opening_fills": unresolved,
         "unmatched_observations": unmatched,
@@ -151,7 +169,7 @@ def main() -> int:
     )
     logger = get_logger("refit_platt_live")
 
-    from src.training.platt_calibration import PlattCalibrator
+    from src.training.platt_calibration import CONFIDENCE_SEMANTICS, PlattCalibrator
 
     decisions = _read_jsonl(Path(args.decisions))
     observations = _read_jsonl(Path(args.observations))
@@ -174,7 +192,9 @@ def main() -> int:
         "brier": passthrough.brier_score(confidences, outcomes),
     }
     calibrator = PlattCalibrator()
-    calibrator.fit(confidences, outcomes)
+    # Attestation is sound: join_resolved_trades admits only rows tagged
+    # with the current semantics.
+    calibrator.fit(confidences, outcomes, semantics=CONFIDENCE_SEMANTICS)
     fingerprint, checkpoint_name = _checkpoint_fingerprint(config.model.checkpoint_path)
     calibrator.encoder_fingerprint = fingerprint
     calibrator.checkpoint_filename = checkpoint_name

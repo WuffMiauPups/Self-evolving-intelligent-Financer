@@ -111,7 +111,73 @@ been proposed short at a whole-share size from a flat book yet. The OOS
 backtest books short RTs freely (401) because backtest equity/prices allow
 whole-share sizes on the cheap symbols; the live universe skews expensive.
 
-## 5. Tooling lesson (third fills-ledger artifact this week)
+## 5. THE FIX (2026-07-21, same day)
+
+**Core** (`src/strategies/brain_policy.py`, `_build_proposal` — the shared
+funnel, same site as the EV-leg swap): proposal confidence is now
+**softmax(action_logits)[resolved_action] = P(resolved class)**, computed
+exactly once where the resolved action is known. Legacy checkpoints stop
+emitting the stability regressor; decoupled checkpoints are numerically
+unchanged (flip off) and CORRECTED under a forced flip (P(resolved), not
+P(flat)). The replaced head value stays observable as
+`diagnostics["head_confidence"]`. Non-finite logits fail CLOSED
+(confidence forced to 0.0; the EV gate additionally rejects non-finite
+EV — `NaN <= 0` is False, a fail-open found by adversarial review).
+
+**Semantics boundary machinery** (the guard that keeps old and new
+quantities from ever mixing — three converging adversarial-review findings):
+
+- `CONFIDENCE_SEMANTICS = "p_resolved_class"` (src/core/constants.py).
+- Ledger rows (`DecisionEvent`) carry `confidence_semantics`; pre-fix rows
+  lack the key and are thereby identifiable forever.
+- `PlattCalibrator.fit()` **never self-stamps** — the caller must attest
+  the quantity; unattested artifacts are refused at load.
+- `load_calibrator_for_checkpoint` refuses artifacts without the current
+  stamp (the canonical pre-fix sidecar next to brain.pt is now inert) and
+  honors its never-raises contract on corrupt artifacts.
+- `scripts/refit_platt_live.py` admits ONLY current-semantics ledger rows
+  (exclusion count surfaced in stats) — the ~81k pre-fix rows and all
+  pre-fix resolved trades can never poison a refit.
+- `src/training/supervised.py` fits train-time Platt on P(argmax) computed
+  FROM THE LOGITS (identical for decoupled heads; correct even if a legacy
+  config is ever retrained) and attests it.
+- `runtime_bootstrap` warns loudly when `platt_calibration_enabled` is a
+  no-op (memory-off bare-policy path never applies calibration — this was
+  silently true for the entire paper run).
+
+**Paired OOS impact** (incumbent, EV-leg fix constant, only conf changed;
+`runs/conf_fix_impact_post.json` vs `runs/ev_leg_fix_post.json`):
+
+|  | pre (head conf) | post (P(resolved)) |
+|---|---|---|
+| fills | 5,573 | 6,716 |
+| short round trips | 400 | 604 |
+| expectancy/trade | -0.215 | **-0.152** |
+| total return | -1.21% | **-1.02%** |
+| EV pass share long/short | 76.9% / 48.4% | 83.8% / 78.5% |
+
+Post-fix inversion re-test (`runs/confidence_inversion_oos_postfix.json`):
+entry-conf rho **still null** (-0.015 overall) — the fix makes the
+quantity semantically correct; the incumbent's LOGITS carry no rank
+signal, so no confidence derived from them can rank outcomes. The fix is
+correctness + future-proofing (decoupled retrains DO show the long-side
+gradient in this quantity), not incumbent edge.
+
+Tests: `tests/test_confidence_semantics.py` (15; behavioral ones verified
+failing pre-fix), platt loader contract updated, refit boundary test.
+Suite 1,084. **Deployment: the paper trader picks this up at its next
+launch** — confidence distribution at the EV gate shifts (day-1/day-2
+throughput baselines are not comparable across the boundary; ledger rows
+self-describe via the semantics tag from the first post-fix launch).
+
+Deferred (recorded, not fixed): seed-ensemble `_merge` averages members'
+own-class probabilities (violates the contract if ever revived — arm 2 is
+crossed off); GUI `platt_fitted` badge is existence-only and will show the
+refused stale sidecar as active; calibrator save() is non-atomic;
+force-directional-flip runtimes would apply calibration out-of-support
+(flag false everywhere).
+
+## 6. Tooling lesson (third fills-ledger artifact this week)
 
 1. Line-count cursor re-read the tail (fixed: timestamp cursor).
 2. `fills.jsonl` is not time-ordered (fixed: high-water-mark max()).

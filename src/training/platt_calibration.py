@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 # calibrator inside their run dir and never clobber the canonical one.
 PLATT_CALIBRATION_FILENAME = "platt_calibration.json"
 
+# The confidence quantity a calibrator is fitted on. Proposals carry
+# P(resolved action class) since the 2026-07-21 confidence-semantics fix
+# (CONFIDENCE_AUDIT.md); artifacts written before it calibrated the legacy
+# sigmoid-head output, a different quantity — loaders must refuse them.
+# Canonical definition lives in src/core/constants.py (re-exported here
+# for calibration-side callers).
+from src.core.constants import CONFIDENCE_SEMANTICS  # noqa: E402  (re-export)
+
 # Direction-label indices (mirrors src/training/targets.py).
 _DIRECTION_FLAT = 1
 _DIRECTION_LONG = 2
@@ -92,9 +100,28 @@ def load_calibrator_for_checkpoint(
             "platt_calibrator_missing path=%s (uncalibrated passthrough)", path
         )
         return calibrator
-    calibrator.load(path)
+    try:
+        calibrator.load(path)
+    except Exception as exc:  # noqa: BLE001 - honor the never-raises contract
+        logger.warning(
+            "platt_calibrator_corrupt path=%s error=%s — falling back to "
+            "uncalibrated passthrough",
+            path,
+            exc,
+        )
+        return PlattCalibrator()
     if not calibrator.is_fitted:
         return calibrator
+    if calibrator.confidence_semantics != CONFIDENCE_SEMANTICS:
+        logger.warning(
+            "platt_calibrator_stale_semantics path=%s stored=%s expected=%s "
+            "— fitted on the pre-2026-07-21 confidence quantity; refusing "
+            "stale calibration (refit on P(resolved class) to re-enable)",
+            path,
+            calibrator.confidence_semantics,
+            CONFIDENCE_SEMANTICS,
+        )
+        return PlattCalibrator()
     if calibrator.encoder_fingerprint is None:
         logger.warning(
             "platt_calibrator_legacy path=%s has no encoder_fingerprint; cannot "
@@ -135,6 +162,10 @@ class PlattCalibrator:
     # legacy artifacts written before fingerprint binding.
     encoder_fingerprint: str | None = None
     checkpoint_filename: str | None = None
+    # The confidence quantity the fit consumed. ``None`` on artifacts
+    # written before the 2026-07-21 confidence-semantics fix (those were
+    # fitted on the legacy sigmoid head and must not apply to proposals).
+    confidence_semantics: str | None = None
 
     def calibrate(self, raw_confidence: float) -> float:
         """Apply calibration. Passthrough if not fitted."""
@@ -143,7 +174,15 @@ class PlattCalibrator:
         logit = self.a * raw_confidence + self.b
         return float(1.0 / (1.0 + np.exp(-np.clip(logit, -20.0, 20.0))))
 
-    def fit(self, confidences: np.ndarray, outcomes: np.ndarray, epochs: int = 2000, lr: float = 0.01) -> None:
+    def fit(
+        self,
+        confidences: np.ndarray,
+        outcomes: np.ndarray,
+        epochs: int = 2000,
+        lr: float = 0.01,
+        *,
+        semantics: str | None = None,
+    ) -> None:
         """Fit Platt parameters via gradient descent on binary cross-entropy.
 
         Args:
@@ -151,6 +190,12 @@ class PlattCalibrator:
             outcomes: ROI values (N,) — positive = profitable.
             epochs: GD iterations.
             lr: Learning rate.
+            semantics: The confidence quantity the caller ATTESTS
+                ``confidences`` carries (pass ``CONFIDENCE_SEMANTICS`` only
+                when it is genuinely P(resolved class)). fit() cannot know
+                the provenance of its inputs, so it never self-stamps;
+                artifacts left unstamped are refused by
+                ``load_calibrator_for_checkpoint`` by design.
         """
         confidences = np.asarray(confidences, dtype=np.float64)
         labels = (np.asarray(outcomes, dtype=np.float64) > 0.0).astype(np.float64)
@@ -173,6 +218,7 @@ class PlattCalibrator:
         self.b = float(b)
         self.is_fitted = True
         self.n_samples = len(confidences)
+        self.confidence_semantics = semantics
 
     def expected_calibration_error(self, confidences: np.ndarray, outcomes: np.ndarray, n_bins: int = 10) -> float:
         """ECE: lower is better calibrated."""
@@ -204,12 +250,14 @@ class PlattCalibrator:
             "n_samples": self.n_samples,
             "encoder_fingerprint": self.encoder_fingerprint,
             "checkpoint_filename": self.checkpoint_filename,
+            "confidence_semantics": self.confidence_semantics,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> PlattCalibrator:
         fingerprint = d.get("encoder_fingerprint")
         checkpoint_filename = d.get("checkpoint_filename")
+        semantics = d.get("confidence_semantics")
         return cls(
             a=float(d.get("a", 1.0)),
             b=float(d.get("b", 0.0)),
@@ -217,6 +265,7 @@ class PlattCalibrator:
             n_samples=int(d.get("n_samples", 0)),
             encoder_fingerprint=None if fingerprint is None else str(fingerprint),
             checkpoint_filename=None if checkpoint_filename is None else str(checkpoint_filename),
+            confidence_semantics=None if semantics is None else str(semantics),
         )
 
     def save(self, path: Path | str) -> None:
@@ -238,3 +287,4 @@ class PlattCalibrator:
         self.n_samples = loaded.n_samples
         self.encoder_fingerprint = loaded.encoder_fingerprint
         self.checkpoint_filename = loaded.checkpoint_filename
+        self.confidence_semantics = loaded.confidence_semantics

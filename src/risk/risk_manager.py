@@ -233,7 +233,10 @@ class RiskManager:
                 - (1.0 - proposal.confidence) * proposal.expected_loss_bps
                 - cost_bps
             )
-            if ev_bps <= 0:
+            # Non-finite EV must fail CLOSED: `NaN <= 0` is False, so
+            # without the isfinite check a NaN-confidence/leg proposal
+            # would skip the rejection and trade on garbage.
+            if not math.isfinite(ev_bps) or ev_bps <= 0:
                 reasons.append("negative_ev")
         if self.config.allowed_sessions and not any(
             within_session(proposal.timestamp, session) for session in self.config.allowed_sessions

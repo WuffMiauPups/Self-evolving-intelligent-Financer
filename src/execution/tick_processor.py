@@ -467,6 +467,7 @@ def _write_decision_event(
     if ctx.decision_writer is None:
         return
     try:
+        from src.core.constants import CONFIDENCE_SEMANTICS
         from src.monitoring.decision_log import DecisionEvent
 
         reasons = [str(r) for r in getattr(decision, "reasons", [])]
@@ -489,6 +490,7 @@ def _write_decision_event(
                 ),
                 expected_gain_bps=float(getattr(proposal, "expected_gain_bps", 0.0)),
                 expected_loss_bps=float(getattr(proposal, "expected_loss_bps", 0.0)),
+                confidence_semantics=CONFIDENCE_SEMANTICS,
             )
         )
     except Exception:  # noqa: BLE001 - observability must never block trading
