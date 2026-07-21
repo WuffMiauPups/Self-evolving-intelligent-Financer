@@ -226,6 +226,56 @@ second, stronger argument for pivot option (c) (cost-viable universe).
 Open question worth a measurement before acting: WHY the sizing head is
 asymmetric — it may be a training-target artifact rather than a view.
 
+### 6.1.1 Sizing asymmetry ROOT CAUSE (investigated same day)
+
+Three hypotheses tested, two refuted, one confirmed:
+
+**Mechanism (code):** the incumbent's sizing head is a **signed 60-bar
+return regressor** — the legacy loss (`losses.py:142-149`, non-decoupled
+path) trains `target_fraction` against `regression_targets["primary_return"]`,
+and `targets.py:169` builds that target from `max(future_returns)` = the
+60-bar horizon, NOT the 15-bar primary the direction head is labeled on.
+Position size was never designed; it is a return prediction consumed as a
+fraction of equity.
+
+**Refuted — market drift:** unconditional 60-bar tails are symmetric
+(mean up 1.60% vs down 1.58%, ratio **1.02**, up-share 52.1%, full
+2022-2026 window, 13 symbols).
+
+**Refuted — horizon mean-reversion:** conditioned on the 15-bar direction
+label, E[R60|up] = +1.07% vs E[R60|down] = -0.93% (ratio **1.1**,
+continuation 72.6%/70.2%). The data supports at most 1.1x; the live head
+emits 2-8x (ledger, stable across all four live days: LONG median tf
+1.2-1.6% vs SHORT 0.15-0.63%).
+
+**Confirmed — it is the SAME phenomenon as the confidence asymmetry:**
+on post-fix ledger rows, **Spearman(confidence, |target_fraction|) = +0.975
+for longs** (n=178; low-conf half 0.810 -> |tf| 1.70%, high-conf half
+0.922 -> 2.49%) and **-0.207 for shorts** (n=60, flat at ~0.18-0.19%
+regardless of conf). The direction logits and the sizing head read one
+shared bullishness representation; the model has essentially no bearish
+representation, so BOTH its short confidence (~0.51) and its short size
+(~0.13-0.2%) pin near zero. The sizing asymmetry is a symptom of the
+one-sided signal, not an independent defect.
+
+**Consequences:**
+1. **The asymmetry dies with the incumbent.** Decoupled checkpoints emit
+   `target_fraction = 0` -> `default_target_fraction` (5%) x action —
+   symmetric by construction, risk layer owns sizing. At 5% (~$4.9k),
+   whole-share shorts clear on EVERY current symbol. The §6.1 "only 2 of
+   13 symbols can host a short" ceiling applies ONLY while the incumbent
+   is deployed; it is not an argument about post-pivot checkpoints, and
+   the pivot-option-(c) note is corrected accordingly.
+2. No incumbent fix warranted (stopping rule met; checkpoint slated for
+   replacement).
+3. **Latent wart flagged, decision open:** the horizon mismatch has one
+   STILL-LIVE consumer — the train-time Platt fit (`supervised.py`) uses
+   `regression_targets["primary_return"]` (= R60) as outcome labels when
+   calibrating the 15-bar direction head. Any future retrain fits its
+   calibrator against the wrong horizon's outcomes. Small fix (read the
+   primary-horizon return instead), but it touches training machinery —
+   queued for the pivot retrain, not done unilaterally.
+
 ### 6.2 Monitoring lesson: measure rates within a direction
 
 Two false alarms this session, both from the same mistake — measuring a
