@@ -50,8 +50,6 @@ class BacktestEngine:
                 fee_bps=self.config.backtest.fee_bps,
                 slippage_bps=self.config.backtest.slippage_bps,
             ),
-            fee_bps=self.config.backtest.fee_bps,
-            slippage_bps=self.config.backtest.slippage_bps,
         )
         min_length = min(len(bars) for bars in bars_by_symbol.values())
         equity_curve: list[float] = []

@@ -14,10 +14,6 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def is_same_trading_day(left: datetime, right: datetime) -> bool:
-    return left.astimezone(UTC).date() == right.astimezone(UTC).date()
-
-
 def within_session(timestamp: datetime, session_name: str) -> bool:
     """Return True when ``timestamp`` falls inside the named session window.
 
