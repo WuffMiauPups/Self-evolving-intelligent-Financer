@@ -11,16 +11,24 @@ morning sequence for Wednesday 2026-07-22. Trading starts 15:30 local
 
 Ordered by when they bite, not by size.
 
-### A1. MSTR bars: suspected unadjusted split (data quality — BEFORE any retrain)
+### A1. MSTR bars — RESOLVED 2026-07-22: NO ACTION (was a wrong diagnosis)
 `stylized_facts_suspicious` flags two single-bar moves >20% on every
-historical load: 2022-06-13 (−27.5%) and 2024-08-05 (−23.9%). MSTR did a
-**10:1 split in August 2024** — the 2024 bar is almost certainly a split
-artifact, the 2022 one needs a look (bitcoin-crash week, could be real).
-Phantom −24–27% bars poison direction labels, MFE/MAE targets, and vol
-epsilon for MSTR windows. **Fix:** verify the fetch `bar_adjustment`
-setting, refetch MSTR adjusted, invalidate its bar/sample caches, confirm
-the stylized-facts flag clears. Do BEFORE the pivot retrain (it changes
-training data; cache-fingerprint-affecting by design).
+historical load: 2022-06-13 (−27.5%) and 2024-08-05 (−23.9%). The original
+A1 hypothesis (unadjusted split → refetch adjusted) is **REFUTED** by the
+2026-07-22 pivot repo-sweep:
+- `bar_adjustment` already defaults to `"all"` (split+dividend) in both the
+  client (`alpaca_client.py:20`) and config (`data.py:49`), threaded
+  through every fetch path — the cache **is** split-adjusted.
+- Proof: MSTR's 2024-08-08 10:1 split shows **no** price step
+  (2024-08-07 close 124.60 → 08-08 close 132.68, continuous).
+- The two flagged moves are **real Friday→Monday weekend crash gaps**
+  (2022-06-13 the bitcoin-crash Monday; 2024-08-05 the Aug-2024 selloff).
+  Adjustment cannot and should not remove them.
+- `session_aware_labels` already excludes any label window spanning them,
+  so they never enter a training target.
+**Fix: none.** No refetch, no cache invalidation. (Also: MSTR's 5-min
+thin-print sparsity — 64k rows vs ~90k peers — largely repairs at 30-min
+bars, ~13 buckets/day; confirm at the pivot fetch.)
 
 ### A2. Train-time Platt fit calibrates against the wrong horizon (at pivot retrain)
 `supervised.py` fits the calibrator using

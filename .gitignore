@@ -12,3 +12,5 @@ runs/
 oldsrc/
 /experiments/
 *.log
+.claude/
+scripts/launch_paper_week_detached.vbs
