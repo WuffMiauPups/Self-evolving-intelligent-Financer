@@ -218,6 +218,7 @@ def _apply_broker_fill(ctx: RuntimeContext, *, order: dict, logger: object) -> N
     # Outcome stream (§4.5.3): every executed broker fill becomes one
     # DecisionObservation for the retrain drift trigger.
     _write_decision_observation(ctx, fill=ctx.ledger.fills[-1])
+    _record_fill_to_monitor(ctx, fill=ctx.ledger.fills[-1])
     # Outcome-weighted allocation (§6.3): credit realized PnL back to the
     # strategy that proposed the trade so the arbiter can shift weights.
     if hasattr(ctx.policy, "record_fill_outcome"):
@@ -464,6 +465,23 @@ def _write_decision_event(
     actions, never raw intent — this event stream is where that record
     lives.  Best-effort: never raises into the trade loop.
     """
+    # Self-monitor L0: feed every LOGGED decision (this shares the decision
+    # ledger's write points, so it mirrors the ledger — proposals blocked by
+    # the session/submit guard before this point are absent from both, by
+    # design). No-op when the monitor is disabled or absent (getattr
+    # tolerates partial test contexts).
+    monitor = getattr(ctx, "self_monitor", None)
+    if monitor is not None:
+        try:
+            ts = proposal.timestamp
+            monitor.record_decision(
+                confidence=float(proposal.confidence),
+                action=int(proposal.action),
+                timestamp=ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                client_order_id=(None if result is None else getattr(result, "client_order_id", None)),
+            )
+        except Exception:  # noqa: BLE001 - observability must never block trading
+            pass
     if ctx.decision_writer is None:
         return
     try:
@@ -494,6 +512,44 @@ def _write_decision_event(
             )
         )
     except Exception:  # noqa: BLE001 - observability must never block trading
+        pass
+
+
+def _record_fill_to_monitor(ctx: RuntimeContext, *, fill: object) -> None:
+    """Feed one executed fill to the self-monitor (L0). Fed at every ledger
+    sink so all fill paths are covered; no-op when the monitor is disabled.
+    Entry confidence is joined from the opening order id (record_decision
+    stored it). Best-effort — never raises into the trade loop."""
+    monitor = getattr(ctx, "self_monitor", None)
+    if monitor is None:
+        return
+    try:
+        ts = getattr(fill, "timestamp", None)
+        monitor.record_fill(
+            symbol=str(fill.symbol),
+            side=str(fill.side),
+            quantity=float(fill.quantity),
+            realized_pnl=float(fill.realized_pnl),
+            timestamp=ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+            client_order_id=getattr(fill, "client_order_id", None),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _emit_self_report(ctx: RuntimeContext, *, now: object) -> None:
+    """Write a HealthReport line every N decisions. No-op when the monitor
+    is disabled (report_writer is None). Best-effort."""
+    monitor = getattr(ctx, "self_monitor", None)
+    report_writer = getattr(ctx, "report_writer", None)
+    if monitor is None or report_writer is None:
+        return
+    try:
+        interval = int(ctx.config.monitoring.self_monitor.report_interval_decisions)
+        if monitor.due_for_report(interval):
+            stamp = now.isoformat() if hasattr(now, "isoformat") else str(now)
+            report_writer.write(monitor.health(now=stamp))
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -1098,6 +1154,7 @@ def process_tick(
             if ctx.ledger.fills:
                 fill = ctx.ledger.fills[-1]
                 _write_decision_observation(ctx, fill=fill)
+                _record_fill_to_monitor(ctx, fill=fill)
                 if hasattr(ctx.policy, "record_fill_outcome"):
                     ctx.policy.record_fill_outcome(fill.strategy_id, fill.realized_pnl)
         elif ctx.client is not None and result.terminal and result.status == "filled":
@@ -1137,6 +1194,7 @@ def process_tick(
             frozen_brain=not bool(ctx.config.runtime.allow_online_model_updates),
         )
     )
+    _emit_self_report(ctx, now=tick_time)
 
     # --- Positions snapshot for the GUI's POSITIONS tab ---------
     # Update session peak + per-position peak trackers, build an

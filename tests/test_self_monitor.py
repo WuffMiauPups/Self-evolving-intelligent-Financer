@@ -1,10 +1,13 @@
-"""Self-monitor scaffold (docs/analysis/SELF_MONITOR_DESIGN.md).
+"""Self-monitor L0 (docs/analysis/SELF_MONITOR_DESIGN.md).
 
-Green tests pin what the scaffold already implements (S1-S4, L1 contract,
-replay rules). The xfail at the bottom is the executable spec for the
-weekend's remaining work (S5).
+Covers the pure state machine (S1-S5, L1 shrink-only contract, replay
+rules), the outcome-join edge cases from the 2026-07-22 review (side-flip,
+carried-position seed, client_order_id live join), and the live
+tick_processor wiring end-to-end.
 """
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 
@@ -152,15 +155,118 @@ def test_report_serializes_to_json_line() -> None:
     assert parsed["damping_multiplier"] == 1.0
 
 
-@pytest.mark.xfail(reason="S5 weekend work: realized spread vs assumed cost_bps", strict=True)
 def test_s5_flags_cost_underestimate() -> None:
     monitor = _monitor()
     for i in range(20):
         ts = f"2026-07-22T14:{i % 60:02d}:00+00:00"
         monitor.record_fill(symbol="MSTR", side="buy", quantity=1.0, realized_pnl=0.0,
                             timestamp=ts, entry_confidence=0.6,
-                            fill_price=100.10, reference_price=100.00)  # 10bps worse than assumed
+                            fill_price=100.10, reference_price=100.00)  # 10bps worse than assumed 2
         monitor.record_fill(symbol="MSTR", side="sell", quantity=1.0, realized_pnl=-0.1,
                             timestamp=ts)
     report = monitor.health(now=T0)
+    assert report.realized_slippage_bps == pytest.approx(10.0, abs=0.1)
     assert any(f.startswith("S5_cost_underestimated") for f in report.flags)
+
+
+def test_s5_silent_when_slippage_matches_assumption() -> None:
+    monitor = _monitor()  # assumed_slippage_bps 2.0, cost_surprise_bps 3.0
+    for i in range(20):
+        ts = f"2026-07-22T14:{i % 60:02d}:00+00:00"
+        monitor.record_fill(symbol="MSTR", side="buy", quantity=1.0, realized_pnl=0.0,
+                            timestamp=ts, entry_confidence=0.6,
+                            fill_price=100.02, reference_price=100.00)  # 2bps = assumed
+        monitor.record_fill(symbol="MSTR", side="sell", quantity=1.0, realized_pnl=0.1,
+                            timestamp=ts)
+    report = monitor.health(now=T0)
+    assert not any(f.startswith("S5") for f in report.flags)
+
+
+def test_live_join_entry_confidence_by_client_order_id() -> None:
+    """The live path: a fill lands with an order id, not the decision's
+    confidence — record_decision(client_order_id=...) lets the open join it."""
+    monitor = _monitor()
+    monitor.record_decision(confidence=0.82, action=1, timestamp=T0, client_order_id="oid-1")
+    monitor.record_fill(symbol="AAPL", side="buy", quantity=1.0, realized_pnl=0.0,
+                        timestamp=T0, client_order_id="oid-1")   # open, no entry_confidence param
+    monitor.record_fill(symbol="AAPL", side="sell", quantity=1.0, realized_pnl=1.5, timestamp=T0)
+    assert list(monitor.outcomes) == [(0.82, True)]
+
+
+def test_side_flip_books_close_and_opens_new_side() -> None:
+    """A single fill that reverses sign is a close of the old leg AND an open
+    of the new one — neither round trip may be dropped (2026-07-22 review)."""
+    monitor = _monitor()
+    monitor.record_fill(symbol="AAPL", side="buy", quantity=1.0, realized_pnl=0.0,
+                        timestamp=T0, entry_confidence=0.7)              # open long @0.7
+    monitor.record_fill(symbol="AAPL", side="sell", quantity=2.0, realized_pnl=1.0,
+                        timestamp=T0, entry_confidence=0.4)              # FLIP long->short, book +1
+    assert monitor._position["AAPL"] == pytest.approx(-1.0)
+    monitor.record_fill(symbol="AAPL", side="buy", quantity=1.0, realized_pnl=-0.5,
+                        timestamp=T0)                                    # cover short, book -0.5
+    assert list(monitor.outcomes) == [(0.7, True), (0.4, False)]        # both trips recorded
+
+
+def test_seed_positions_prevents_phantom_short_on_carried_close() -> None:
+    """A restart holding a carried long: seeding the start-of-day book means
+    the first sell CLOSES it (position -> 0) instead of opening a phantom
+    short, and no outcome is fabricated with a wrong confidence."""
+    monitor = _monitor()
+    monitor.seed_positions({"AAPL": 5.0})
+    monitor.record_fill(symbol="AAPL", side="sell", quantity=5.0, realized_pnl=2.0, timestamp=T0)
+    assert monitor._position["AAPL"] == pytest.approx(0.0)
+    assert list(monitor.outcomes) == []
+
+
+def test_tick_processor_wiring_feeds_monitor_end_to_end() -> None:
+    """Pins the LIVE plumbing (not just the state machine): _write_decision_event
+    feeds record_decision with the route's client_order_id, _record_fill_to_monitor
+    joins the opening fill by that id, and _emit_self_report writes on cadence.
+    A break in this id plumbing would silently leave S1/S2 empty in production."""
+    from datetime import UTC, datetime
+
+    from src.execution.tick_processor import (
+        _emit_self_report,
+        _record_fill_to_monitor,
+        _write_decision_event,
+    )
+
+    monitor = _monitor()
+    written: list = []
+    ctx = SimpleNamespace(
+        self_monitor=monitor,
+        report_writer=SimpleNamespace(write=written.append),
+        decision_writer=None,
+        config=SimpleNamespace(
+            monitoring=SimpleNamespace(self_monitor=SimpleNamespace(report_interval_decisions=1))
+        ),
+    )
+    dt = datetime(2026, 7, 22, 15, 0, tzinfo=UTC)
+    proposal = SimpleNamespace(timestamp=dt, symbol="AAPL", action=1, confidence=0.8,
+                               target_fraction=0.05, request_id="r",
+                               expected_gain_bps=0.0, expected_loss_bps=0.0)
+    decision = SimpleNamespace(approved=True, reasons=[], side="buy", quantity=1.0)
+    result = SimpleNamespace(client_order_id="o1", status="filled")
+    _write_decision_event(ctx, proposal=proposal, decision=decision, result=result)
+    assert monitor.decision_count == 1
+
+    open_fill = SimpleNamespace(symbol="AAPL", side="buy", quantity=1.0, realized_pnl=0.0,
+                                timestamp=dt, client_order_id="o1")
+    close_fill = SimpleNamespace(symbol="AAPL", side="sell", quantity=1.0, realized_pnl=1.5,
+                                 timestamp=dt, client_order_id="o2")
+    _record_fill_to_monitor(ctx, fill=open_fill)
+    _record_fill_to_monitor(ctx, fill=close_fill)
+    assert list(monitor.outcomes) == [(0.8, True)]   # joined by client_order_id
+
+    _emit_self_report(ctx, now=dt)
+    assert len(written) == 1                          # one report at interval=1
+
+
+def test_due_for_report_cadence() -> None:
+    monitor = _monitor()
+    for _ in range(24):
+        monitor.record_decision(confidence=0.6, action=1, timestamp=T0)
+    assert not monitor.due_for_report(25)   # 24 < 25
+    monitor.record_decision(confidence=0.6, action=1, timestamp=T0)
+    assert monitor.due_for_report(25)       # 25th crosses the interval
+    assert not monitor.due_for_report(25)   # marker advanced, not due again

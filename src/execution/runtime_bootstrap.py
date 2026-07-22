@@ -90,6 +90,8 @@ class RuntimeContext:
     order_journal: object | None = None  # OrderJournal
     alerter: object | None = None  # WebhookAlerter
     decision_writer: object | None = None  # DecisionLogWriter
+    self_monitor: object | None = None  # SelfMonitor (self-feedback, gated off)
+    report_writer: object | None = None  # ReportWriter (self-monitor output)
     # --- per-tick mutable runtime state (owned by tick_processor) ---
     bar_aggregator: TimeframeAggregator | None = None
     sync_failure_count: int = 0
@@ -730,6 +732,19 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
         from src.monitoring.decision_log import DecisionLogWriter
         decision_writer = DecisionLogWriter(config.execution.decision_log_path)
 
+    # Self-monitor (L0): the bot's own feedback on its trading. Records and
+    # writes nothing unless monitoring.self_monitor.enabled, so a disabled
+    # runtime is byte-identical to one without it.
+    from src.monitoring.self_monitor import ReportWriter, SelfMonitor
+    self_monitor = SelfMonitor(config.monitoring.self_monitor)
+    # Seed the start-of-day book from the already-reconciled portfolio so a
+    # restart holding carried positions does not misread their first close as
+    # a fresh open (§10.4 parity with the replay path's seed_positions).
+    self_monitor.seed_positions(
+        {sym: pos.qty for sym, pos in portfolio.positions.items()}
+    )
+    report_writer = ReportWriter() if config.monitoring.self_monitor.enabled else None
+
     # Webhook alerting
     alerter = None
     if config.runtime.alert_webhook_url:
@@ -765,5 +780,7 @@ async def build_runtime_context(config: AppConfig, *, confirm_live: bool = False
         order_journal=order_journal,
         alerter=alerter,
         decision_writer=decision_writer,
+        self_monitor=self_monitor,
+        report_writer=report_writer,
         bar_aggregator=TimeframeAggregator(config.runtime.timeframe),
     )

@@ -90,6 +90,27 @@ direction. Position-guard exits and kill-switch always win.
 4. **Only then** decide about L1 with a scorecard row (backtest with
    damping on vs off, same window) — it is an experiment like any other.
 
+## Known L0 outcome-join simplifications (accepted, from the 2026-07-22 review)
+These bias S1/S2 slightly and are acceptable for an observe-only L0; revisit
+before the L1 damping ladder is enabled off these signals:
+- **Partial scale-out attribution.** Only a full close (position → 0) books
+  an outcome, and `won` is the sign of the *final* leg's realized PnL, not
+  the round-trip total. A trade that banks gains on an early scale-out and
+  loses a little on the final leg is recorded as a loss. Fixing this needs
+  per-lot PnL accumulation.
+- **Guard/cooldown-blocked decisions.** The monitor feeds off the decision
+  ledger's write points, so proposals the session/submit guard or the
+  submit-cooldown blocks *before* the ledger write are counted by neither
+  (S3/decision-count only; outcomes are unaffected since blocked orders
+  never fill). This keeps the monitor consistent with the ledger; the
+  backtest has no such guards so it counts every proposal — an
+  environment difference, not a wiring bug.
+
+Handled correctly (verified in review): single-fill side-flips (close+open),
+carried-position seeding at live bootstrap, and the double-fill capture dedup
+(the broker sync marks `processed_fill_ids` before the monitor hook, so each
+fill reaches the monitor once).
+
 ## What this is NOT
 
 - Not a §9.4 arm (no edge claim; stopping rule untouched).

@@ -121,6 +121,12 @@ class BacktestEngine:
         # stop one bar early rather than fabricating a same-close fill.
         end_index = min_length - 1 if next_open_fills else min_length
         decision_log: list[dict[str, object]] = []
+        # Self-monitor L0 (shared path §10.4): the SAME record calls the live
+        # tick_processor makes, so the monitor is backtestable. Records and
+        # writes nothing when monitoring.self_monitor.enabled is false, so a
+        # disabled backtest is byte-identical.
+        from src.monitoring.self_monitor import ReportWriter, SelfMonitor
+        self_monitor = SelfMonitor(self.config.monitoring.self_monitor)
         misaligned_bars = 0
         for index in range(start_index, end_index):
             latest_prices = {symbol: bars_by_symbol[symbol][index].close for symbol in symbols}
@@ -189,6 +195,11 @@ class BacktestEngine:
                         "expected_gain_bps": float(getattr(proposal, "expected_gain_bps", 0.0)),
                         "expected_loss_bps": float(getattr(proposal, "expected_loss_bps", 0.0)),
                     }
+                )
+                self_monitor.record_decision(
+                    confidence=float(proposal.confidence),
+                    action=int(proposal.action),
+                    timestamp=snapshot.timestamp.isoformat(),
                 )
                 decision = self.risk_manager.evaluate(
                     proposal,
@@ -263,13 +274,34 @@ class BacktestEngine:
                 # Outcome-weighted allocation (§6.3): credit the fill's
                 # realized NET PnL (PaperExecutor records it fee-adjusted)
                 # back to the strategy that proposed the trade.
-                if hasattr(policy, "record_fill_outcome") and ledger.fills:
+                if ledger.fills:
                     fill = ledger.fills[-1]
-                    policy.record_fill_outcome(fill.strategy_id, fill.realized_pnl)
+                    if hasattr(policy, "record_fill_outcome"):
+                        policy.record_fill_outcome(fill.strategy_id, fill.realized_pnl)
+                    # entry_confidence = THIS proposal's confidence: stored on
+                    # an opening fill, ignored on a close (which uses the
+                    # confidence banked when the position opened).
+                    self_monitor.record_fill(
+                        symbol=str(fill.symbol),
+                        side=str(fill.side),
+                        quantity=float(fill.quantity),
+                        realized_pnl=float(fill.realized_pnl),
+                        timestamp=fill.timestamp.isoformat()
+                        if hasattr(fill.timestamp, "isoformat")
+                        else str(fill.timestamp),
+                        entry_confidence=float(proposal.confidence),
+                    )
             portfolio.mark_to_market(latest_prices, timestamp)
             equity_curve.append(portfolio.equity)
             total_exposure = sum(abs(position.qty * position.market_price) for position in portfolio.positions.values())
             exposures.append(total_exposure / max(portfolio.equity, 1.0))
+        if self.config.monitoring.self_monitor.enabled and decision_log:
+            try:
+                ReportWriter().write(
+                    self_monitor.health(now=str(decision_log[-1]["timestamp"]))
+                )
+            except Exception:  # noqa: BLE001 - observability must never break a backtest
+                pass
         metrics = compute_backtest_metrics(
             initial_equity=self.config.backtest.initial_cash,
             equity_curve=equity_curve,

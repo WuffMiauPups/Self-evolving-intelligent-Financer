@@ -20,6 +20,7 @@ from src.core.config.data import DataConfig
 from src.core.config.evaluation import EvaluationConfig
 from src.core.config.memory import MemoryConfig
 from src.core.config.model import ModelConfig
+from src.core.config.monitoring import MonitoringConfig
 from src.core.config.risk import RiskConfig
 from src.core.config.runtime import RuntimeConfig
 from src.core.config.training import TrainingConfig
@@ -56,6 +57,7 @@ class AppConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     arbitration: ArbitrationConfig = Field(default_factory=ArbitrationConfig)
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
 
     @model_validator(mode="after")
     def normalize_data_defaults(self) -> "AppConfig":
