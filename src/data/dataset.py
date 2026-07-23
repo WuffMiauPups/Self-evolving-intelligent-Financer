@@ -89,19 +89,6 @@ class BarWindowDataset(Dataset[TrainingSample]):
         return self.samples[index]
 
 
-class HistoricalSequenceDataset(Dataset[TrainingSample]):
-    def __init__(self, samples: list[TrainingSample], *, feature_contract: FeatureContract, split: str) -> None:
-        self.samples = list(samples)
-        self.feature_contract = feature_contract
-        self.split = split
-
-    def __len__(self) -> int:
-        return len(self.samples)
-
-    def __getitem__(self, index: int) -> TrainingSample:
-        return self.samples[index]
-
-
 def collate_training_samples(batch: list[TrainingSample]) -> dict[str, Any]:
     branch_names = batch[0].branch_inputs.keys()
     max_time = max(sample.temporal_tensor.shape[-1] for sample in batch)

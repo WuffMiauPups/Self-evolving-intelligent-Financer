@@ -7,7 +7,6 @@ import torch
 from src.backtest.performance import BacktestReport, compute_backtest_metrics
 from src.backtest.simulator import BacktestSimulator
 from src.core.config import AppConfig
-from src.data.schemas import bars_to_tensor
 from src.execution.paper_executor import PaperExecutor
 from src.execution.schemas import OrderIntent
 from src.features.feature_pipeline import FeaturePipeline

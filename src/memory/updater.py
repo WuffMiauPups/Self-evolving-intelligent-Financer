@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 
 from src.core.config import MemoryConfig
-from src.data.schemas import MarketBar, bars_to_tensor
+from src.data.schemas import MarketBar
 from src.features.feature_pipeline import FeaturePipeline
 from src.memory.memory_bank import MemoryBank
 from src.memory.outcomes import build_risk_summary, compute_outcome_summary

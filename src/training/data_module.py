@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 
 from src.core.config import AppConfig
 from src.core.logging import get_logger
-from src.data.dataset import HistoricalSequenceDataset, TrainingSample, collate_training_samples, make_columnar_collate
+from src.data.dataset import TrainingSample, collate_training_samples, make_columnar_collate
 from src.data.schemas import MarketBar, bars_to_tensor
 from src.features.feature_pipeline import FeatureContract, FeaturePipeline
 from src.features.normalization import NormalizationStats
@@ -33,7 +33,6 @@ from src.training.sample_cache import (
     save_cached_shard,
 )
 from src.training.sample_columns import (
-    ColumnarDataset,
     ColumnarSamples,
     IndexDataset,
     apply_normalization_stats,

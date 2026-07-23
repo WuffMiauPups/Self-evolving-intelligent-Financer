@@ -16,7 +16,7 @@ from src.features.feature_pipeline import FeaturePipeline
 from src.features.normalization import NormalizationStats
 from src.models.factory import build_checkpoint_meta, build_model_from_contract, load_model_artifacts
 from src.training.checkpoints import save_checkpoint
-from src.training.data_loading import _build_training_client, _resolve_bars_by_symbol, _FAST_SMALL_MODEL_OVERRIDES
+from src.training.data_loading import _resolve_bars_by_symbol, _FAST_SMALL_MODEL_OVERRIDES
 from src.training.data_module import TrainingDataBundle, build_real_data_training_bundle
 from src.training.memory_builder import build_post_training_memory
 from src.training.metrics import build_collapse_warnings, compute_classification_report, compute_logit_diagnostics

@@ -51,7 +51,7 @@ This module deliberately has zero import-time dependencies on
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -414,34 +414,6 @@ class ColumnarSamples:
         return total
 
 
-class ColumnarDataset(torch.utils.data.Dataset):
-    """Torch ``Dataset`` wrapper around a ``ColumnarSamples`` store.
-
-    ``__getitem__`` reconstructs a transient ``TrainingSample`` per row so
-    the existing ``collate_training_samples`` function continues to work
-    unchanged.  The persistent storage is the column tensors held in
-    ``self.columns``; per-sample dataclass instances exist only inside one
-    DataLoader worker batch at a time.
-    """
-
-    def __init__(
-        self,
-        columns: ColumnarSamples,
-        *,
-        feature_contract,
-        split: str,
-    ) -> None:
-        self.columns = columns
-        self.feature_contract = feature_contract
-        self.split = split
-
-    def __len__(self) -> int:
-        return len(self.columns)
-
-    def __getitem__(self, index: int) -> TrainingSample:
-        return self.columns.get_sample(index)
-
-
 class IndexDataset(torch.utils.data.Dataset):
     """Minimal dataset that returns raw integer indices.
 
@@ -460,36 +432,6 @@ class IndexDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index: int) -> int:
         return index
-
-
-def columnar_from_shards(
-    shards: Iterable[tuple[str, dict[str, list[TrainingSample]]]],
-    *,
-    drop_callback=None,
-) -> dict[str, ColumnarSamples]:
-    """Stream-load shards into a per-split ColumnarSamples accumulator.
-
-    ``shards`` is an iterable of ``(symbol, samples_by_split)`` pairs — one
-    per shard.  After each shard is consumed, ``drop_callback(symbol)`` is
-    invoked so the caller can release any held references to the original
-    payload (this is what keeps peak working set bounded — the input
-    dataclass list for shard N is freed before shard N+1 loads).
-
-    Returns a dict mapping split name -> ColumnarSamples.
-    """
-    out: dict[str, ColumnarSamples] = {}
-    for symbol, samples_by_split in shards:
-        for split_name, split_samples in samples_by_split.items():
-            if not split_samples:
-                continue
-            shard_columns = ColumnarSamples.from_samples(split_samples)
-            if split_name not in out:
-                out[split_name] = shard_columns
-            else:
-                out[split_name].append(shard_columns)
-        if drop_callback is not None:
-            drop_callback(symbol)
-    return out
 
 
 def apply_normalization_stats(stats: NormalizationStats, *splits: ColumnarSamples) -> None:

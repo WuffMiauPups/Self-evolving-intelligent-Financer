@@ -11,8 +11,7 @@ from pathlib import Path
 
 import re
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,

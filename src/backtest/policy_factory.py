@@ -33,7 +33,7 @@ from src.core.exceptions import ConfigurationError
 from src.data.schemas import MarketBar
 from src.features.feature_pipeline import FeaturePipeline
 from src.memory.memory_bank import MemoryBank
-from src.memory.storage import load_memory_bank, save_memory_bank
+from src.memory.storage import load_memory_bank
 from src.memory.updater import AssociativeMemoryUpdater
 from src.models.factory import resolve_inference_model
 from src.models.state_encoder import ModelStateEncoder
