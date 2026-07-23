@@ -21,8 +21,6 @@ from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
-    QHBoxLayout,
-    QHeaderView,
     QLabel,
     QTableWidget,
     QTableWidgetItem,

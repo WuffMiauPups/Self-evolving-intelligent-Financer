@@ -1,7 +1,7 @@
 """Logs / Events tab — tail and filter the structured backend log file."""
 from __future__ import annotations
 
-from PySide6.QtCore import QThreadPool, QTimer, Qt
+from PySide6.QtCore import QThreadPool, QTimer
 from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,

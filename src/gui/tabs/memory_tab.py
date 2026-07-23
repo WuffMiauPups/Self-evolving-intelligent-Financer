@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import QTimer, QThreadPool
 from PySide6.QtWidgets import (
-    QCheckBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,

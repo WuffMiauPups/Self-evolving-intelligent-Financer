@@ -30,7 +30,6 @@ from src.gui_services.state import (
     EquitySeries,
     RuntimeState,
     RuntimeStatus,
-    ServiceError,
 )
 
 

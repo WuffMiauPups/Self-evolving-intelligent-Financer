@@ -1,6 +1,10 @@
 # DELETION AUDIT PLAN
 
-**Date:** 2026-07-20 · **Status: AUDIT ONLY — nothing has been deleted.**
+**Date:** 2026-07-20 · **Status (updated 2026-07-22): EXECUTED — the pivot-independent safe batches are done.**
+
+**Executed 2026-07-22** (Phase 0.2 of PIVOT_PLAN.md; each batch re-verified for 0 refs AFTER the week's confidence/self-monitor work, suite green throughout, per-batch commits): **A1** (5 dead modules + the memory/schemas 14-class cluster, 842→229 LOC), **A2** (all dead functions/methods/fields), **B1** (all 5 delete-with-tests — live properties preserved by porting the BarWindowDataset contract check to `pipeline.build().contract` and the ObservationBuffer JSONL roundtrip to `append_observation`), **D-delete** (compare_runs.py, run_backtest_parallel.py) + **D-archive** (→ `scripts/archive/`) + **E-safe** (regenerable junk), and the grep-verified subset of **A3** unused imports. Verification caught 3 stale A3 line-refs (checkpoints_tab `Path`, risk_tab `Qt`, widgets `COLOR_BG` are actually USED — kept).
+
+**NOT executed (deliberate):** **A4 + F** (config-key deletions — batch with the pivot retrain commit per rule 2), **C** (gated experiments / reserved scaffolding — user/roadmap decision), **E user-decision** (oldsrc/, experiments/, irreversible untracked), the **`__init__` re-export blocks** (intentional public API via `__all__`, not clearly dead), and the multi-line-block remainder of A3 (pure F401 lint — sweep with `ruff --fix`).
 
 **Method:** 18 scoped finder agents (one per `src/` package + config-fields + `scripts/` + repo hygiene) produced 151 candidates; every candidate was then re-verified by an independent adversarial agent instructed to *refute* the "unused" claim (bare-name grep across `src/`, `scripts/` incl. `.bat`/`.vbs`, `tests/`, `configs/*.yaml`, `docs/`, `README`; quoted-string / `getattr` / `importlib` / registry dynamic-dispatch hunts; `__init__` re-export checks; git-log recency). A final completeness critic swept for cross-scope misses. Verdicts: **115 DEAD · 19 TEST_ONLY · 10 GATED_EXPERIMENT · 4 USED (false alarms, dropped) · 3 UNCERTAIN.**
 
