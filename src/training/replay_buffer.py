@@ -1,9 +1,9 @@
 """Per-decision observation replay + RL experience scaffolding.
 
-``DecisionObservation`` / ``ObservationBuffer`` are the retrain loop's
-outcome stream (MASTER_PLAN §4.5.3): one record per executed decision,
-persisted as append-friendly JSONL in the style of ``src.risk.ledger``.
-The execution layer appends records in a parallel workstream;
+``DecisionObservation`` is the retrain loop's outcome stream (MASTER_PLAN
+§4.5.3): one record per executed decision, persisted as append-friendly
+JSONL in the style of ``src.risk.ledger`` via ``append_observation``. The
+execution layer appends records in a parallel workstream;
 ``scripts/run_train.py --check-retrain-trigger`` reads them back through
 ``load_observations``.
 
@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import logging
 from collections import deque
-from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -57,49 +56,6 @@ class DecisionObservation:
             realized_pnl=float(payload.get("realized_pnl", 0.0)),
             clamped=bool(payload.get("clamped", False)),
         )
-
-
-class ObservationBuffer:
-    """Bounded, persistable buffer of per-decision observations."""
-
-    def __init__(self, capacity: int = 10_000) -> None:
-        if capacity <= 0:
-            raise ValueError("ObservationBuffer capacity must be positive")
-        self.capacity = capacity
-        self._items: deque[DecisionObservation] = deque(maxlen=capacity)
-
-    def add(self, observation: DecisionObservation) -> None:
-        self._items.append(observation)
-
-    def extend(self, observations: Iterable[DecisionObservation]) -> None:
-        for observation in observations:
-            self.add(observation)
-
-    def __len__(self) -> int:
-        return len(self._items)
-
-    @property
-    def observations(self) -> list[DecisionObservation]:
-        return list(self._items)
-
-    def save(self, path: str | Path) -> int:
-        """Persist the buffered observations as JSONL (snapshot rewrite)."""
-        file_path = Path(path)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        with file_path.open("w", encoding="utf-8") as fp:
-            for observation in self._items:
-                fp.write(observation.to_json_line() + "\n")
-        logger.info(
-            "observation_buffer_saved path=%s count=%d", str(file_path), len(self._items)
-        )
-        return len(self._items)
-
-    @classmethod
-    def load(cls, path: str | Path, *, capacity: int = 10_000) -> ObservationBuffer:
-        """Rehydrate a buffer from JSONL (torn/corrupt lines skipped)."""
-        buffer = cls(capacity=capacity)
-        buffer.extend(load_observations(path))
-        return buffer
 
 
 def load_observations(path: str | Path) -> list[DecisionObservation]:

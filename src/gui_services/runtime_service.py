@@ -70,15 +70,6 @@ class RuntimeService:
     # ------------------------------------------------------------------
     # config selection
     # ------------------------------------------------------------------
-    def set_config_paths(self, paths: list[str]) -> None:
-        with self._lock:
-            if self.is_running():
-                raise ServiceError(
-                    "Cannot change config while runtime is running. Stop it first."
-                )
-            self._config_paths = list(paths) if paths else list(_DEFAULT_PAPER_CONFIGS)
-            self._cached_config_summary = None
-
     def preview_config(self) -> dict[str, object]:
         """Load+validate currently selected config and return a UI summary."""
         with self._lock:

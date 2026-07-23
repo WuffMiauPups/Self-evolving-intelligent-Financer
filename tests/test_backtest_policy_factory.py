@@ -40,9 +40,5 @@ def test_build_brain_memory_policy_is_callable() -> None:
     assert "bars_by_symbol" in params
     assert "pipeline" in params
     assert "enable_memory" in params
-    assert "conservative_thresholds" in params
-    assert "verbose_fusion" in params
     # Defaults should preserve the old behavior.
     assert params["enable_memory"].default is True
-    assert params["conservative_thresholds"].default is False
-    assert params["verbose_fusion"].default is False

@@ -21,7 +21,7 @@ import pytest
 pytestmark = pytest.mark.slow
 
 from src.core.config import load_config
-from src.data.dataset import TrainingSample, collate_training_samples
+from src.data.dataset import TrainingSample
 from src.data.schemas import MarketBar
 from src.memory.outcomes import compute_outcome_summary
 from src.training.class_balance import compute_target_diagnostics
@@ -372,42 +372,6 @@ class TestPathDiagnostics:
         )
         assert "mfe" in diagnostics.risk_path_summaries
         assert "mae" in diagnostics.risk_path_summaries
-
-
-# ---------------------------------------------------------------------------
-# Collate Compatibility
-# ---------------------------------------------------------------------------
-
-
-class TestCollateCompatibility:
-    def test_collate_handles_path_label(self) -> None:
-        samples = [
-            _make_sample(path_label=0, path_name="breakout_down"),
-            _make_sample(path_label=4, path_name="breakout_up"),
-        ]
-        batch = collate_training_samples(samples)
-        assert "path_label" in batch
-        assert batch["path_label"].shape == (2,)
-        assert int(batch["path_label"][0].item()) == 0
-        assert int(batch["path_label"][1].item()) == 4
-
-    def test_collate_handles_expanded_regression(self) -> None:
-        samples = [
-            _make_sample(regression_targets={
-                "primary_return": 0.001, "return_h5": 0.0005,
-                "mfe": 0.003, "mae": -0.002,
-            }),
-            _make_sample(regression_targets={
-                "primary_return": -0.001, "return_h5": -0.0003,
-                "mfe": 0.002, "mae": -0.004,
-            }),
-        ]
-        batch = collate_training_samples(samples)
-        reg = batch["regression_targets"]
-        assert "return_h5" in reg
-        assert "mfe" in reg
-        assert "mae" in reg
-        assert reg["return_h5"].shape == (2,)
 
 
 # ---------------------------------------------------------------------------

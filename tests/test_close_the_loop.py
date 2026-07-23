@@ -36,7 +36,6 @@ from src.training.checkpoint_promotion import (
 )
 from src.training.replay_buffer import (
     DecisionObservation,
-    ObservationBuffer,
     append_observation,
     load_observations,
 )
@@ -169,10 +168,8 @@ class TestRetrainTriggerThresholds:
 class TestObservationStream:
     def test_jsonl_roundtrip(self, tmp_path: Path):
         path = tmp_path / "observations.jsonl"
-        buffer = ObservationBuffer(capacity=10)
-        buffer.add(_observation(0, 1.25, clamped=True))
-        buffer.add(_observation(1, -0.5, action=-1))
-        assert buffer.save(path) == 2
+        append_observation(path, _observation(0, 1.25, clamped=True))
+        append_observation(path, _observation(1, -0.5, action=-1))
 
         loaded = load_observations(path)
         assert len(loaded) == 2
@@ -192,12 +189,6 @@ class TestObservationStream:
 
     def test_missing_file_returns_empty(self, tmp_path: Path):
         assert load_observations(tmp_path / "nope.jsonl") == []
-
-    def test_buffer_is_bounded(self):
-        buffer = ObservationBuffer(capacity=5)
-        buffer.extend(_observation(i, 0.1) for i in range(20))
-        assert len(buffer) == 5
-        assert buffer.observations[0].decision_id == "dec-00015"
 
     def test_compute_outcome_metrics_excludes_flat(self):
         observations = [

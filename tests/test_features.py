@@ -1,7 +1,6 @@
 import torch
 
 from src.core.config import load_config
-from src.data.dataset import BarWindowDataset
 from src.data.historical_data import generate_synthetic_bars
 from src.features.feature_pipeline import FeaturePipeline
 
@@ -24,19 +23,16 @@ def test_feature_contract_is_consistent_across_training_backtest_and_runtime() -
     bars = generate_synthetic_bars("AAPL", 160)
 
     training_pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
-    dataset = BarWindowDataset(
-        {"AAPL": bars},
-        training_pipeline,
-        warmup_bars=config.runtime.warmup_bars,
-        horizon=config.training.forward_horizons[0],
-        label_epsilon=config.training.label_epsilon,
-    )
-    assert dataset.feature_contract is not None
+    # The training feature contract is a property of the pipeline+config, so
+    # source it straight from the pipeline (the retired BarWindowDataset only
+    # ever surfaced this same contract).
+    training_contract = training_pipeline.build(bars, symbol="AAPL").contract
+    assert training_contract is not None
 
     runtime_pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
     runtime_snapshot = runtime_pipeline.build(bars[:120], symbol="AAPL")
     backtest_pipeline = FeaturePipeline(config.features, device=torch.device("cpu"))
     backtest_snapshot = backtest_pipeline.build(bars[:140], symbol="AAPL")
 
-    dataset.feature_contract.assert_matches(runtime_snapshot.contract, context="runtime")
-    dataset.feature_contract.assert_matches(backtest_snapshot.contract, context="backtest")
+    training_contract.assert_matches(runtime_snapshot.contract, context="runtime")
+    training_contract.assert_matches(backtest_snapshot.contract, context="backtest")

@@ -117,17 +117,6 @@ class TestRuntimeService:
             svc._proc = None
             svc._started_at = None
 
-    def test_set_config_paths_blocked_while_running(self) -> None:
-        svc = RuntimeService()
-        fake = MagicMock()
-        fake.poll.return_value = None
-        svc._proc = fake  # type: ignore[assignment]
-        try:
-            with pytest.raises(ServiceError, match="while runtime is running"):
-                svc.set_config_paths(["configs/default.yaml"])
-        finally:
-            svc._proc = None
-
     def test_stop_when_not_running_is_safe(self) -> None:
         svc = RuntimeService()
         status = svc.stop()

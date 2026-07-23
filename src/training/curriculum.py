@@ -96,8 +96,7 @@ class AnchoredNegativeStore:
     Mirrors the ledger/replay-buffer JSONL patterns: append-friendly
     writes, torn/corrupt lines skipped on load.  ``append_new`` dedupes by
     ``decision_id``; the store is bounded at ``max_anchored`` rows with the
-    oldest entries dropped first (a snapshot rewrite, like
-    ``ObservationBuffer.save``).
+    oldest entries dropped first (a snapshot rewrite).
     """
 
     def __init__(self, path: str | Path, *, max_anchored: int = 5_000) -> None:

@@ -54,8 +54,6 @@ def _make_memory_aware_policy(
     pipeline: FeaturePipeline,
     *,
     enable_memory: bool,
-    conservative_thresholds: bool = False,
-    verbose_fusion: bool = False,
 ) -> MemoryAwarePolicy:
     """Thin shim around src.backtest.policy_factory.build_brain_memory_policy.
 
@@ -71,8 +69,6 @@ def _make_memory_aware_policy(
         bars_by_symbol=bars_by_symbol,
         pipeline=pipeline,
         enable_memory=enable_memory,
-        conservative_thresholds=conservative_thresholds,
-        verbose_fusion=verbose_fusion,
     )
 
 

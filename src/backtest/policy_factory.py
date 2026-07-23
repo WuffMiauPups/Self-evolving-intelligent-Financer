@@ -185,8 +185,6 @@ def build_brain_memory_policy(
     bars_by_symbol: dict[str, list[MarketBar]],
     pipeline: FeaturePipeline,
     enable_memory: bool = True,
-    conservative_thresholds: bool = False,
-    verbose_fusion: bool = False,
 ) -> MemoryAwarePolicy:
     """Construct a MemoryAwarePolicy wrapping a BrainPolicy.
 
@@ -199,10 +197,6 @@ def build_brain_memory_policy(
         (offline builds are the only legitimate writer).
       - Load the fingerprint-bound Platt calibrator next to the checkpoint
         when calibration is enabled.
-
-    ``conservative_thresholds`` and ``verbose_fusion`` are inert legacy
-    parameters kept for call-site compatibility; the decision-fusion layer
-    they configured was removed in the Great Simplification.
     """
     artifacts, _ = _resolve_artifacts(
         config, bars_by_symbol=bars_by_symbol, pipeline=pipeline
@@ -315,8 +309,6 @@ def build_brain_memory_policy(
         damping_min_neighbors=config.memory.damping_min_neighbors,
         damping_full_at_return=config.memory.damping_full_at_return,
     )
-    _ = conservative_thresholds  # parameter reserved; fusion layer removed
-    _ = verbose_fusion  # parameter reserved; fusion layer removed
     return policy
 
 
