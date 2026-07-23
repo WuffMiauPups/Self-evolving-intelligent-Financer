@@ -239,21 +239,3 @@ def rolling_mean_clipped(x: torch.Tensor, window: int) -> torch.Tensor:
         rolled[:prefix] = cumulative_means[:prefix]
         return rolled
     return cumulative_means
-
-
-def rolling_zscore(
-    value: torch.Tensor, window: int, *, epsilon: float
-) -> torch.Tensor:
-    """Rolling z-score of ``value[i]`` against its own ``window``-length
-    history.  ``(value[i] - rolling_mean[i]) / (rolling_std[i] + eps)``.
-    Partial-window positions are 0.
-    """
-    means = rolling_mean(value, window)
-    stds = rolling_std(value, window, unbiased=False)
-    n = value.numel()
-    if n == 0:
-        return torch.zeros(0, dtype=value.dtype, device=value.device)
-    output = (value - means) / (stds + epsilon)
-    if window > 1:
-        output[: min(window - 1, n)] = 0.0
-    return output

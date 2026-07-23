@@ -311,12 +311,6 @@ class CheckpointFile:
     registry_version_id: str = ""
     is_active: bool = False
 
-    @property
-    def display_name(self) -> str:
-        if self.tag:
-            return f"{self.path.name}  [{self.tag}]"
-        return self.path.name
-
 
 class ServiceError(Exception):
     """Operator-friendly error raised by services. The GUI should display the

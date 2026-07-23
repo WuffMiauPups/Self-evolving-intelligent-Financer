@@ -9,7 +9,6 @@ from torch import nn
 @dataclass(frozen=True)
 class TemporalEncoderOutput:
     embedding: torch.Tensor
-    activations: torch.Tensor
 
 
 class TemporalResidualBlock(nn.Module):
@@ -104,4 +103,4 @@ class MarketTemporalCNN(nn.Module):
         activations = self.blocks(temporal_tensor)
         pooled = self.pool(activations)
         embedding = self.projection(pooled)
-        return TemporalEncoderOutput(embedding=embedding, activations=activations)
+        return TemporalEncoderOutput(embedding=embedding)

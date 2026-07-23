@@ -26,8 +26,3 @@ class HealthState:
         self.blocked_at = timestamp
         self.blocked_details = details or {}
 
-    def restore_trading(self) -> None:
-        self.safe_to_trade = True
-        self.blocked_reason_code = None
-        self.blocked_at = None
-        self.blocked_details = {}

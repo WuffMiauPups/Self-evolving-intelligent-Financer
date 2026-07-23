@@ -97,16 +97,6 @@ class BrainTradingModel(nn.Module):
         if getattr(config, "return_head_horizons", None):
             self.return_heads = ReturnHeads(head_input_dim, list(config.return_head_horizons))
 
-    def initial_memory_state(
-        self,
-        batch_size: int,
-        *,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        """Return an empty memory state (kept for backward compat — GRU removed)."""
-        return torch.empty(batch_size, 0, device=device, dtype=dtype)
-
     def forward(
         self,
         *,
@@ -162,7 +152,7 @@ class BrainTradingModel(nn.Module):
             flat = full_features
 
         hidden = self.backbone(flat)
-        policy_output = self.policy_head(hidden, torch.ones(batch_size, 1, device=hidden.device, dtype=hidden.dtype))
+        policy_output = self.policy_head(hidden)
         value = self.value_head(hidden)
         risk_predictions = self.risk_head(hidden) if self.risk_head is not None else None
         horizon_returns = self.return_heads(hidden) if self.return_heads is not None else None

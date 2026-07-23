@@ -79,10 +79,6 @@ class RuntimeService:
             self._config_paths = list(paths) if paths else list(_DEFAULT_PAPER_CONFIGS)
             self._cached_config_summary = None
 
-    def get_config_paths(self) -> list[str]:
-        with self._lock:
-            return list(self._config_paths)
-
     def preview_config(self) -> dict[str, object]:
         """Load+validate currently selected config and return a UI summary."""
         with self._lock:

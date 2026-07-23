@@ -52,18 +52,6 @@ RESULTS_DIR = Path("experiments")
 BASELINE_EXPERIMENTS = {"buy_and_hold", "momentum_baseline", "mean_reversion"}
 
 
-def list_available_experiments() -> list[str]:
-    """Return sorted names of available experiment presets."""
-    presets: list[str] = []
-    if EXPERIMENTS_DIR.exists():
-        for yaml_file in sorted(EXPERIMENTS_DIR.glob("*.yaml")):
-            presets.append(yaml_file.stem)
-    # Add non-config-based baselines
-    for name in sorted(BASELINE_EXPERIMENTS):
-        if name not in presets:
-            presets.append(name)
-    return presets
-
 
 def _load_bars(
     config: AppConfig,

@@ -31,7 +31,6 @@ class ReconciliationResult:
     issues: list[ReconciliationIssue]
     hydrated_positions: dict[str, PositionState] = field(default_factory=dict)
     hydrated_open_orders: list[OrderState] = field(default_factory=list)
-    synchronized_at: datetime = field(default_factory=utc_now)
 
     def summary(self) -> dict[str, Any]:
         return {

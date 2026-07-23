@@ -841,12 +841,6 @@ class FeaturePipeline:
         names, tensor = self._build_temporal_tensor(bars_tensor)
         return names, tensor
 
-    def infer_branch_dimensions(self, feature_names: list[str]) -> dict[str, int]:
-        return {
-            branch_name: len(self._match_features(feature_names, prefixes))
-            for branch_name, prefixes in self._effective_branch_prefixes().items()
-        }
-
     def _assign_branch_inputs(
         self,
         feature_names: list[str],

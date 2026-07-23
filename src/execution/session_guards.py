@@ -93,5 +93,3 @@ class SessionGuard:
             details={"clock_open": None if broker_clock is None else broker_clock.get("is_open")},
         )
 
-    def reset_symbol(self, symbol: str) -> None:
-        self.last_timestamp_by_symbol.pop(symbol, None)

@@ -89,19 +89,3 @@ def get_live_equity_series(
     )
 
 
-def get_backtest_equity_series(label: str = "") -> EquitySeries:
-    """Placeholder for the backtest equity curve.
-
-    Backtest equity curves aren't currently persisted in a structured form
-    that this service can consume. The Backtest tab can call this and get
-    an empty series with an honest note instead of fake data.
-    """
-    return EquitySeries(
-        points=[],
-        source="none",
-        label=label or "Backtest equity",
-        note=(
-            "Backtest equity curve persistence is not yet wired. "
-            "Live runtime equity is the only structured source today."
-        ),
-    )

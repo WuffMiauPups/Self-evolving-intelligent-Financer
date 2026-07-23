@@ -31,7 +31,6 @@ class StartupReport:
     using_mock: bool
     checks: list[StartupCheckResult]
     account: dict[str, Any] | None = None
-    clock: dict[str, Any] | None = None
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -143,7 +142,6 @@ def run_startup_checks(
             using_mock=using_mock,
             checks=checks,
             account=None,
-            clock=None,
         )
 
     raw_account_status = account_snapshot.get("status", "")
@@ -235,5 +233,4 @@ def run_startup_checks(
         using_mock=using_mock,
         checks=checks,
         account=account_snapshot,
-        clock=clock_snapshot,
     )

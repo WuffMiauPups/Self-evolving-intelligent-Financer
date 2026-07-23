@@ -248,9 +248,6 @@ class CacheManifest:
             key=lambda c: c.start,
         )
 
-    def total_rows_for_symbol(self, symbol: str, timeframe: str) -> int:
-        return sum(c.row_count for c in self.coverage_for_symbol(symbol, timeframe))
-
     def filter_uncovered(self, chunks: list[FetchChunk]) -> list[FetchChunk]:
         """Return only chunks not yet in the manifest."""
         return [c for c in chunks if not self.is_covered(c.chunk_id)]

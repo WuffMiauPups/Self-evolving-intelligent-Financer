@@ -117,9 +117,6 @@ class PerturbationReport:
     points: list[PerturbationPoint]
     observations: list[str] = field(default_factory=list)
 
-    def metric_curve(self, name: str) -> list[tuple[float, float]]:
-        return [(p.signal_r2, float(p.metrics.get(name, 0.0))) for p in self.points]
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "points": [

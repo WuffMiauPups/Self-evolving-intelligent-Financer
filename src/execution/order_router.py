@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import re
 import time
 from dataclasses import dataclass, field
@@ -207,10 +206,6 @@ class OrderRouter:
         if intent.paper or not self.allow_live or self.broker_client is None:
             return self.paper_executor.execute(intent)
         return self._submit_live_order(intent)
-
-    async def async_route(self, intent: OrderIntent) -> ExecutionResult:
-        """Non-blocking wrapper for async callers. Runs route() in a thread."""
-        return await asyncio.to_thread(self.route, intent)
 
     def _submit_live_order(self, intent: OrderIntent) -> ExecutionResult:
         attempt = 0

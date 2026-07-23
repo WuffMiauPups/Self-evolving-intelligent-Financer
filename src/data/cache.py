@@ -238,9 +238,6 @@ class HistoricalBarCache:
         normalized_timeframe = timeframe.replace(" ", "")
         return self.root / f"{normalized_symbol}_{normalized_timeframe}.pt"
 
-    def exists(self, symbol: str, timeframe: str) -> bool:
-        return self.path_for(symbol, timeframe).exists()
-
     def load(self, symbol: str, timeframe: str) -> HistoricalCacheRecord | None:
         path = self.path_for(symbol, timeframe)
         if not path.exists():

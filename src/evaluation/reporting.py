@@ -8,53 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.evaluation.walk_forward import FoldResult, WalkForwardResult
+from src.evaluation.walk_forward import WalkForwardResult
 
 logger = logging.getLogger(__name__)
-
-
-def aggregate_fold_metrics(
-    fold_results: list[FoldResult],
-) -> dict[str, dict[str, float]]:
-    """Compute per-metric aggregate statistics across folds.
-
-    Returns {metric: {mean, std, median, min, max, count, profitable_folds}}.
-    """
-    import math
-    import statistics
-
-    if not fold_results:
-        return {}
-
-    all_keys: set[str] = set()
-    for fr in fold_results:
-        all_keys.update(fr.test_metrics.keys())
-
-    aggregate: dict[str, dict[str, float]] = {}
-    for key in sorted(all_keys):
-        values = [
-            fr.test_metrics[key]
-            for fr in fold_results
-            if key in fr.test_metrics and math.isfinite(fr.test_metrics[key])
-        ]
-        if not values:
-            continue
-        mean_val = sum(values) / len(values)
-        std_val = statistics.stdev(values) if len(values) > 1 else 0.0
-        median_val = statistics.median(values)
-        aggregate[key] = {
-            "mean": mean_val,
-            "std": std_val,
-            "median": median_val,
-            "min": min(values),
-            "max": max(values),
-            "count": float(len(values)),
-        }
-        if key == "total_return":
-            aggregate[key]["profitable_folds"] = float(sum(1 for v in values if v > 0))
-            aggregate[key]["profitable_pct"] = aggregate[key]["profitable_folds"] / len(values)
-
-    return aggregate
 
 
 def build_comparison_table(

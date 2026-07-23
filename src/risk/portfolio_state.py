@@ -15,10 +15,6 @@ class PositionState:
     market_price: float
     entry_time: datetime
 
-    @property
-    def notional(self) -> float:
-        return abs(self.qty * self.market_price)
-
 
 @dataclass
 class PortfolioState:
@@ -34,10 +30,6 @@ class PortfolioState:
     @property
     def aggregate_notional(self) -> float:
         return sum(abs(p.qty * p.market_price) for p in self.positions.values())
-
-    @property
-    def leverage_ratio(self) -> float:
-        return self.aggregate_notional / max(self.equity, 1.0)
 
     def rolling_drawdown(self, window: int = 100) -> float:
         if len(self.pnl_history) < 2:

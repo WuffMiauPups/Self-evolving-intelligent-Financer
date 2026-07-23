@@ -259,9 +259,6 @@ class HistoricalDataService:
             reports.append(report)
         return bars_by_symbol, reports
 
-    def cache_path_for(self, symbol: str, timeframe: str) -> Path:
-        return self.cache.path_for(symbol, timeframe)
-
     def _build_record(
         self,
         symbol: str,

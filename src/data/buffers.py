@@ -95,11 +95,6 @@ class BarBuffer:
         self.append(bar)
         return "appended"
 
-    def clear(self) -> None:
-        self._bars.clear()
-        self._count = 0
-        self._tensor.zero_()
-
     # ------------------------------------------------------------------
     # Access
     # ------------------------------------------------------------------

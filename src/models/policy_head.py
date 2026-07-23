@@ -47,12 +47,7 @@ class PolicyHead(nn.Module):
             self.confidence = nn.Linear(hidden_dim, 1)
             self.target_fraction = nn.Linear(hidden_dim, 1)
 
-    def forward(self, inputs: torch.Tensor, soma_activation: torch.Tensor | None = None) -> PolicyOutput:
-        # ``soma_activation`` parameter kept for backward compatibility but
-        # ignored: the soma aggregator was removed in the Great Simplification
-        # and multiplying by it caused FP16 underflow in inference. Confidence
-        # is now always decoupled from that (dead) signal.
-        del soma_activation
+    def forward(self, inputs: torch.Tensor) -> PolicyOutput:
         hidden = self.backbone(inputs)
         action_logits = self.action(hidden)
         if self.decoupled:

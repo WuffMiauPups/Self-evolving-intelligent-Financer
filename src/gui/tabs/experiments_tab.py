@@ -47,7 +47,7 @@ from src.gui.widgets import (
     StatusBadge,
 )
 from src.gui.workers import CallableWorker
-from src.gui_services.experiment_service import list_available_experiments, run_experiment_suite
+from src.gui_services.experiment_service import run_experiment_suite
 
 # Experiments grouped by category for the selection panel
 _EXPERIMENT_GROUPS = {

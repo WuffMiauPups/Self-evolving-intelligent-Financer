@@ -43,10 +43,6 @@ from src.strategies.base import TradingPolicy
 from src.strategies.brain_policy import BrainPolicy
 from src.strategies.memory_policy import MemoryAwarePolicy
 
-# Performance constants — kept as fallback for call sites that run before
-# config is available. The canonical value lives in RuntimeConfig.max_parallel_workers.
-COLD_START_MAX_WORKERS = 8
-
 
 def make_runtime_session_id(started_at: datetime) -> str:
     """Session token used in client_order_ids: ``YYYYMMDD`` + pid nonce.

@@ -40,18 +40,6 @@ class OrderJournal:
         except Exception:
             pass
 
-    def read_all(self) -> list[dict]:
-        """Read all entries for analysis."""
-        if not self.path.exists():
-            return []
-        entries = []
-        with self.path.open("r", encoding="utf-8") as fp:
-            for line in fp:
-                line = line.strip()
-                if line:
-                    entries.append(json.loads(line))
-        return entries
-
     def _maybe_rotate(self) -> None:
         try:
             if not self.path.exists() or self.path.stat().st_size < self.max_bytes:

@@ -237,9 +237,6 @@ class CheckpointsTab(QWidget):
                 self.files_table.setItem(r, c, QTableWidgetItem(text))
         self._on_selection_changed()  # reset action button state
 
-    def _reload_history(self) -> None:
-        self._render_history(list_history())
-
     def _render_history(self, history: list[CheckpointInfo]) -> None:
         self.table.setRowCount(len(history))
         for r, info in enumerate(history):
