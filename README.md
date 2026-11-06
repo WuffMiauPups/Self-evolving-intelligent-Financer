@@ -1,5 +1,7 @@
 # SEIF Trading Brain Foundation
 
+Machine Learning Framework for training and evaluation of Machine-Learning models using real market data.
+
 SEIF is a research-first trading framework for Alpaca that keeps PyTorch at the center of feature processing, model inference, and training. It is paper-trading-first, safe by default, and built so learned components can never bypass deterministic risk controls.
 
 This repository is not a claim of profitability. It is a foundation for controlled research, honest evaluation, and observability.
